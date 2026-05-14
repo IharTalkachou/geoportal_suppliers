@@ -3,18 +3,17 @@ import pandas as pd
 from sqlalchemy import create_engine
 import logging
 
-# Настройка логирования
+# Настройка
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# 🔧 КОНФИГУРАЦИЯ
 DB_USER = "app_user_dev"
-DB_PASS = "app_user_pass"  # <--- ВСТАВЬТЕ ПАРОЛЬ
+DB_PASS = "app_user_pass"
 DB_HOST = "localhost"
 DB_PORT = "5432"
 DB_NAME = "geodata_suppliers_dev"
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# Порядок загрузки (строго по зависимостям FK)
+# порядок загрузки по зависимостям FK
 TABLE_ORDER = [
     "suppliers", "contacts", "ref_statuses", "ref_micro_statuses",
     "datasets", "info_types", "stages",
@@ -22,13 +21,12 @@ TABLE_ORDER = [
     "project_stages", "item_stages"
 ]
 
-# 🔑 ЯВНЫЙ МАППИНГ КОЛОНОК: {имя_в_csv} : {имя_в_бд}
-# Если колонка есть в БД, но нет в этом словаре - она будет пропущена.
-# Если колонка есть в CSV, но нет в этом словаре - она будет пропущена.
-# Это гарантирует, что мы вставляем только то, что контролируем.
+# маппинг колонок: {имя_в_csv} : {имя_в_бд}
+# если колонка есть в БД, но нет в этом словаре - она будет пропущена,
+# если колонка есть в CSV, но нет в этом словаре - она будет пропущена,
 COLUMN_MAP = {
     "suppliers": {
-        "SupplierID": "supplier_id",      # PK, будет проигнорирован при вставке (SERIAL)
+        "SupplierID": "supplier_id",      
         "SupplierName": "supplier_name",
         "SupplierAddress": "supplier_address",
         "SupplierEmail": "supplier_email",
@@ -39,8 +37,8 @@ COLUMN_MAP = {
         "SupplierLogo": "supplier_logo"
     },
     "contacts": {
-        "ContactID": "contact_id",        # PK, игнорируется
-        "SupplierID": "supplier_id",      # FK
+        "ContactID": "contact_id",        
+        "SupplierID": "supplier_id",      
         "FullName": "full_name",
         "Position": "position",
         "Email": "email",
@@ -48,7 +46,7 @@ COLUMN_MAP = {
         "Notes": "notes"
     },
     "ref_statuses": {
-        "StatusID": "status_id",          # PK
+        "StatusID": "status_id",         
         "StatusCode": "status_code",
         "StatusName": "status_name",
         "SortOrder": "sort_order"
@@ -68,7 +66,7 @@ COLUMN_MAP = {
     },
     "info_types": {
         "InfoID": "info_id",
-        "DatasetID": "dataset_id",        # FK
+        "DatasetID": "dataset_id",       
         "InfoName": "info_name",
         "Type": "type",
         "Format": "format",
@@ -135,7 +133,7 @@ def migrate():
         for table in TABLE_ORDER:
             file_path = os.path.join(csv_dir, f"{table}.csv")
             if not os.path.exists(file_path):
-                # Пробуем найти файл с заглавной буквы, если не нашли (на случай, если не переименовали)
+                # ищу файл с заглавной буквы, если не нашелся
                 file_path_cap = os.path.join(csv_dir, f"{table.capitalize()}.csv")
                 if os.path.exists(file_path_cap):
                     file_path = file_path_cap
@@ -145,45 +143,44 @@ def migrate():
 
             logging.info(f"⏳ Загрузка таблицы: {table}")
             
-            # Читаем CSV с вашей кодировкой и разделителем
+            # читать CSV
             df = pd.read_csv(file_path, sep=';', encoding='cp1251', keep_default_na=True)
             
-            # 🔧 1. Переименование колонок по словарю
+            # 1. переименование колонок по словарю
             if table in COLUMN_MAP:
-                # Инвертируем словарь для удобного поиска: {имя_в_бд: имя_в_csv}
+                # инвертированный словарь для удобного поиска: {имя_в_бд: имя_в_csv}
                 reverse_map = {v: k for k, v in COLUMN_MAP[table].items()}
-                # Оставляем в df только те колонки, которые есть в словаре, и переименовываем их
+                
+                # в df остаются те колонки, которые есть в словаре, 
                 cols_to_keep = [k for k in COLUMN_MAP[table].keys() if k in df.columns]
+                
+                # колонки из словаря переименовать
                 df = df[cols_to_keep].rename(columns=COLUMN_MAP[table])
                 
-                # 🔧 2. Исключаем первичные ключи (SERIAL), чтобы PG сам их сгенерировал
+                # первичные ключи (SERIAL) удалить, чтобы postgres сам их сгенерировал
                 pk_col = f"{table}_id"
                 if pk_col in df.columns:
                     df = df.drop(columns=[pk_col])
-                    logging.debug(f"   ↪ Исключён автоинкремент {pk_col}")
+                    logging.debug(f"   Исключён автоинкремент {pk_col}")
 
-            # 🔧 3. Очистка данных: пустые строки -> NULL
+            # 2. очистка, пустые строки -> NULL
             df = df.replace(["", "NULL", "  "], None)
 
-            # 🔧 4. Обработка дат
+            # 3 даты
             date_cols = [c for c in df.columns if 'date' in c.lower() or c.lower().endswith('start') or c.lower().endswith('end')]
             for col in date_cols:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
 
-            # 🔧 5. Преобразование булевых значений (Access Yes/No → PostgreSQL BOOLEAN)
-            # Access хранит: -1 = True, 0 = False. Иногда 1 = True.
-            # Явно указываем колонки-флаги для каждой таблицы
+            # 4. преобразование логических значений (Access Yes/No → PostgreSQL BOOLEAN)
+            # Access хранит: True 1 или -1, 0 для False. Явно указываются колонки-флаги для каждой таблицы
             bool_columns = {
                 "datasets": ["is_mandatory", "is_basic"],
-                # При необходимости добавьте другие таблицы и колонки:
-                # "projects": ["is_active"],
             }
             
             if table in bool_columns:
                 for col in bool_columns[table]:
                     if col in df.columns and df[col].dtype in ['int64', 'int32', 'object']:
-                        # Маппинг значений: -1/1/'1'/'-1' → True, 0/'0' → False
                         df[col] = df[col].map(
                             lambda x: True if x in [1, -1, '1', '-1', True] 
                             else (False if x in [0, '0', False] else None),
@@ -191,20 +188,19 @@ def migrate():
                         )
 
             if df.empty:
-                logging.warning(f"⚠️ Таблица {table} пуста после обработки. Пропуск.")
+                logging.warning(f"Таблица {table} пуста после обработки, пропуск")
                 continue
                 
             try:
-                # method='multi' ускоряет вставку
                 df.to_sql(table, conn, if_exists='append', index=False, method='multi')
-                logging.info(f"✅ {table}: загружено {len(df)} строк.")
+                logging.info(f"{table}: загружено {len(df)} строк.")
             except Exception as e:
-                logging.error(f"❌ Ошибка в {table}: {e}")
+                logging.error(f"Ошибка в {table}: {e}")
                 # Выводим первые строки данных для отладки, если ошибка
                 logging.error(f"   Данные: {df.head(1).to_dict()}")
                 raise 
 
-    logging.info("🎉 Миграция успешно завершена!")
+    logging.info("Перенос успешно завершен")
 
 if __name__ == "__main__":
     migrate()

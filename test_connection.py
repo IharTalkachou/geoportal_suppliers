@@ -10,18 +10,13 @@ DB_CONFIG = {
 }
 
 try:
-    print(f"🔌 Попытка подключения к {DB_CONFIG['host']}:{DB_CONFIG['port']} как {DB_CONFIG['user']}...")
+    print(f"Попытка подключения к {DB_CONFIG['host']}:{DB_CONFIG['port']} как {DB_CONFIG['user']}...")
     conn = psycopg2.connect(**DB_CONFIG)
-    print("✅ УСПЕХ: Подключение установлено!")
+    print("Подключение установлено")
     cur = conn.cursor()
     cur.execute("SELECT current_user, current_database();")
     result = cur.fetchone()
-    print(f"   Вы подключены как: {result[0]}, база: {result[1]}")
+    print(f"   подключены как: {result[0]}, база: {result[1]}")
     conn.close()
 except Exception as e:
-    print(f"❌ ОШИБКА: {e}")
-    print("\n💡 Возможные причины:")
-    print("   1. Неверный пароль или имя пользователя")
-    print("   2. Пользователь не имеет права CONNECT на базу")
-    print("   3. PostgreSQL не слушает локальные подключения (проверьте pg_hba.conf)")
-    print("   4. Служба PostgreSQL не запущена")
+    print(f"Ошибка: {e}")
