@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/settings.json
+.vscode/*.xml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database & Secrets (никогда не коммитим!)
+*.dump
+*.sql.bak
+credentials.json
