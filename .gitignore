@@ -21,3 +21,4 @@ Thumbs.db
 *.dump
 *.sql.bak
 credentials.json
+csv_export/

@@ -1,49 +1,76 @@
 -- 1. СПРАВОЧНИКИ
 CREATE TABLE suppliers (
     supplier_id SERIAL PRIMARY KEY,
-    supplier_name VARCHAR(255) NOT NULL
+    supplier_name VARCHAR(255) NOT NULL,
+    supplier_address TEXT,
+    supplier_email VARCHAR(255),
+    supplier_phone VARCHAR(50),
+    supplier_website VARCHAR(255),
+    supplier_manager VARCHAR(255),
+    supplier_notes TEXT,
+    supplier_logo TEXT
 );
 
 CREATE TABLE contacts (
     contact_id SERIAL PRIMARY KEY,
-    full_name VARCHAR(255) NOT NULL
+    supplier_id INTEGER REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
+    full_name VARCHAR(255) NOT NULL,
+    position VARCHAR(255),
+    email VARCHAR(255),
+    phone VARCHAR(50),
+    notes TEXT
 );
+CREATE INDEX idx_contacts_supplier ON contacts(supplier_id);
 
 CREATE TABLE ref_statuses (
     status_id SERIAL PRIMARY KEY,
-    status_name VARCHAR(50) NOT NULL
+    status_code VARCHAR(50),
+    status_name TEXT NOT NULL,
+    sort_order INTEGER
 );
 
 CREATE TABLE ref_micro_statuses (
     micro_status_id SERIAL PRIMARY KEY,
-    micro_status_name VARCHAR(50) NOT NULL
+    micro_status_code VARCHAR(50),
+    micro_status_name TEXT NOT NULL,
+    sort_order INTEGER
 );
 
 CREATE TABLE datasets (
     dataset_id SERIAL PRIMARY KEY,
-    dataset_name VARCHAR(255) NOT NULL
+    dataset_name TEXT NOT NULL,
+    is_mandatory BOOLEAN DEFAULT FALSE,
+    is_basic BOOLEAN DEFAULT FALSE,
+    dataset_icon TEXT
 );
 
 CREATE TABLE info_types (
     info_id SERIAL PRIMARY KEY,
-    info_name VARCHAR(255) NOT NULL
+    dataset_id INTEGER REFERENCES datasets(dataset_id) ON DELETE RESTRICT,
+    info_name TEXT NOT NULL,
+    type VARCHAR(100),
+    format VARCHAR(100),
+    update VARCHAR(100),
+    update_period VARCHAR(100)
 );
+CREATE INDEX idx_info_types_dataset ON info_types(dataset_id);
 
 CREATE TABLE stages (
     stage_id SERIAL PRIMARY KEY,
-    stage_name VARCHAR(255) NOT NULL,
+    stage_name TEXT NOT NULL,
+    stage_order INTEGER NOT NULL,
+    duration_days INTEGER,
     track_category VARCHAR(50) NOT NULL,
     stage_type VARCHAR(20) NOT NULL CHECK (stage_type IN ('Веха', 'Задача')),
-    stage_order INTEGER NOT NULL,
-    duration_days INTEGER
+    stage_color VARCHAR(20)
 );
 CREATE INDEX idx_stages_cat_type_order ON stages(track_category, stage_type, stage_order);
 
--- 2. ОПЕРАЦИОННЫЕ
+-- 2. ОПЕРАЦИОННЫЕ ТАБЛИЦЫ
 CREATE TABLE projects (
     project_id SERIAL PRIMARY KEY,
     supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
-    project_name VARCHAR(255) NOT NULL,
+    project_name TEXT NOT NULL,
     main_contact_id INTEGER REFERENCES contacts(contact_id) ON DELETE SET NULL,
     status INTEGER REFERENCES ref_statuses(status_id) ON DELETE RESTRICT,
     notes TEXT
@@ -73,7 +100,7 @@ CREATE TABLE project_stages (
     planned_end DATE,
     actual_start DATE,
     actual_end DATE,
-    comments VARCHAR(500),
+    comments TEXT,
     document_url TEXT
 );
 CREATE INDEX idx_pstages_project ON project_stages(project_id);
@@ -89,7 +116,7 @@ CREATE TABLE item_stages (
     planned_end DATE,
     actual_start DATE,
     actual_end DATE,
-    comments VARCHAR(500),
+    comments TEXT,
     document_url TEXT
 );
 CREATE INDEX idx_istages_item ON item_stages(item_id);
