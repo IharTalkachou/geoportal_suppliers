@@ -26,9 +26,14 @@ def render_stages_tab(session):
     stages = query_db("SELECT stage_id, stage_name, stage_type, duration_days FROM stages ORDER BY stage_order")
     micro_statuses = query_db("SELECT micro_status_id, micro_status_name FROM ref_micro_statuses")
 
-    # Маппинги для UI
-    entity_map = {row["id"]: f"{row['project_name']} / {row['dataset_name']}" if row['dataset_name'] else row['project_name'] for _, row in entities.iterrows()}
+    if stages.empty:
+        st.error("❌ Запрос вернул 0 строк. Кэш не сброшен или подключение не проходит.")
+        st.stop()
+
     stage_map = {row["stage_id"]: {"name": row["stage_name"], "type": row["stage_type"], "duration": row["duration_days"] or 0} for _, row in stages.iterrows()}
+    stage_options = list(stage_map.keys())
+
+    entity_map = {row["id"]: f"{row['project_name']} / {row['dataset_name']}" if row['dataset_name'] else row['project_name'] for _, row in entities.iterrows()}
 
     st.markdown("---")
     st.subheader("➕ Регистрация этапа")
@@ -36,7 +41,7 @@ def render_stages_tab(session):
     with st.form("stage_reg_form"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            sel_entity = st.selectbox("Объект", options=entity_map.keys(), format_func=lambda x: entity_map[x])
+            sel_entity = st.selectbox("Объект", options=list(entity_map.keys()), format_func=lambda x: entity_map[x])
             sel_stage = st.selectbox("Стадия", options=stage_map.keys(), format_func=lambda x: stage_map[x]["name"])
         with col2:
             sel_micro = st.selectbox("Микростатус", options=micro_statuses["micro_status_id"], format_func=lambda x: micro_statuses[micro_statuses["micro_status_id"]==x]["micro_status_name"].values[0])

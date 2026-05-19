@@ -4,10 +4,9 @@ from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 import os
 from ui.suppliers_tab import render_suppliers_tab
-from ui.projects_tab import render_projects_tab
-from ui.project_items_tab import render_project_items_tab
-from ui.stages_tracking import render_stages_tab
 from ui.analytics_tab import render_analytics_tab
+from ui.datasets_tab import render_datasets_tab
+from ui.project_dashboard import render_project_dashboard
 
 load_dotenv()
 DB_URL = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
@@ -19,19 +18,16 @@ st.title("🗺️ Управление поставщиками простран
 if "current_tab" not in st.session_state:
     st.session_state.current_tab = "📁 Поставщики"
 
-tabs = st.tabs(["📁 Поставщики", "👥 Контакты", "📂 Проекты", "⚙️ Этапы", "📊 Аналитика"])
+tabs = st.tabs(["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"])
 
 with tabs[0]:
     with Session(engine) as session:
         render_suppliers_tab(session)
-with tabs[1]: st.info("Раздел 'Контакты' в разработке")
+with tabs[1]: 
+    with Session(engine) as session:
+        render_datasets_tab(session)  
 with tabs[2]:
     with Session(engine) as session:
-        render_projects_tab(session)
-        st.divider()
-        render_project_items_tab(session)
+        render_project_dashboard(session)      
 with tabs[3]:
-    with Session(engine) as session:
-        render_stages_tab(session)
-with tabs[4]:
     render_analytics_tab()
