@@ -4,27 +4,24 @@ from sqlalchemy import text
 from datetime import date, timedelta
 from config.cache import query_db, clear_cache
 
-def render_bureaucracy_tab(session, project_id):
+def render_bureaucracy_tab(session, project_id, user_role="user"):
     st.subheader("📜 Бюрократия (Документарные этапы)")
     st.caption("⚙️ Итерация и плановые даты считаются автоматически. Факт. начало закрывает предыдущий этап.")
+    
+    is_readonly = (user_role == "user")
 
-    # 📖 Справочник этапов (только документарный трек, сортировка по order)
+    # 📖 Справочник этапов
     stages = query_db("""
         SELECT stage_id, stage_name, stage_type, duration_days, stage_order
-        FROM stages 
-        WHERE track_category = '1. Документарный'
-        ORDER BY stage_order
+        FROM stages WHERE track_category = '1. Документарный' ORDER BY stage_order
     """)
     micro_statuses = query_db("SELECT micro_status_id, micro_status_name FROM ref_micro_statuses ORDER BY micro_status_id")
 
     stage_map = {
         row["stage_name"]: {
-            "id": row["stage_id"],
-            "type": row["stage_type"],
-            "duration": int(row["duration_days"] or 0),
-            "order": row["stage_order"]
-        }
-        for _, row in stages.iterrows()
+            "id": row["stage_id"], "type": row["stage_type"],
+            "duration": int(row["duration_days"] or 0), "order": row["stage_order"]
+        } for _, row in stages.iterrows()
     }
     micro_map = dict(zip(micro_statuses["micro_status_name"], micro_statuses["micro_status_id"]))
     completed_status_id = micro_map.get("Выполнено")
@@ -41,138 +38,132 @@ def render_bureaucracy_tab(session, project_id):
         ORDER BY s.stage_order, ps.iteration_count
     """, {"pid": project_id})
 
-    # ⚙️ Конфиг редактора
-    col_config = {
-        "stage_name": st.column_config.SelectboxColumn("Этап", options=list(stage_map.keys()), required=True),
-        "micro_status_name": st.column_config.SelectboxColumn("Микростатус", options=list(micro_map.keys()), required=True),
-        "iteration_count": st.column_config.NumberColumn("🔒 Итерация", format="%d", disabled=True),
-        "planned_start": st.column_config.DateColumn("План. начало", required=True),
-        "planned_end": st.column_config.DateColumn("🔒 План. конец", disabled=True),
-        "actual_start": st.column_config.DateColumn("Факт. начало"),
-        "actual_end": st.column_config.DateColumn("Факт. окончание"),
-        "comments": st.column_config.TextColumn("Комментарий"),
-        "stage_progress_id": st.column_config.NumberColumn("ID", disabled=True)
-    }
+    # 🔐 Таблица ВСЕГДА в режиме просмотра
+    st.dataframe(ps_df[["stage_name", "micro_status_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
+                 use_container_width=True, hide_index=True,
+                 column_config={
+                     "stage_name": "Этап", "micro_status_name": "Микростатус",
+                     "iteration_count": st.column_config.NumberColumn("Итерация", format="%d"),
+                     "planned_start": "План. начало", "planned_end": "План. конец",
+                     "actual_start": "Факт. начало", "actual_end": "Факт. окончание", "comments": "Комментарий"
+                 })
+    
+    if is_readonly:
+        return
 
-    with st.form("buro_editor_form"):
-        edited_df = st.data_editor(
-            ps_df, key="buro_editor", hide_index=True, use_container_width=True,
-            num_rows="dynamic", column_config=col_config, disabled=["stage_progress_id"],
-            column_order=["stage_name", "micro_status_name", "iteration_count", "planned_start", 
-                         "planned_end", "actual_start", "actual_end", "comments"]  # 🔹 ID скрыт из UI
-        )
+    # 🔽 Реактивный CRUD (без st.form)
+    with st.expander("➕ Добавить / ✏️ Редактировать этап"):
+        # 1. Выбор существующего или нового
+        item_options = ["(Добавить новый)"]
+        item_ids_map = {}
+        for _, row in ps_df.iterrows():
+            label = f"{row['stage_name']} (Ит. {int(row['iteration_count'])})"
+            item_options.append(label)
+            item_ids_map[label] = row["stage_progress_id"]
 
-        orig_ids = set(ps_df["stage_progress_id"].dropna().astype(int))
-        curr_ids = set(edited_df["stage_progress_id"].dropna().astype(int))
-        deleted_ids = orig_ids - curr_ids
+        sel_item = st.selectbox("Выберите этап:", item_options, key="buro_sel")
+        is_editing = sel_item != "(Добавить новый)"
 
-        if st.form_submit_button("💾 Сохранить этапы", type="primary"):
-            try:
-                if deleted_ids:
-                    session.execute(text("DELETE FROM project_stages WHERE stage_progress_id IN :ids"), {"ids": tuple(deleted_ids)})
+        # 🔍 Авто-подстановка значений при выборе
+        if is_editing:
+            curr = ps_df[ps_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
+            st.session_state["buro_stage"] = curr["stage_name"]
+            st.session_state["buro_status"] = curr["micro_status_name"]
+            st.session_state["buro_iter"] = int(curr["iteration_count"])
+            st.session_state["buro_p_start"] = curr["planned_start"]
+            st.session_state["buro_a_start"] = curr["actual_start"]
+            st.session_state["buro_a_end"] = curr["actual_end"]
+            st.session_state["buro_comments"] = curr["comments"] if pd.notna(curr["comments"]) else ""
+        else:
+            if st.session_state.get("buro_sel_prev") != sel_item:
+                st.session_state["buro_stage"] = list(stage_map.keys())[0]
+                st.session_state["buro_status"] = list(micro_map.keys())[0]
+                st.session_state["buro_iter"] = 1
+                st.session_state["buro_p_start"] = None
+                st.session_state["buro_a_start"] = None
+                st.session_state["buro_a_end"] = None
+                st.session_state["buro_comments"] = ""
+        st.session_state["buro_sel_prev"] = sel_item
 
-                for _, row in edited_df.iterrows():
-                    pid = row.get("stage_progress_id")
-                    is_new = pd.isna(pid)
+        # 2. Поля ввода
+        col1, col2 = st.columns(2)
+        with col1:
+            stage_name = st.selectbox("Этап", list(stage_map.keys()), 
+                                      index=list(stage_map.keys()).index(st.session_state.get("buro_stage", list(stage_map.keys())[0])), key="buro_stage_in")
+            micro_status = st.selectbox("Микростатус", list(micro_map.keys()), 
+                                        index=list(micro_map.keys()).index(st.session_state.get("buro_status", list(micro_map.keys())[0])), key="buro_status_in")
+            st.number_input("🔒 Итерация", value=st.session_state.get("buro_iter", 1), disabled=True, key="buro_iter_in")
 
-                    stage_info = stage_map.get(row.get("stage_name"))
-                    if not stage_info:
-                        continue
+        with col2:
+            p_start = st.date_input("План. начало", value=st.session_state.get("buro_p_start"), key="buro_p_start_in")
+            a_start = st.date_input("Факт. начало", value=st.session_state.get("buro_a_start"), key="buro_a_start_in")
+            stage_type = stage_map[stage_name]["type"]
+            a_end = st.date_input("Факт. окончание", value=st.session_state.get("buro_a_end"), 
+                                  disabled=(stage_type == "Веха"), key="buro_a_end_in")
 
-                    micro_id = micro_map.get(row.get("micro_status_name"))
-                    
-                    def to_sql_date(val):
-                        if pd.isna(val) or val is None:
-                            return None
-                        if isinstance(val, date):
-                            return val
-                        if isinstance(val, pd.Timestamp):
-                            return val.date()
-                        try:
-                            return pd.to_datetime(val).date()
-                        except:
-                            return None
+        comments = st.text_area("Комментарий", value=st.session_state.get("buro_comments", ""), key="buro_comments_in")
 
-                    p_start_raw = row.get("planned_start")
-                    a_start_raw = row.get("actual_start")
-                    a_end_raw = row.get("actual_end")
-                    
-                    p_start = to_sql_date(p_start_raw)
-                    a_start = to_sql_date(a_start_raw)
-                    a_end = to_sql_date(a_end_raw)
-                    comment = row.get("comments") or ""
+        # 3. Кнопки действий
+        col_btn, col_del = st.columns([3, 1])
+        with col_btn:
+            if st.button("💾 Сохранить", type="primary", key="buro_save"):
+                stage_info = stage_map[stage_name]
+                micro_id = micro_map[micro_status]
 
-                    # 📅 Авто-расчёт планового окончания
-                    p_end = None
-                    if p_start is not None:
-                        if stage_info["type"] == "Веха":
-                            p_end = p_start
-                        else:
-                            p_end = p_start + timedelta(days=stage_info["duration"])
+                # 📅 Авто-расчёт планового окончания
+                p_end = None
+                if p_start is not None:
+                    p_end = p_start if stage_info["type"] == "Веха" else p_start + timedelta(days=stage_info["duration"])
 
-                    # 🔢 Авто-итерация
-                    iteration = 1
-                    if is_new:
-                        max_iter = session.execute(text("""
-                            SELECT COALESCE(MAX(iteration_count), 0) FROM project_stages
-                            WHERE project_id = :pid AND stage_id = :sid
-                        """), {"pid": project_id, "sid": stage_info["id"]}).scalar()
-                        iteration = max_iter + 1
-                    else:
-                        iteration = int(row.get("iteration_count", 1))
+                # 🔢 Авто-итерация
+                iter_val = int(st.session_state["buro_iter_in"]) if is_editing else (
+                    session.execute(text("SELECT COALESCE(MAX(iteration_count), 0) FROM project_stages WHERE project_id = :pid AND stage_id = :sid"), 
+                                    {"pid": project_id, "sid": stage_info["id"]}).scalar() + 1
+                )
 
-                    # 🎯 Авто-закрытие предыдущего этапа
-                    if is_new and a_start is not None and completed_status_id is not None:
-                        session.execute(text("""
-                            UPDATE project_stages 
-                            SET actual_end = :close_date, micro_status = :completed_id
-                            WHERE stage_progress_id = (
-                                SELECT ps.stage_progress_id FROM project_stages ps
-                                WHERE ps.project_id = :pid 
-                                  AND ps.actual_end IS NULL 
-                                ORDER BY (SELECT s.stage_order FROM stages s WHERE s.stage_id = ps.stage_id) DESC, 
-                                         ps.iteration_count DESC
-                                LIMIT 1
-                            )
-                        """), {
-                            "close_date": a_start,
-                            "completed_id": completed_status_id,
-                            "pid": project_id
-                        })
+                # 🎯 Авто-закрытие предыдущего этапа (только при создании нового)
+                if not is_editing and a_start is not None and completed_status_id is not None:
+                    session.execute(text("""
+                        UPDATE project_stages SET actual_end = :close_date, micro_status = :completed_id
+                        WHERE stage_progress_id = (
+                            SELECT ps.stage_progress_id FROM project_stages ps
+                            WHERE ps.project_id = :pid AND ps.actual_end IS NULL
+                            ORDER BY (SELECT s.stage_order FROM stages s WHERE s.stage_id = ps.stage_id) DESC, ps.iteration_count DESC
+                            LIMIT 1
+                        )
+                    """), {"close_date": a_start, "completed_id": completed_status_id, "pid": project_id})
 
-                    # 🔹 Для Вехи: факт. окончание = факт. началу
-                    if a_start is not None and stage_info["type"] == "Веха":
-                        a_end = a_start
+                # 🔹 Для Вехи: факт. окончание = факт. началу
+                if a_start is not None and stage_info["type"] == "Веха":
+                    a_end = a_start
 
-                    # 💾 Запись в БД
-                    if is_new:
-                        session.execute(text("""
-                            INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count,
-                                                        planned_start, planned_end, actual_start, actual_end, comments)
-                            VALUES (:pid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm)
-                        """), {
-                            "pid": project_id, "sid": stage_info["id"], "mst": micro_id,
-                            "iter": iteration, "ps": p_start, "pe": p_end,
-                            "as": a_start, "ae": a_end, "comm": comment
-                        })
-                    else:
+                try:
+                    if is_editing:
                         session.execute(text("""
                             UPDATE project_stages SET stage_id=:sid, micro_status=:mst, iteration_count=:iter,
-                                                      planned_start=:ps, planned_end=:pe, 
-                                                      actual_start=:as, actual_end=:ae, comments=:comm
+                                planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm
                             WHERE stage_progress_id=:id
-                        """), {
-                            "sid": stage_info["id"], "mst": micro_id,
-                            "iter": iteration,
-                            "ps": p_start, "pe": p_end,
-                            "as": a_start, "ae": a_end, "comm": comment,
-                            "id": int(pid)
-                        })
+                        """), {"sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
+                               "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments,
+                               "id": int(item_ids_map[sel_item])})
+                    else:
+                        session.execute(text("""
+                            INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count,
+                                planned_start, planned_end, actual_start, actual_end, comments)
+                            VALUES (:pid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm)
+                        """), {"pid": project_id, "sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
+                               "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments})
+                    
+                    session.commit(); clear_cache()
+                    st.success("✅ Этап сохранён!"); st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Ошибка БД: {e}"); session.rollback()
 
-                session.commit()
-                clear_cache()
-                st.success("✅ Этапы сохранены! Автоматические расчёты применены.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Ошибка БД: {e}")
-                session.rollback()
+        with col_del:
+            if is_editing and st.button("🗑 Удалить", type="secondary", key="buro_del"):
+                try:
+                    session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"), {"id": int(item_ids_map[sel_item])})
+                    session.commit(); clear_cache()
+                    st.success("🗑 Этап удалён!"); st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Ошибка БД: {e}"); session.rollback()

@@ -27,7 +27,7 @@ def load_analytics_data():
         WHERE stage_progress_id IS NOT NULL
     """)
 
-def render_analytics_tab():
+def render_analytics_tab(user_role="user"):
     st.subheader("📊 Аналитика и оперативный контроль")
     
     # 🔍 Фильтры (перенесены из сайдбара в тело вкладки)
