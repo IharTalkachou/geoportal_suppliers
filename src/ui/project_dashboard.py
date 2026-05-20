@@ -4,6 +4,7 @@ from sqlalchemy import text
 from config.cache import query_db, clear_cache
 from ui.bureaucracy_tab import render_bureaucracy_tab
 from ui.technology_tab import render_technology_tab
+from config.auth import log_action
 
 def render_project_dashboard(session, user_role="user"):
     st.subheader("📂 Управление проектами")
@@ -101,10 +102,12 @@ def render_project_dashboard(session, user_role="user"):
                         matching = cont_list[cont_list["full_name"]==p_contact]
                         if not matching.empty: cont_id = int(matching["contact_id"].iloc[0])
 
-                    session.execute(text("""
-                        UPDATE projects SET project_name=:name, supplier_id=:sup, main_contact_id=:cont,
-                                            status=:stat, notes=:notes WHERE project_id=:id
-                    """), {
+                    log_action(st.session_state["auth"]["user_id"], "UPDATE_PROJECT", "projects", int(selected_proj_id),
+                               old={"name": proj_data['project_name'], "status": proj_data['status_name']},
+                               new={"name": p_name, "status": p_stat})
+                    session.execute(text("""UPDATE projects SET project_name=:name, supplier_id=:sup, main_contact_id=:cont,
+                        status=:stat, notes=:notes WHERE project_id=:id"""), 
+                    {
                         "name": p_name, "sup": sup_id, "cont": cont_id, "stat": stat_id,
                         "notes": p_notes, "id": int(selected_proj_id)
                     })
@@ -200,6 +203,14 @@ def render_project_dashboard(session, user_role="user"):
             col_btn, col_del = st.columns([3, 1])
             with col_btn:
                 if st.button("💾 Сохранить", type="primary", key="crud_save"):
+                    sel_ds = st.session_state["crud_ds"]
+                    sel_info = st.session_state["crud_info"]
+                    sel_cont = st.session_state["crud_cont"]
+
+                    if sel_info == "(Нет видов для этого набора)":
+                        st.warning("⚠️ Выберите корректный набор данных и вид сведений.")
+                        st.stop()
+
                     ds_id = ds_map[sel_ds]
                     info_id = info_map[sel_info]["id"]
                     cont_id = sup_cont_map.get(sel_cont) if sel_cont != "Не выбран" else None
@@ -212,15 +223,22 @@ def render_project_dashboard(session, user_role="user"):
                             if exists:
                                 st.warning("⚠️ Эта связка уже существует в составе проекта.")
                                 st.stop()
-                            session.execute(text("""
-                                INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id)
-                                VALUES (:pid, :ds, :info, :cont)
-                            """), {"pid": selected_proj_id, "ds": ds_id, "info": info_id, "cont": cont_id})
+                            session.execute(text("INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id) VALUES (:pid, :ds, :info, :cont)"),
+                                        {"pid": selected_proj_id, "ds": ds_id, "info": info_id, "cont": cont_id})
+                            log_action(st.session_state["auth"]["user_id"], "CREATE_PROJECT_ITEM", "project_items",
+                                   new={"project_id": selected_proj_id, "dataset": sel_ds, "info": sel_info})
                         else:
-                            session.execute(text("""
-                                UPDATE project_items SET dataset_id=:ds, info_id=:info, tech_contact_id=:cont
-                                WHERE item_id=:id
-                            """), {"ds": ds_id, "info": info_id, "cont": cont_id, "id": int(item_ids_map[sel_item])})
+                            # 🔍 Читаем ТЕКУЩИЕ значения из items_df ПЕРЕД обновлением
+                            curr = items_df[items_df["item_id"] == item_ids_map[sel_item]].iloc[0]
+                            old_ds = curr["dataset_name"]
+                            old_info = curr["info_name"]
+                            old_cont = curr["tech_contact"] if pd.notna(curr["tech_contact"]) else "Не выбран"
+
+                            session.execute(text("UPDATE project_items SET dataset_id=:ds, info_id=:info, tech_contact_id=:cont WHERE item_id=:id"),
+                                        {"ds": ds_id, "info": info_id, "cont": cont_id, "id": int(item_ids_map[sel_item])})
+                            log_action(st.session_state["auth"]["user_id"], "UPDATE_PROJECT_ITEM", "project_items", int(item_ids_map[sel_item]),
+                                   old={"dataset": old_ds, "info": old_info, "contact": old_cont}, 
+                                   new={"dataset": sel_ds, "info": sel_info, "contact": sel_cont})
 
                         session.commit(); clear_cache()
                         st.success("✅ Состав проекта обновлён!"); st.rerun()
@@ -230,6 +248,13 @@ def render_project_dashboard(session, user_role="user"):
             with col_del:
                 if is_editing and st.button("🗑 Удалить", type="secondary", key="crud_del"):
                     try:
+                        # 🔍 Читаем значения для лога перед удалением
+                        curr = items_df[items_df["item_id"] == item_ids_map[sel_item]].iloc[0]
+                        old_ds = curr["dataset_name"]
+                        old_info = curr["info_name"]
+                        
+                        log_action(st.session_state["auth"]["user_id"], "DELETE_PROJECT_ITEM", "project_items", int(item_ids_map[sel_item]), 
+                                   old={"dataset": old_ds, "info": old_info})
                         session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(item_ids_map[sel_item])})
                         session.commit(); clear_cache()
                         st.success("🗑 Элемент удалён!"); st.rerun()

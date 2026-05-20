@@ -107,12 +107,14 @@ with header_right:
         if st.button("🚪 Выйти", use_container_width=True, type="primary", key="btn_logout"):
             uid = st.session_state.get("auth", {}).get("user_id")
             token = st.query_params.get("session")
-            if uid and token:
+            
+            # 🔹 Вызов log_action БЕЗ передачи session
+            if uid:
                 try:
-                    with Session(engine) as log_sess:
-                        log_action(log_sess, uid, "LOGOUT", target_table="auth")
-                except Exception:
-                    pass
+                    log_action(uid, "LOGOUT", target_table="auth")
+                except Exception as e:
+                    print(f"⚠️ Ошибка логирования выхода: {e}")
+                    
             destroy_session(token or "")
             st.query_params.pop("session", None)
             st.session_state.pop("auth", None)

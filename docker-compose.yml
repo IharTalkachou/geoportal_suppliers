@@ -31,6 +31,7 @@ services:
     environment:
       DB_HOST: ${DB_HOST}
       DB_PORT: 5432
+      PYTHONUNBUFFERED: "1"
     ports:
       - "8501:8501"
     depends_on:
@@ -38,7 +39,6 @@ services:
         condition: service_healthy
     networks:
       - app_net
-
   nginx:  # ← Должен быть на том же уровне, что db и app!
     image: nginx:alpine
     container_name: geodata_nginx

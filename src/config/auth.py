@@ -17,21 +17,43 @@ def hash_password(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
-def log_action(session, user_id: int, action: str, target_table: str = None,
+def log_action(user_id: int, action: str, target_table: str = None,
                target_id: int = None, old: dict = None, new: dict = None):
+    import sys, os, json
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    # 🔹 Пишем в stderr + flush=True для мгновенного вывода в Docker
+    print(f"🔍 [AUDIT] Вызов: user={user_id}, action={action}", file=sys.stderr, flush=True)
+
     try:
-        session.execute(text("""
-            INSERT INTO audit_log (user_id, action, target_table, target_id, old_value, new_value, created_at)
-            VALUES (:uid, :act, :tbl, :tid, :old, :new, NOW())
-        """), {
-            "uid": user_id, "act": action, "tbl": target_table, "tid": target_id,
-            "old": json.dumps(old, ensure_ascii=False) if old else None,
-            "new": json.dumps(new, ensure_ascii=False) if new else None
-        })
-        session.commit()
+        # В Docker переменные уже в окружении, load_dotenv не нужен
+        db_user = os.getenv('DB_USER')
+        db_pass = os.getenv('DB_PASS')
+        db_host = os.getenv('DB_HOST')
+        db_port = os.getenv('DB_PORT')
+        db_name = os.getenv('DB_NAME')
+
+        if not all([db_user, db_pass, db_host, db_port, db_name]):
+            print(f"❌ [AUDIT] Отсутствуют ENV переменные БД!", file=sys.stderr, flush=True)
+            return
+
+        engine = create_engine(f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}", pool_pre_ping=True)
+        with Session(engine) as sess:
+            sess.execute(text("""
+                INSERT INTO audit_log (user_id, action, target_table, target_id, old_value, new_value, created_at)
+                VALUES (:uid, :act, :tbl, :tid, :old, :new, NOW())
+            """), {
+                "uid": user_id, "act": action, "tbl": target_table, "tid": target_id,
+                "old": json.dumps(old, ensure_ascii=False, default=str) if old else None,
+                "new": json.dumps(new, ensure_ascii=False, default=str) if new else None
+            })
+            sess.commit()
+            print(f"✅ [AUDIT] Записано в БД успешно", file=sys.stderr, flush=True)
     except Exception as e:
-        print(f"⚠️ Audit log write failed: {e}")
-        session.rollback()
+        print(f"❌ [AUDIT] Ошибка: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+    finally:
+        if 'engine' in locals(): engine.dispose()
 
 def authenticate_user(username: str, password: str, session) -> dict | None:
     res = session.execute(text("""
@@ -49,7 +71,8 @@ def authenticate_user(username: str, password: str, session) -> dict | None:
         session.execute(text("UPDATE users SET last_login = :now WHERE user_id = :uid"),
                         {"now": datetime.now(), "uid": user_data["user_id"]})
         session.commit()
-        log_action(session, user_data["user_id"], "LOGIN", target_table="auth")
+        # ✅ ИСПРАВЛЕНО: Первый аргумент (session) удалён
+        log_action(user_data["user_id"], "LOGIN", target_table="auth")
         return user_data
     return None
 

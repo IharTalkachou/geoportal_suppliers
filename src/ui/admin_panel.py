@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from config.cache import query_db, clear_cache
+from config.cache import query_db
 from config.auth import hash_password, ROLE_NAMES, require_role, log_action
 from datetime import datetime, timedelta
 
@@ -64,7 +64,7 @@ def render_admin_panel(session):
                 role_keys = list(ROLE_NAMES.keys())
                 curr_role = st.session_state.get("adm_role_in", "user")
                 safe_idx = role_keys.index(curr_role) if curr_role in role_keys else 0
-                st.selectbox("Роль", role_keys, format_func=lambda x: ROLE_NAMES[x], index=safe_idx, key="adm_role_in")
+                st.selectbox("Роль", role_keys, format_func=lambda x: ROLE_NAMES[x], key="adm_role_in")
                 st.checkbox("Активен", value=st.session_state.get("adm_act_in", True), key="adm_act_in")
 
             st.text_input("Пароль" + (" (оставьте пустым, чтобы не менять)" if is_editing else ""), 
@@ -83,7 +83,7 @@ def render_admin_panel(session):
                         if is_editing:
                             curr = users_df[users_df["username"] == u].iloc[0]
                             # 📝 Лог изменения
-                            log_action(session, st.session_state["auth"]["user_id"], "UPDATE_USER", 
+                            log_action(st.session_state["auth"]["user_id"], "UPDATE_USER", 
                                        "users", int(curr["user_id"]),
                                        old={"role": curr["role"], "active": bool(curr["is_active"])},
                                        new={"role": r, "active": a})
@@ -104,9 +104,9 @@ def render_admin_panel(session):
                             
                             # 📝 Лог создания
                             new_id = session.execute(text("SELECT currval(pg_get_serial_sequence('users', 'user_id'))")).scalar()
-                            log_action(session, st.session_state["auth"]["user_id"], "CREATE_USER", "users", int(new_id), new={"username": u, "role": r})
-
-                        session.commit(); clear_cache()
+                            log_action(st.session_state["auth"]["user_id"], "CREATE_USER", "users", int(new_id), new={"username": u, "role": r})
+                        session.commit()
+                        st.cache_data.clear()
                         st.success("✅ Пользователь сохранён!"); st.rerun()
                     except Exception as e:
                         st.error(f"❌ Ошибка БД: {e}"); session.rollback()
@@ -118,10 +118,11 @@ def render_admin_panel(session):
                         try:
                             curr = users_df[users_df["username"] == sel_user].iloc[0]
                             # 📝 Лог удаления
-                            log_action(session, st.session_state["auth"]["user_id"], "DELETE_USER", "users", int(curr["user_id"]), old={"username": sel_user})
+                            log_action(st.session_state["auth"]["user_id"], "DELETE_USER", "users", int(curr["user_id"]), old={"username": sel_user})
                             
                             session.execute(text("DELETE FROM users WHERE username = :u"), {"u": sel_user})
-                            session.commit(); clear_cache()
+                            session.commit()
+                            st.cache_data.clear()
                             st.session_state["adm_user_deleted"] = True
                             st.success("🗑 Пользователь удалён"); st.rerun()
                         except Exception as e:
@@ -131,62 +132,49 @@ def render_admin_panel(session):
     # 2. ЖУРНАЛ ДЕЙСТВИЙ (с проверкой существования таблицы)
     # ==========================================
     with tab_audit:
+  
         st.subheader("История изменений и входов")
         
-        # 🔍 Проверяем, существует ли таблица
-        table_exists = session.execute(text("""
-            SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'audit_log')
-        """)).scalar()
+        # 🔹 Кнопка принудительного сброса кэша
+        if st.button("🔄 Обновить журнал", type="secondary", use_container_width=True, key="btn_refresh_audit"):
+            from config.cache import clear_cache
+            clear_cache()
+            st.rerun()
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            # Запрос действий (без кэширования проблем не вызовет)
+            acts_df = query_db("SELECT DISTINCT action FROM audit_log ORDER BY action")
+            acts = acts_df["action"].tolist() if not acts_df.empty else []
+            sel_act = st.selectbox("Действие", ["Все"] + acts, key="adm_audit_act")
+        with c2:
+            d_start = st.date_input("С", value=datetime.now().date() - timedelta(days=7), key="adm_audit_ds")
+        with c3:
+            # +1 день, чтобы захватить ВЕСЬ сегодня до 23:59:59
+            d_end = st.date_input("По", value=datetime.now().date() + timedelta(days=1), key="adm_audit_de")
+
+        # 🔹 Используем приведение к DATE для точного совпадения независимо от часового пояса
+        query = """
+            SELECT l.created_at as "Дата", u.display_name as "Пользователь", l.action as "Действие", 
+                   l.target_table as "Таблица", l.ip_address as "IP"
+            FROM audit_log l
+            LEFT JOIN users u ON l.user_id = u.user_id
+            WHERE l.created_at::date BETWEEN :ds AND :de
+        """
+        params = {"ds": d_start, "de": d_end}
+        if sel_act != "Все":
+            query += " AND l.action = :act"
+            params["act"] = sel_act
+        query += " ORDER BY l.created_at DESC LIMIT 500"
+
+        log_df = query_db(query, params)
         
-        if not table_exists:
-            st.warning("⚠️ Таблица `audit_log` ещё не создана. Выполните миграцию в БД (см. документацию).")
-            st.code("""
--- В pgAdmin → Query Tool:
-CREATE TABLE IF NOT EXISTS audit_log (
-    log_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id INT REFERENCES users(user_id) ON DELETE SET NULL,
-    action VARCHAR(50) NOT NULL,
-    target_table VARCHAR(100),
-    target_id INT,
-    old_value JSONB,
-    new_value JSONB,
-    ip_address VARCHAR(45),
-    user_agent TEXT,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_audit_log_user_time ON audit_log(user_id, created_at DESC);
-            """, language="sql")
+        if log_df.empty:
+            st.info("📭 Записей за выбранный период не найдено. Нажмите `🔄 Обновить журнал` или измените даты.")
         else:
-            # Фильтры
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                acts = query_db("SELECT DISTINCT action FROM audit_log ORDER BY action")["action"].tolist()
-                sel_act = st.selectbox("Действие", ["Все"] + acts, key="adm_audit_act") if acts else st.selectbox("Действие", ["Все"], key="adm_audit_act")
-            with c2:
-                d_start = st.date_input("С", value=datetime.now().date() - timedelta(days=7), key="adm_audit_ds")
-            with c3:
-                d_end = st.date_input("По", value=datetime.now().date(), key="adm_audit_de")
-
-            query = """
-                SELECT l.created_at as "Дата", u.display_name as "Пользователь", l.action as "Действие", 
-                       l.target_table as "Таблица", l.ip_address as "IP"
-                FROM audit_log l
-                LEFT JOIN users u ON l.user_id = u.user_id
-                WHERE l.created_at BETWEEN :ds AND :de
-            """
-            params = {"ds": d_start, "de": d_end}
-            if sel_act != "Все" and acts:
-                query += " AND l.action = :act"
-                params["act"] = sel_act
-            query += " ORDER BY l.created_at DESC LIMIT 500"
-
-            log_df = query_db(query, params)
-            if log_df.empty:
-                st.info("📭 Записей за выбранный период не найдено. Журнал заполняется автоматически при входе и действиях в БД.")
-            else:
-                st.dataframe(log_df, use_container_width=True, hide_index=True)
-                st.download_button("📥 Экспорт в CSV", data=log_df.to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"audit_log_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
+            st.dataframe(log_df, use_container_width=True, hide_index=True)
+            st.download_button("📥 Экспорт в CSV", data=log_df.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"audit_log_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
 
     # ==========================================
     # 3. НАСТРОЙКИ СИСТЕМЫ (без изменений)

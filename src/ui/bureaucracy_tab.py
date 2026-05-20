@@ -3,6 +3,7 @@ import pandas as pd
 from sqlalchemy import text
 from datetime import date, timedelta
 from config.cache import query_db, clear_cache
+from config.auth import log_action
 
 def render_bureaucracy_tab(session, project_id, user_role="user"):
     st.subheader("📜 Бюрократия (Документарные этапы)")
@@ -146,6 +147,9 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                         """), {"sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
                                "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments,
                                "id": int(item_ids_map[sel_item])})
+                        log_action(st.session_state["auth"]["user_id"], "UPDATE_STAGE", "project_stages", int(item_ids_map[sel_item]),
+                            old={"status": curr["micro_status_name"], "a_start": curr["actual_start"]},
+                            new={"status": micro_status, "a_start": a_start})
                     else:
                         session.execute(text("""
                             INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count,
@@ -153,6 +157,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                             VALUES (:pid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm)
                         """), {"pid": project_id, "sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
                                "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments})
+                        log_action(st.session_state["auth"]["user_id"], "CREATE_STAGE", "project_stages",
+                            new={"stage": stage_name, "status": micro_status, "iteration": iter_val})
                     
                     session.commit(); clear_cache()
                     st.success("✅ Этап сохранён!"); st.rerun()
@@ -162,6 +168,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         with col_del:
             if is_editing and st.button("🗑 Удалить", type="secondary", key="buro_del"):
                 try:
+                    log_action(st.session_state["auth"]["user_id"], "DELETE_STAGE", "project_stages", int(item_ids_map[sel_item]),
+                        old={"stage": curr["stage_name"], "status": curr["micro_status_name"]})
                     session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"), {"id": int(item_ids_map[sel_item])})
                     session.commit(); clear_cache()
                     st.success("🗑 Этап удалён!"); st.rerun()

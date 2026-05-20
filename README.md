@@ -191,6 +191,86 @@ Remove-Item -Recurse -Force ./app_data/sessions/
 # Очистка кэша Streamlit и перезапуск
 docker compose restart app
 ```
+---
+
+## 📜 Система аудита и логирования
+
+### 🔐 Архитектура
+- **Таблица:** `audit_log` в основной БД (`geodata_suppliers_dev`).
+- **Изоляция:** Запись логов выполняется через **отдельное подключение** к БД (`log_action()`), что гарантирует:
+  - Логи не блокируют основную бизнес-транзакцию.
+  - Ошибки аудита не роняют приложение.
+  - Логи пишутся даже если основной `session.commit()` откатится.
+- **Формат:** Поля `old_value` и `new_value` хранятся в `JSONB`, что позволяет гибко фильтровать и сравнивать изменения.
+
+### 👁 Просмотр журнала действий
+
+#### Через интерфейс (для администраторов)
+1. Откройте `⚙️ Админ-панель` → вкладка `📜 Журнал действий`.
+2. Используйте фильтры:
+   - **Действие:** выбор конкретного типа события (`LOGIN`, `UPDATE_SUPPLIER` и т.д.).
+   - **Период:** даты «С» и «По» (включительно).
+3. Таблица показывает: `Дата`, `Пользователь`, `Действие`, `Таблица`, `IP`.
+4. Кнопка `📥 Экспорт в CSV` позволяет выгрузить отчёт для аудита.
+
+> 💡 **Важно:** Если записей не видно, нажмите `🔄 Обновить журнал` — это принудительно сбросит кэш запросов.
+
+#### Прямой запрос к БД (для разработчиков)
+```powershell
+# Последние 10 записей
+docker exec geodata_db psql -U app_user_dev -d geodata_suppliers_dev -c "SELECT created_at, action, target_table, old_value, new_value FROM audit_log ORDER BY created_at DESC LIMIT 10;"
+
+# Все действия конкретного пользователя за сегодня
+docker exec geodata_db psql -U app_user_dev -d geodata_suppliers_dev -c "SELECT action, target_table, created_at FROM audit_log WHERE user_id = 1 AND created_at::date = CURRENT_DATE ORDER BY created_at DESC;"
+
+# Поиск по изменению конкретного поля (JSONB-оператор)
+docker exec geodata_db psql -U app_user_dev -d geodata_suppliers_dev -c "SELECT * FROM audit_log WHERE new_value->>'status' = 'approved';"
+```
+
+### 🛡 Безопасность и хранение
+| Аспект | Реализация |
+|--------|-----------|
+| **Неизменяемость** | Логи только добавляются (`INSERT`). `UPDATE`/`DELETE` для `audit_log` запрещены на уровне приложения. |
+| **Ссылочная целостность** | `user_id` хранится как `INT` без `FOREIGN KEY` — при удалении пользователя исторические записи сохраняются. |
+| **Конфиденциальность** | В `old`/`new` **не попадают** пароли, хеши и чувствительные токены. |
+| **Ротация** | Автоматическая очистка не предусмотрена — журнал растёт линейно. При объёме >10 млн записей рекомендуется партиционирование по дате. |
+
+### 🐛 Отладка и частые проблемы
+| Симптом | Причина | Решение |
+|---------|---------|---------|
+| Записи не появляются в интерфейсе | Кэш `query_db` | Нажмите `🔄 Обновить журнал` или выполните `st.cache_data.clear()` в коде |
+| Пустой журнал после действий | Таблица `audit_log` не создана | Выполните миграцию: `CREATE TABLE audit_log (...)` (см. `docs/migrations/`) |
+| Ошибка `JSON serialization failed` | В `old`/`new` попал `datetime` или `Decimal` | В `log_action()` используется `default=str` — обновите функцию из `config/auth.py` |
+| Логи пишутся, но не видны в `docker logs` | Буферизация `stdout` в Docker | Добавьте в `docker-compose.yml` для сервиса `app`: `environment: PYTHONUNBUFFERED: "1"` |
+| `local variable 'clear_cache' referenced before assignment` | Конфликт имён в области видимости | Замените `clear_cache()` на `st.cache_data.clear()` в `admin_panel.py` и `suppliers_tab.py` |
+
+### ➕ Как добавить логирование в новую CRUD-операцию
+1. Импортируйте: `from config.auth import log_action`
+2. В блоке `try:`, **после** `session.execute(...)`, но **до** `session.commit()`:
+```python
+# Для UPDATE: сначала читаем старые значения
+curr = df[df["id"] == target_id].iloc[0]
+log_action(
+    st.session_state["auth"]["user_id"],
+    "UPDATE_ENTITY", 
+    "table_name", 
+    int(target_id),
+    old={"field1": curr["field1"], "field2": curr["field2"]},
+    new={"field1": new_val1, "field2": new_val2}
+)
+# Для CREATE: после вставки получаем новый ID
+new_id = session.execute(text("SELECT currval(...)")).scalar()
+log_action(..., "CREATE_ENTITY", "table_name", int(new_id), new={...})
+# Для DELETE: перед удалением читаем данные для лога
+curr = df[df["id"] == target_id].iloc[0]
+log_action(..., "DELETE_ENTITY", "table_name", int(target_id), old={...})
+```
+3. Убедитесь, что `session.commit()` и `st.cache_data.clear()` идут **после** вызова `log_action()`.
+
+> 📌 **Паттерн:** Логирование никогда не должно прерывать бизнес-логику. Функция `log_action()` изолирована, ловит свои исключения и пишет в `stderr` для отладки.
+
+
+
 
 ---
 > 📅 *Последнее обновление: 2026-05-20 | Версия: 1.0.0-rc*

@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import text
 from config.cache import query_db, clear_cache
+from config.auth import log_action
 
 def render_datasets_tab(session, user_role="user"):
     st.subheader("📚 Справочники: Наборы и Виды сведений")
@@ -49,15 +50,16 @@ def render_datasets_tab(session, user_role="user"):
                                 st.error("❌ Такой набор уже существует")
                             else:
                                 if is_editing:
-                                    session.execute(text("""
-                                        UPDATE datasets SET dataset_name=:n, is_mandatory=:m, is_basic=:b 
-                                        WHERE dataset_id=:id
-                                    """), {"n": ds_name.strip(), "m": ds_mandatory, "b": ds_basic, "id": int(current_row["dataset_id"])})
+                                    session.execute(text("UPDATE datasets SET dataset_name=:n, is_mandatory=:m, is_basic=:b WHERE dataset_id=:id"),
+                                                    {"n": ds_name.strip(), "m": ds_mandatory, "b": ds_basic, "id": int(current_row["dataset_id"])})
+                                    log_action(st.session_state["auth"]["user_id"], "UPDATE_DATASET", "datasets", int(current_row["dataset_id"]),
+                                            old={"name": current_row["dataset_name"], "mandatory": bool(current_row["is_mandatory"])},
+                                            new={"name": ds_name.strip(), "mandatory": ds_mandatory})
                                 else:
-                                    session.execute(text("""
-                                        INSERT INTO datasets (dataset_name, is_mandatory, is_basic) 
-                                        VALUES (:n, :m, :b)
-                                    """), {"n": ds_name.strip(), "m": ds_mandatory, "b": ds_basic})
+                                    res = session.execute(text("INSERT INTO datasets (dataset_name, is_mandatory, is_basic) VALUES (:n, :m, :b)"),
+                                                        {"n": ds_name.strip(), "m": ds_mandatory, "b": ds_basic})
+                                    log_action(st.session_state["auth"]["user_id"], "CREATE_DATASET", "datasets",
+                                            new={"name": ds_name.strip(), "mandatory": ds_mandatory})
                                 session.commit()
                                 clear_cache()
                                 st.success("✅ Набор сохранён!")
@@ -72,7 +74,9 @@ def render_datasets_tab(session, user_role="user"):
                         st.warning("⚠️ Набор уже используется в проектах. Удаление невозможно.")
                     else:
                         try:
-                            session.execute(text("DELETE FROM datasets WHERE dataset_id = :id"), {"id": int(current_row["dataset_id"])})
+                            log_action(st.session_state["auth"]["user_id"], "DELETE_DATASET", "datasets", int(current_row["dataset_id"]),
+                                    old={"name": current_row["dataset_name"]})
+                            session.execute(text("DELETE FROM datasets WHERE dataset_id = :id"), {"id": int(current_row["dataset_id"])})                            
                             session.commit()
                             clear_cache()
                             st.success("🗑 Набор удалён!")
@@ -148,15 +152,16 @@ def render_datasets_tab(session, user_role="user"):
                     else:
                         try:
                             if is_editing:
-                                session.execute(text("""
-                                    UPDATE info_types SET info_name=:n, type=:t, format=:f, "update"=:u 
-                                    WHERE info_id=:id
-                                """), {"n": info_name.strip(), "t": info_type, "f": info_format, "u": info_update, "id": int(current_info["info_id"])})
+                                session.execute(text("UPDATE info_types SET info_name=:n, type=:t, format=:f, \"update\"=:u WHERE info_id=:id"),
+                                                {"n": info_name.strip(), "t": info_type, "f": info_format, "u": info_update, "id": int(current_info["info_id"])})
+                                log_action(st.session_state["auth"]["user_id"], "UPDATE_INFO_TYPE", "info_types", int(current_info["info_id"]),
+                                        old={"name": current_info["info_name"], "type": current_info["type"]},
+                                        new={"name": info_name.strip(), "type": info_type})
                             else:
-                                session.execute(text("""
-                                    INSERT INTO info_types (dataset_id, info_name, type, format, "update") 
-                                    VALUES (:did, :n, :t, :f, :u)
-                                """), {"did": sel_ds_id, "n": info_name.strip(), "t": info_type, "f": info_format, "u": info_update})
+                                session.execute(text("INSERT INTO info_types (dataset_id, info_name, type, format, \"update\") VALUES (:did, :n, :t, :f, :u)"),
+                                                {"did": sel_ds_id, "n": info_name.strip(), "t": info_type, "f": info_format, "u": info_update})
+                                log_action(st.session_state["auth"]["user_id"], "CREATE_INFO_TYPE", "info_types",
+                                        new={"name": info_name.strip(), "dataset_id": sel_ds_id})
                             session.commit()
                             clear_cache()
                             st.success("✅ Вид сведений сохранён!")
@@ -167,6 +172,8 @@ def render_datasets_tab(session, user_role="user"):
 
                 if delete_info_btn:
                     try:
+                        log_action(st.session_state["auth"]["user_id"], "DELETE_INFO_TYPE", "info_types", int(current_info["info_id"]),
+                               old={"name": current_info["info_name"]})
                         session.execute(text("DELETE FROM info_types WHERE info_id = :id"), {"id": int(current_info["info_id"])})
                         session.commit()
                         clear_cache()
