@@ -55,6 +55,20 @@ services:
       - app
     networks:
       - app_net
+  
+  db-backup:
+    build: ./backup
+    container_name: geodata_db_backup
+    env_file: .env
+    environment:
+      - PGPASSWORD=${DB_PASS}  # Требуется для pg_dump без интерактивного ввода пароля
+      #- DB_HOST=host.docker.internal
+      - DB_HOST=db
+    volumes:
+      - ./backups:/backups
+    restart: unless-stopped
+    networks:
+      - app_net
 
 networks:
   app_net:
