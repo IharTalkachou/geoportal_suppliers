@@ -33,19 +33,20 @@ engine = create_engine(DB_URL, pool_pre_ping=True)
 # 🔐 2. БЛОК АВТОРИЗАЦИИ (СЕРВЕРНАЯ СЕССИЯ)
 # ==========================================
 if "auth" not in st.session_state:
-    # 1. Пробуем восстановить сессию из токена в URL
-    token = st.query_params.get("session", None)
+    token = st.query_params.get("session")
     if token:
-        restored = restore_session(token)
+        # Рекомендую поставить strict_ip=True для корпоративной среды
+        restored = restore_session(token, strict_ip=True) 
         if restored:
             st.session_state["auth"] = restored
-            # 🔹 НЕ УДАЛЯЕМ токен из URL — он нужен для следующего обновления!
-            # st.query_params.pop("session", None)  ← УДАЛИТЬ или закомментировать эту строку
             st.rerun()
         else:
-            # Токен истёк или невалиден — очищаем
-            destroy_session(token)
+            # ✅ МЫ УБРАЛИ destroy_session(token)!
+            # Если токен не подошел (чужой браузер), мы просто убираем 
+            # его из URL этого браузера, чтобы показать форму входа.
+            # Файл на диске остается целым для оригинального пользователя.
             st.query_params.pop("session", None)
+            st.warning("⚠️ Невозможно использовать эту ссылку. Пожалуйста, авторизуйтесь.")
 
     # 2. Если сессия не восстановлена → рендерим форму входа
     if "auth" not in st.session_state:

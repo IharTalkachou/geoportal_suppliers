@@ -89,10 +89,16 @@ def init_session(user_data: dict):
 def check_session_timeout():
     if "auth" in st.session_state:
         last = st.session_state["auth"]["last_active"]
+        # Если время вышло - выходим
         if datetime.now() - last > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
             logout_user()
-            st.warning("⏱ Сессия завершена по таймауту неактивности (30 мин).")
+            # st.warning здесь не сработает, так как logout_user делает st.rerun(),
+            # лучше передать флаг в session_state, если нужно показать сообщение
             st.rerun()
+        else:
+            # ✅ ПРОДЛЕНИЕ СЕССИИ: При любом действии пользователя в интерфейсе
+            # обновляем таймер, чтобы 30 минут отсчитывались заново
+            st.session_state["auth"]["last_active"] = datetime.now()
 
 def logout_user():
     st.session_state.pop("auth", None)
