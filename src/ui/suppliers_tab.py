@@ -21,6 +21,7 @@ def render_suppliers_tab(session, user_role="user"):
     sup_map = dict(zip(all_suppliers["supplier_name"], all_suppliers["supplier_id"]))
     selected_sup_name = st.selectbox("🏢 Выберите поставщика для просмотра", [""] + list(sup_map.keys()), key="sup_selector")
     selected_sup_id = sup_map.get(selected_sup_name) if selected_sup_name else None
+    st.session_state["selected_supplier_id"] = selected_sup_id  # 🔹 Сохраняем в сессию
     
     st.markdown("---")
     

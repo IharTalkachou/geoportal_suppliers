@@ -32,7 +32,7 @@ def render_project_dashboard(session, user_role="user"):
         format_func=lambda x: proj_map.get(x, "Выберите проект..."), 
         key="dash_proj_filter"
     )
-    st.session_state.selected_project_id = selected_proj_id
+    st.session_state["selected_project_id"] = selected_proj_id # 🔹 Сохраняем в сессию
 
     if not selected_proj_id:
         st.info("👆 Выберите поставщика и проект для начала работы.")

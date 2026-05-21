@@ -33,16 +33,19 @@ engine = create_engine(DB_URL, pool_pre_ping=True)
 # 🔐 2. БЛОК АВТОРИЗАЦИИ (СЕРВЕРНАЯ СЕССИЯ)
 # ==========================================
 if "auth" not in st.session_state:
-    # 1. Проверяем, есть ли токен в URL (пришёл с Ctrl+R)
+    # 1. Пробуем восстановить сессию из токена в URL
     token = st.query_params.get("session", None)
     if token:
         restored = restore_session(token)
         if restored:
             st.session_state["auth"] = restored
-            st.query_params.pop("session", None)  # Очищаем токен из URL после успеха
+            # 🔹 НЕ УДАЛЯЕМ токен из URL — он нужен для следующего обновления!
+            # st.query_params.pop("session", None)  ← УДАЛИТЬ или закомментировать эту строку
             st.rerun()
         else:
-            st.query_params.pop("session", None)  # Токен истёк/невалиден
+            # Токен истёк или невалиден — очищаем
+            destroy_session(token)
+            st.query_params.pop("session", None)
 
     # 2. Если сессия не восстановлена → рендерим форму входа
     if "auth" not in st.session_state:
@@ -107,14 +110,11 @@ with header_right:
         if st.button("🚪 Выйти", use_container_width=True, type="primary", key="btn_logout"):
             uid = st.session_state.get("auth", {}).get("user_id")
             token = st.query_params.get("session")
-            
-            # 🔹 Вызов log_action БЕЗ передачи session
-            if uid:
+            if uid and token:
                 try:
-                    log_action(uid, "LOGOUT", target_table="auth")
-                except Exception as e:
-                    print(f"⚠️ Ошибка логирования выхода: {e}")
-                    
+                    with Session(engine) as log_sess:
+                        log_action(log_sess, uid, "LOGOUT", target_table="auth")
+                except: pass
             destroy_session(token or "")
             st.query_params.pop("session", None)
             st.session_state.pop("auth", None)
@@ -127,13 +127,18 @@ if st.session_state.get("show_admin", False):
     with Session(engine) as session:
         render_admin_panel(session)
 else:
+    # 🔹 Вкладки рендерятся ВСЕГДА — без условий по active_tab!
     tabs = st.tabs(["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"])
     user_role = st.session_state["auth"]["role"]
+    
     with tabs[0]:
-        with Session(engine) as session: render_suppliers_tab(session, user_role=user_role)
+        with Session(engine) as session: 
+            render_suppliers_tab(session, user_role=user_role)
     with tabs[1]: 
-        with Session(engine) as session: render_datasets_tab(session, user_role=user_role)  
+        with Session(engine) as session: 
+            render_datasets_tab(session, user_role=user_role)  
     with tabs[2]:
-        with Session(engine) as session: render_project_dashboard(session, user_role=user_role)      
+        with Session(engine) as session: 
+            render_project_dashboard(session, user_role=user_role)      
     with tabs[3]:
         render_analytics_tab(user_role=user_role)
