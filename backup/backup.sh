@@ -16,7 +16,7 @@ run_backup() {
     DAY_OF_WEEK=$(date +"%u") # 1=Пн, 7=Вс
     
     echo "🔄 [$TIMESTAMP] Запуск бэкапа БД '$DB_NAME'..."
-    pg_dump -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -Fc -f "$DAILY_DIR/backup_$TIMESTAMP.dump"
+    pg_dump -h "$DB_HOST" -p $DB_PORT -U "$DB_USER" -d "$DB_NAME" -Fc -f "$DAILY_DIR/backup_$TIMESTAMP.dump"
     echo "✅ Ежедневный бэкап создан."
 
     if [ "$DAY_OF_WEEK" -eq 7 ]; then

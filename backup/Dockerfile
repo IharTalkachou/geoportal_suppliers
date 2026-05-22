@@ -1,4 +1,4 @@
-FROM postgres:16-alpine
+FROM postgres:17-alpine
 
 # Образ уже содержит pg_dump, pg_restore, sh и стандартные утилиты Linux
 COPY backup.sh /usr/local/bin/backup.sh

@@ -1,29 +1,31 @@
 version: '3.8'
 
 services:
-  db:
-    image: postgres:16
-    container_name: geodata_db
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASS}
-    volumes:
-      - pgdata:/var/lib/postgresql/data # Персистентное хранилище БД
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro # Авто-создание схемы при первом запуске
-    networks:
-      - app_net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -q || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 30s
-    ports:
-      - "5432:5432"  # Только для отладки! Удалите в продакшене
+  #db:
+  #  image: postgres:16
+  #  container_name: geodata_db
+  #  restart: unless-stopped
+  #  environment:
+  #    POSTGRES_DB: ${DB_NAME}
+  #    POSTGRES_USER: ${DB_USER}
+  #    POSTGRES_PASSWORD: ${DB_PASS}
+  #  volumes:
+  #    - pgdata:/var/lib/postgresql/data # Персистентное хранилище БД
+  #    - ./db/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro # Авто-создание схемы при первом запуске
+  #  networks:
+  #    - app_net
+  #  healthcheck:
+  #    test: ["CMD-SHELL", "pg_isready -q || exit 1"]
+  #    interval: 5s
+  #    timeout: 3s
+  #    retries: 10
+  #    start_period: 30s
+  #  ports:
+  #    - "5432:5432" # Только для отладки! Удалите в продакшене'''
+
   app:
     build: .
+  #  command: streamlit run src/app.py
     container_name: geodata_app
     restart: unless-stopped
     env_file: .env
@@ -36,11 +38,13 @@ services:
       - ./app_data:/app/app_data  # 🔹 Монтируем папку с сессиями
     ports:
       - "8501:8501"
-    depends_on:
-      db:
-        condition: service_healthy
+    #depends_on:
+    #  db:
+    #    condition: service_healthy
     networks:
       - app_net
+    #dns:
+    #  - 8.8.8.8
   nginx:  # ← Должен быть на том же уровне, что db и app!
     image: nginx:alpine
     container_name: geodata_nginx
@@ -63,9 +67,11 @@ services:
     container_name: geodata_db_backup
     env_file: .env
     environment:
-      - PGPASSWORD=${DB_PASS}  # Требуется для pg_dump без интерактивного ввода пароля
-      #- DB_HOST=host.docker.internal
-      - DB_HOST=db
+      - PGPASSWORD=${DB_PASS}
+      - DB_HOST=${DB_HOST}
+      - DB_USER=${DB_USER}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=5432
     volumes:
       - ./backups:/backups
     restart: unless-stopped
