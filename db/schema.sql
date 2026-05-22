@@ -1,123 +1,194 @@
--- 1. СПРАВОЧНИКИ
+-- ==========================================
+-- SCHEMA: public (PostgreSQL 18)
+-- ==========================================
+
+-- 1. Справочники статусов
+CREATE TABLE ref_statuses (
+    status_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    status_name VARCHAR(100) UNIQUE NOT NULL
+);
+
+CREATE TABLE ref_micro_statuses (
+    micro_status_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    micro_status_name VARCHAR(100) UNIQUE NOT NULL
+);
+
+CREATE TABLE ref_file_formats (
+    format_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    format_name VARCHAR(50) UNIQUE NOT NULL
+);
+
+CREATE TABLE ref_update_periods (
+    period_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    period_name VARCHAR(50) UNIQUE NOT NULL
+);
+
+-- 2. Поставщики и Контакты
 CREATE TABLE suppliers (
-    supplier_id SERIAL PRIMARY KEY,
+    supplier_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     supplier_name VARCHAR(255) NOT NULL,
     supplier_address TEXT,
     supplier_email VARCHAR(255),
     supplier_phone VARCHAR(50),
     supplier_website VARCHAR(255),
     supplier_manager VARCHAR(255),
-    supplier_notes TEXT,
-    supplier_logo TEXT
+    supplier_notes TEXT
 );
 
 CREATE TABLE contacts (
-    contact_id SERIAL PRIMARY KEY,
-    supplier_id INTEGER REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
+    contact_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    supplier_id INT NOT NULL REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
     full_name VARCHAR(255) NOT NULL,
-    position VARCHAR(255),
+    position VARCHAR(150),
     email VARCHAR(255),
     phone VARCHAR(50),
     notes TEXT
 );
-CREATE INDEX idx_contacts_supplier ON contacts(supplier_id);
 
-CREATE TABLE ref_statuses (
-    status_id SERIAL PRIMARY KEY,
-    status_code VARCHAR(50),
-    status_name TEXT NOT NULL,
-    sort_order INTEGER
-);
-
-CREATE TABLE ref_micro_statuses (
-    micro_status_id SERIAL PRIMARY KEY,
-    micro_status_code VARCHAR(50),
-    micro_status_name TEXT NOT NULL,
-    sort_order INTEGER
-);
-
+-- 3. Справочники данных
 CREATE TABLE datasets (
-    dataset_id SERIAL PRIMARY KEY,
-    dataset_name TEXT NOT NULL,
-    is_mandatory BOOLEAN DEFAULT FALSE,
-    is_basic BOOLEAN DEFAULT FALSE,
-    dataset_icon TEXT
+    dataset_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    dataset_name VARCHAR(255) UNIQUE NOT NULL
 );
 
 CREATE TABLE info_types (
-    info_id SERIAL PRIMARY KEY,
-    dataset_id INTEGER REFERENCES datasets(dataset_id) ON DELETE RESTRICT,
-    info_name TEXT NOT NULL,
-    type VARCHAR(100),
-    format VARCHAR(100),
-    update VARCHAR(100),
-    update_period VARCHAR(100)
+    info_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    dataset_id INT NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    info_name VARCHAR(255) NOT NULL,
+    type VARCHAR(50),
+    format VARCHAR(50) REFERENCES ref_file_formats(format_name),
+    "update" VARCHAR(50) REFERENCES ref_update_periods(period_name)
 );
-CREATE INDEX idx_info_types_dataset ON info_types(dataset_id);
 
-CREATE TABLE stages (
-    stage_id SERIAL PRIMARY KEY,
-    stage_name TEXT NOT NULL,
-    stage_order INTEGER NOT NULL,
-    duration_days INTEGER,
-    track_category VARCHAR(50) NOT NULL,
-    stage_type VARCHAR(20) NOT NULL CHECK (stage_type IN ('Веха', 'Задача')),
-    stage_color VARCHAR(20)
-);
-CREATE INDEX idx_stages_cat_type_order ON stages(track_category, stage_type, stage_order);
-
--- 2. ОПЕРАЦИОННЫЕ ТАБЛИЦЫ
+-- 4. Проекты
 CREATE TABLE projects (
-    project_id SERIAL PRIMARY KEY,
-    supplier_id INTEGER NOT NULL REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
-    project_name TEXT NOT NULL,
-    main_contact_id INTEGER REFERENCES contacts(contact_id) ON DELETE SET NULL,
-    status INTEGER REFERENCES ref_statuses(status_id) ON DELETE RESTRICT,
+    project_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    project_name VARCHAR(255) NOT NULL,
+    supplier_id INT NOT NULL REFERENCES suppliers(supplier_id) ON DELETE RESTRICT,
+    main_contact_id INT REFERENCES contacts(contact_id) ON DELETE SET NULL,
+    status INT REFERENCES ref_statuses(status_id),
     notes TEXT
 );
-CREATE INDEX idx_projects_supplier ON projects(supplier_id);
-CREATE INDEX idx_projects_status ON projects(status);
 
+-- 5. Состав проекта
 CREATE TABLE project_items (
-    item_id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-    dataset_id INTEGER NOT NULL REFERENCES datasets(dataset_id) ON DELETE RESTRICT,
-    info_id INTEGER NOT NULL REFERENCES info_types(info_id) ON DELETE RESTRICT,
-    tech_contact_id INTEGER REFERENCES contacts(contact_id) ON DELETE SET NULL
+    item_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    project_id INT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    dataset_id INT NOT NULL REFERENCES datasets(dataset_id) ON DELETE RESTRICT,
+    info_id INT NOT NULL REFERENCES info_types(info_id) ON DELETE RESTRICT,
+    tech_contact_id INT REFERENCES contacts(contact_id) ON DELETE SET NULL
 );
-CREATE INDEX idx_items_project ON project_items(project_id);
-CREATE INDEX idx_items_dataset ON project_items(dataset_id);
-CREATE INDEX idx_items_info ON project_items(info_id);
 
--- 3. ТРЕКИНГ
+-- 6. Справочник этапов
+CREATE TABLE stages (
+    stage_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    stage_name VARCHAR(255) NOT NULL,
+    stage_order INT NOT NULL,
+    duration_days INT DEFAULT 0,
+    track_category VARCHAR(50) NOT NULL,
+    stage_type VARCHAR(50) NOT NULL,
+    stage_color VARCHAR(20)
+);
+
+-- 7. Этапы проектов (Бюрократия)
 CREATE TABLE project_stages (
-    stage_progress_id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-    stage_id INTEGER NOT NULL REFERENCES stages(stage_id) ON DELETE RESTRICT,
-    micro_status INTEGER REFERENCES ref_micro_statuses(micro_status_id) ON DELETE RESTRICT,
-    iteration_count INTEGER DEFAULT 1,
+    stage_progress_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    project_id INT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+    stage_id INT NOT NULL REFERENCES stages(stage_id) ON DELETE RESTRICT,
+    micro_status INT NOT NULL REFERENCES ref_micro_statuses(micro_status_id),
+    iteration_count INT DEFAULT 1,
     planned_start DATE,
     planned_end DATE,
     actual_start DATE,
     actual_end DATE,
-    comments TEXT,
-    document_url TEXT
+    comments TEXT
 );
-CREATE INDEX idx_pstages_project ON project_stages(project_id);
-CREATE INDEX idx_pstages_stage ON project_stages(stage_id);
 
+-- 8. Этапы по наборам (Технология)
 CREATE TABLE item_stages (
-    stage_progress_id SERIAL PRIMARY KEY,
-    item_id INTEGER NOT NULL REFERENCES project_items(item_id) ON DELETE CASCADE,
-    stage_id INTEGER NOT NULL REFERENCES stages(stage_id) ON DELETE RESTRICT,
-    micro_status INTEGER REFERENCES ref_micro_statuses(micro_status_id) ON DELETE RESTRICT,
-    iteration_count INTEGER DEFAULT 1,
+    stage_progress_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_id INT NOT NULL REFERENCES project_items(item_id) ON DELETE CASCADE,
+    stage_id INT NOT NULL REFERENCES stages(stage_id) ON DELETE RESTRICT,
+    micro_status INT NOT NULL REFERENCES ref_micro_statuses(micro_status_id),
+    iteration_count INT DEFAULT 1,
     planned_start DATE,
     planned_end DATE,
     actual_start DATE,
     actual_end DATE,
-    comments TEXT,
-    document_url TEXT
+    comments TEXT
 );
-CREATE INDEX idx_istages_item ON item_stages(item_id);
-CREATE INDEX idx_istages_stage ON item_stages(stage_id);
+
+-- 9. АДМИНКА: Пользователи
+CREATE TABLE users (
+    user_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('admin', 'editor', 'user')),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    last_login TIMESTAMP
+);
+
+-- 10. АДМИНКА: Журнал действий (Audit Log)
+CREATE TABLE audit_log (
+    log_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id INT REFERENCES users(user_id) ON DELETE SET NULL,
+    action VARCHAR(50) NOT NULL, -- LOGIN, LOGOUT, INSERT, UPDATE, DELETE, TAB_SWITCH, EXPORT
+    target_table VARCHAR(100),
+    target_id INT,
+    old_value JSONB,
+    new_value JSONB,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 11. ПРЕДСТАВЛЕНИЕ для аналитики
+CREATE OR REPLACE VIEW v_bi_flat_export AS
+SELECT 
+    s.supplier_name,
+    p.project_name,
+    rs.status_name AS project_status,
+    d.dataset_name,
+    i.info_name,
+    st.stage_name,
+    rms.micro_status_name AS stage_micro_status,
+    ps.planned_start,
+    ps.planned_end,
+    ps.actual_start,
+    ps.actual_end,
+    ps.comments AS stage_comments,
+    NULL::TEXT AS document_url, -- Заглушка под будущие ссылки
+    ps.stage_progress_id
+FROM project_stages ps
+JOIN projects p ON ps.project_id = p.project_id
+JOIN suppliers s ON p.supplier_id = s.supplier_id
+LEFT JOIN ref_statuses rs ON p.status = rs.status_id
+JOIN stages st ON ps.stage_id = st.stage_id
+JOIN ref_micro_statuses rms ON ps.micro_status = rms.micro_status_id
+LEFT JOIN project_items pi ON ps.project_id = pi.project_id -- Упрощённая связь для плоского вида
+LEFT JOIN datasets d ON pi.dataset_id = d.dataset_id
+LEFT JOIN info_types i ON pi.info_id = i.info_id
+UNION ALL
+SELECT 
+    s.supplier_name, p.project_name, rs.status_name, d.dataset_name, i.info_name,
+    st.stage_name, rms.micro_status_name,
+    ist.planned_start, ist.planned_end, ist.actual_start, ist.actual_end,
+    ist.comments, NULL, ist.stage_progress_id
+FROM item_stages ist
+JOIN project_items pi ON ist.item_id = pi.item_id
+JOIN projects p ON pi.project_id = p.project_id
+JOIN suppliers s ON p.supplier_id = s.supplier_id
+LEFT JOIN ref_statuses rs ON p.status = rs.status_id
+JOIN stages st ON ist.stage_id = st.stage_id
+JOIN ref_micro_statuses rms ON ist.micro_status = rms.micro_status_id
+JOIN datasets d ON pi.dataset_id = d.dataset_id
+JOIN info_types i ON pi.info_id = i.info_id;
+
+-- Индексы для производительности
+CREATE INDEX idx_projects_supplier ON projects(supplier_id);
+CREATE INDEX idx_project_items_project ON project_items(project_id);
+CREATE INDEX idx_project_stages_project ON project_stages(project_id);
+CREATE INDEX idx_item_stages_item ON item_stages(item_id);
+CREATE INDEX idx_audit_log_user_time ON audit_log(user_id, created_at DESC);
+CREATE INDEX idx_users_username ON users(username);

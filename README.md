@@ -1,3 +1,14 @@
+---
+title: National Geoportal Suppliers Manage System
+emoji: 🌍
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: 1.57.0
+app_file: src/app.py
+pinned: false
+---
+
 # Система управления поставщиками Национального геопортала
 
 Система управления поставщиками, проектами и этапами сотрудничества Оператора Национального геопортала и Поставщиков пространственных данных. 

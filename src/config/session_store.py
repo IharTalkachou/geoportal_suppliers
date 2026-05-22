@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-SESSION_DIR = Path(os.getenv("SESSION_DIR", "/app/app_data/sessions"))
+SESSION_DIR = Path(os.getenv("SESSION_DIR", "./sessions"))
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_TIMEOUT_MINUTES = 30
 

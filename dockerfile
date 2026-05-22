@@ -1,33 +1,20 @@
-# база - питон 3.10 лёгкий
-FROM python:3.10-slim
+FROM python:3.13.5-slim
 
-# метаданные
-LABEL maintainer="Игорь Толкачёв <igortolkachov92@gmail.com>"
-LABEL description="Поставщики Национального геопортала"
-
-# переменные окружения для питона
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# рабочая директория внутри контейнера
 WORKDIR /app
 
-# установка системных зависимостей
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libpq-dev && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-# копирование и установка питон-зависимостей
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt ./
+COPY src/ ./src/
 
-# копирование исходного кода
-COPY . .
+RUN pip3 install -r requirements.txt
 
-# открытие порта стримлит
 EXPOSE 8501
 
-# запуск стримлит
-CMD ["streamlit", "run", "src/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+
+ENTRYPOINT ["streamlit", "run", "src/streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]

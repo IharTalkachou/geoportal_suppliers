@@ -5,9 +5,14 @@ __pycache__/
 venv/
 env/
 .env
+.env_copy
 *.egg-info/
 dist/
 build/
+.streamlit/
+app_data/sessions/
+certbot/
+backups/
 
 # IDE
 .vscode/settings.json
