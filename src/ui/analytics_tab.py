@@ -3,386 +3,363 @@ import pandas as pd
 from sqlalchemy import text
 from config.cache import query_db, clear_cache
 import plotly.express as px
+import plotly.graph_objects as go
 import io
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_analytics_data():
-    """Загружает данные из v_bi_flat_export."""
+    """
+    Загружает плоский срез данных из v_bi_flat_export, обогащая его 
+    информацией о типе трека (Бюрократия/Технология) и итерациях.
+    """
     return query_db("""
         SELECT 
-            supplier_name,
-            project_name,
-            project_status,
-            dataset_name,
-            info_name,
-            stage_name,
-            stage_micro_status,
-            planned_start,
-            planned_end,
-            actual_start,
-            actual_end,
-            stage_comments,
-            document_url
-        FROM v_bi_flat_export
-        WHERE stage_progress_id IS NOT NULL
+            v.supplier_name,
+            v.project_name,
+            v.project_status,
+            v.dataset_name,
+            v.info_name,
+            v.stage_name,
+            v.stage_micro_status,
+            v.planned_start,
+            v.planned_end,
+            v.actual_start,
+            v.actual_end,
+            v.stage_comments,
+            v.document_url,
+            s.track_category,
+            s.stage_type,
+            COALESCE(v.iteration_count, 1) as iteration_count
+        FROM v_bi_flat_export v
+        LEFT JOIN stages s ON v.stage_name = s.stage_name
+        WHERE v.stage_progress_id IS NOT NULL
     """)
 
 def render_analytics_tab(user_role="user"):
-    st.subheader("📊 Аналитика и оперативный контроль")
+    st.subheader("📊 Аналитика и операционный контроль")
     
-    # 🔍 Фильтры (перенесены из сайдбара в тело вкладки)
-    with st.expander("🔍 Фильтры данных", expanded=True):
-        cols = st.columns([2, 2, 1])
-        
-        with cols[0]:
-            suppliers = ["Все"] + sorted(load_analytics_data()["supplier_name"].dropna().unique().tolist())
-            sel_supplier = st.selectbox("Поставщик", suppliers, key="analytics_sup_filter", index=0)
-        
-        with cols[1]:
-            ref_statuses_df = query_db("SELECT status_name FROM ref_statuses ORDER BY status_id")
-            statuses = ["Все"] + ref_statuses_df["status_name"].dropna().unique().tolist()
-            sel_status = st.selectbox("Статус проекта", statuses, key="analytics_stat_filter", index=0)
-        
-        with cols[2]:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🔄 Сбросить", use_container_width=True):
-                st.session_state.analytics_sup_filter = "Все"
-                st.session_state.analytics_stat_filter = "Все"
-                st.rerun()
-
+    # Загружаем мастер-данные
     with st.spinner("🔄 Загрузка аналитики..."):
-        df = load_analytics_data()
+        df_raw = load_analytics_data()
     
-    if df.empty:
+    if df_raw.empty:
         st.warning("⚠️ База пуста. Добавьте данные через вкладки 'Поставщики' или 'Проекты'.")
         st.stop()
 
-    # Применение фильтров (мгновенно, без кнопки)
-    filtered = df.copy()
-    if sel_supplier != "Все":
-        filtered = filtered[filtered["supplier_name"] == sel_supplier]
-    if sel_status != "Все":
-        filtered = filtered[filtered["project_status"] == sel_status]
-
-    # 🔑 Приводим даты к datetime64[ns]
+    # Приводим даты к datetime64
     date_cols = ["planned_start", "planned_end", "actual_start", "actual_end"]
     for col in date_cols:
-        if col in filtered.columns:
-            filtered[col] = pd.to_datetime(filtered[col], errors="coerce")
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
 
-    TODAY = pd.Timestamp.today()
-
-    # 📈 KPI-карточки
-    st.markdown("### 🎯 Ключевые показатели")
-    kpi_cols = st.columns(4)
-    
-    total = len(filtered)
-    completed = len(filtered[filtered["stage_micro_status"] == "Выполнено"])
-    
-    with kpi_cols[0]: st.metric("Всего этапов", total)
-    with kpi_cols[1]: st.metric("✅ Завершено", f"{round(completed/total*100) if total else 0}%")
-    
-    overdue = len(filtered[
-        filtered["planned_end"].notna() & 
-        (filtered["planned_end"] < TODAY) & 
-        (filtered["stage_micro_status"] != "Выполнено")
-    ])
-    with kpi_cols[2]: st.metric("⚠️ Просрочено", overdue, delta_color="inverse")
-    
-    soon = len(filtered[
-        filtered["planned_end"].notna() &
-        (filtered["planned_end"] >= TODAY) &
-        (filtered["planned_end"] <= TODAY + pd.Timedelta(days=7)) &
-        (filtered["stage_micro_status"] != "Выполнено")
-    ])
-    with kpi_cols[3]: st.metric("📅 Дедлайн ≤7 дн.", soon)
-
-    # 📋 Оперативная сводка (таблица)
-    st.markdown("### 📋 Оперативная сводка")
-    display_df = filtered[["supplier_name", "project_name", "dataset_name", "info_name",
-                           "stage_name", "stage_micro_status", "planned_start", "planned_end", 
-                           "actual_start", "actual_end", "stage_comments", "document_url"]].copy()
-
-    def highlight_overdue(row):
-        if (row["stage_micro_status"] != "Выполнено" and 
-            pd.notna(row["planned_end"]) and 
-            row["planned_end"] < TODAY):
-            return ["background-color: #ffebee"] * len(row)
-        return [""] * len(row)
-
-    styled_df = display_df.style.apply(highlight_overdue, axis=1)
-    styled_df = styled_df.format({
-        col: lambda x: x.strftime("%d.%m.%Y") if pd.notna(x) else "" 
-        for col in date_cols
-    })
-
-    st.dataframe(
-        styled_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "document_url": st.column_config.LinkColumn("Документ", display_text="📎 Открыть"),
-            "stage_comments": st.column_config.TextColumn("Комментарий", width="medium"),
-        }
-    )
-    
-    # 📥 Экспорт в Excel
-    st.markdown("---")
-    with st.expander("📥 Экспорт отчёта в Excel"):
-        st.info("💡 Отчёт формируется в памяти и содержит 3 листа: Сводка, Детализация, Данные_Гант")
+    # ==========================================
+    # 🔍 ГЛОБАЛЬНЫЕ ФИЛЬТРЫ (Вверху вкладки)
+    # ==========================================
+    with st.expander("🔍 Глобальные фильтры данных", expanded=True):
+        cols = st.columns([2, 2, 2, 1])
         
-        if st.button("💾 Сформировать и скачать Excel", type="primary"):
+        with cols[0]:
+            suppliers = ["Все"] + sorted(df_raw["supplier_name"].dropna().unique().tolist())
+            sel_supplier = st.selectbox("Поставщик", suppliers, key="an_sup_filter", index=0)
+        
+        with cols[1]:
+            # Зависимый фильтр проектов
+            if sel_supplier == "Все":
+                available_projects = sorted(df_raw["project_name"].dropna().unique().tolist())
+            else:
+                available_projects = sorted(df_raw[df_raw["supplier_name"] == sel_supplier]["project_name"].dropna().unique().tolist())
+            projects = ["Все"] + available_projects
+            sel_project = st.selectbox("Проект", projects, key="an_proj_filter", index=0)
+            
+        with cols[2]:
+            periods = ["Все", "Текущая неделя", "Текущий месяц", "Текущий квартал", "Текущий год"]
+            sel_period = st.selectbox("Отчётный период", periods, key="an_period_filter", index=0)
+        
+        with cols[3]:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔄 Сбросить", use_container_width=True, key="an_reset_btn"):
+                st.session_state.an_sup_filter = "Все"
+                st.session_state.an_proj_filter = "Все"
+                st.session_state.an_period_filter = "Все"
+                st.rerun()
+
+    # Применение фильтров
+    filtered = df_raw.copy()
+    if sel_supplier != "Все":
+        filtered = filtered[filtered["supplier_name"] == sel_supplier]
+    if sel_project != "Все":
+        filtered = filtered[filtered["project_name"] == sel_project]
+        
+    TODAY = pd.Timestamp.today().normalize()
+
+    # Применение фильтра по периоду (попадание в плановые сроки)
+    if sel_period != "Все":
+        if sel_period == "Текущая неделя":
+            start_p = TODAY - pd.Timedelta(days=TODAY.weekday())
+            end_p = start_p + pd.Timedelta(days=6)
+        elif sel_period == "Текущий месяц":
+            start_p = TODAY.replace(day=1)
+            next_m = (start_p + pd.Timedelta(days=32)).replace(day=1)
+            end_p = next_m - pd.Timedelta(days=1)
+        elif sel_period == "Текущий квартал":
+            quarter = (TODAY.month - 1) // 3 + 1
+            start_p = pd.Timestamp(year=TODAY.year, month=(quarter - 1) * 3 + 1, day=1)
+            next_q_month = start_p.month + 3
+            if next_q_month > 12:
+                end_p = pd.Timestamp(year=TODAY.year, month=12, day=31)
+            else:
+                end_p = pd.Timestamp(year=TODAY.year, month=next_q_month, day=1) - pd.Timedelta(days=1)
+        elif sel_period == "Текущий год":
+            start_p = pd.Timestamp(year=TODAY.year, month=1, day=1)
+            end_p = pd.Timestamp(year=TODAY.year, month=12, day=31)
+
+        filtered = filtered[
+            ((filtered["planned_start"] >= start_p) & (filtered["planned_start"] <= end_p)) |
+            ((filtered["planned_end"] >= start_p) & (filtered["planned_end"] <= end_p))
+        ]
+
+    # ==========================================
+    # 🗂️ ТЕХНИЧЕСКИЕ ПОДВКЛАДКИ СТРИМЛИТ
+    # ==========================================
+    tabs = st.tabs(["🎯 KPI", "📅 Календарь", "📊 Диаграмма Ганта", "🌡️ Тепловая карта трения"])
+
+    # ------------------------------------------
+    # Подвкладка 1: KPI и Загрузка
+    # ------------------------------------------
+    with tabs[0]:
+        st.markdown("### 🎯 Ключевые управленческие показатели")
+        
+        # Считаем показатели по типам процессов
+        # Соглашения (Проекты) - Бюрократический трек
+        active_agreements = filtered[
+            (filtered["track_category"] == "1. Документарный") & 
+            (filtered["stage_micro_status"] != "Выполнено")
+        ]["project_name"].nunique()
+
+        # Протоколы (Наборы) - Технологический трек
+        active_protocols = filtered[
+            (filtered["track_category"] == "2. Технологический") & 
+            (filtered["stage_micro_status"] != "Выполнено")
+        ].groupby(["project_name", "dataset_name", "info_name"]).ngroups
+
+        # Просрочки по всем трекам
+        overdue_stages = len(filtered[
+            filtered["planned_end"].notna() & 
+            (filtered["planned_end"] < TODAY) & 
+            (filtered["stage_micro_status"] != "Выполнено")
+        ])
+
+        # Ближайшие дедлайны
+        upcoming_deadlines = len(filtered[
+            filtered["planned_end"].notna() & 
+            (filtered["planned_end"] >= TODAY) & 
+            (filtered["planned_end"] <= TODAY + pd.Timedelta(days=7)) & 
+            (filtered["stage_micro_status"] != "Выполнено")
+        ])
+
+        kpi_cols = st.columns(4)
+        with kpi_cols[0]: st.metric("📜 Соглашений в работе", active_agreements)
+        with kpi_cols[1]: st.metric("⚙️ Протоколов в работе", active_protocols)
+        with kpi_cols[2]: st.metric("🚨 Просрочено этапов", overdue_stages, delta_color="inverse")
+        with kpi_cols[3]: st.metric("📅 Дедлайны ≤7 дней", upcoming_deadlines)
+
+        st.markdown("---")
+        col_pie, col_bar = st.columns(2)
+
+        with col_pie:
+            st.markdown("##### 🥧 Доли этапов по микростатусам")
+            status_counts = filtered["stage_micro_status"].value_counts().reset_index()
+            status_counts.columns = ["status", "count"]
+            color_map = {
+                "В работе": "#4CAF50", "Планируется": "#2196F3", "Ожидание": "#FF9800",
+                "Выполнено": "#9E9E9E", "Просрочено": "#F44336", "Отменено": "#607D8B"
+            }
+            fig_pie = px.pie(status_counts, values="count", names="status", color="status",
+                             color_discrete_map=color_map, hole=0.4)
+            fig_pie.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with col_bar:
+            st.markdown("##### 📊 Распределение активных задач по этапам")
+            active_tasks = filtered[filtered["stage_micro_status"] != "Выполнено"]
+            if not active_tasks.empty:
+                # Группируем по этапам и категории трека
+                workload = active_tasks.groupby(["stage_name", "track_category"]).size().reset_index(name="tasks_count")
+                fig_bar = px.bar(workload, x="tasks_count", y="stage_name", color="track_category",
+                                 orientation="h",
+                                 labels={"tasks_count": "Количество активных задач", "stage_name": "Этап", "track_category": "Трек"},
+                                 color_discrete_map={"1. Документарный": "#2196F3", "2. Технологический": "#4CAF50"})
+                fig_bar.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.info("Нет активных задач в выбранном диапазоне.")
+
+    # ------------------------------------------
+    # Подвкладка 2: Календарь-Agenda
+    # ------------------------------------------
+    with tabs[1]:
+        st.markdown("### 📅 Интерактивное расписание и планировщик")
+        st.caption("Отображаются плановые даты старта и дедлайнов по всем активным процессам.")
+
+        events = []
+        for _, row in filtered.iterrows():
+            p_start = row["planned_start"]
+            p_end = row["planned_end"]
+            status = row["stage_micro_status"]
+            track = "📜 Бюрократия" if row["track_category"] == "1. Документарный" else "⚙️ Технология"
+            label_details = f"{row['dataset_name']} → {row['info_name']}" if pd.notna(row['dataset_name']) else "Соглашение"
+
+            if pd.notna(p_start):
+                events.append({
+                    "date": p_start.date(),
+                    "type": "🚀 Старт этапа",
+                    "track": track,
+                    "project": row["project_name"],
+                    "stage": row["stage_name"],
+                    "details": label_details,
+                    "status": status
+                })
+            if pd.notna(p_end):
+                is_overdue = p_end < TODAY and status != "Выполнено"
+                icon = "🚨 Нарушен дедлайн" if is_overdue else "🎯 Плановый дедлайн"
+                events.append({
+                    "date": p_end.date(),
+                    "type": icon,
+                    "track": track,
+                    "project": row["project_name"],
+                    "stage": row["stage_name"],
+                    "details": label_details,
+                    "status": status
+                })
+
+        if not events:
+            st.info("📭 Нет запланированных событий на выбранный период.")
+        else:
+            events_df = pd.DataFrame(events).sort_values(by="date")
+            grouped_events = events_df.groupby("date")
+            
+            for ev_date, group in grouped_events:
+                # Красивое форматирование даты
+                date_str = ev_date.strftime("%d.%m.%Y (%A)")
+                if ev_date == TODAY.date():
+                    date_str = f"🔥 СЕГОДНЯ — {date_str}"
+                
+                # Показываем красивый спойлер с количеством задач на этот день
+                with st.expander(f"📅 {date_str}  —  Событий: {len(group)}"):
+                    for _, ev in group.iterrows():
+                        color_emoji = "🔴" if "Нарушен" in ev["type"] else ("🟢" if "Старт" in ev["type"] else "🟡")
+                        st.markdown(
+                            f"{color_emoji} **{ev['type']}** | {ev['track']} | **{ev['project']}** — "
+                            f"*{ev['stage']}* | `{ev['details']}` | Статус: `{ev['status']}`"
+                        )
+
+    # ------------------------------------------
+    # Подвкладка 3: Диаграмма Ганта (Два трека каскадом)
+    # ------------------------------------------
+    with tabs[2]:
+        st.markdown("### 📊 Каскадный Гант-план")
+        st.caption("Каскадный график наглядно показывает переход от Бюрократии (синий цвет) к Технологии (зеленый).")
+
+        gantt_data = filtered.dropna(subset=["planned_start", "planned_end"]).copy()
+        gantt_data = gantt_data[gantt_data["planned_end"] >= gantt_data["planned_start"]]
+
+        if gantt_data.empty:
+            st.warning("⚠️ Нет корректных плановых дат для построения графика.")
+        else:
+            gantt_mode = st.radio("Режим отображения Ганта", ["По проектам (Общий)", "По наборам данных (Детально)"], horizontal=True, key="an_gantt_mode")
+            
+            if gantt_mode == "По проектам (Общий)":
+                gantt_data["y_axis"] = gantt_data["project_name"]
+            else:
+                gantt_data["y_axis"] = gantt_data["project_name"] + " | " + gantt_data["dataset_name"].fillna("Бюрократия")
+
+            fig_gantt = px.timeline(
+                gantt_data,
+                x_start="planned_start",
+                x_end="planned_end",
+                y="y_axis",
+                color="track_category",
+                color_discrete_map={"1. Документарный": "#1E88E5", "2. Технологический": "#43A047"},
+                hover_data={"stage_name": True, "planned_start": "|%d.%m.%Y", "planned_end": "|%d.%m.%Y", "stage_micro_status": True},
+                labels={"y_axis": "Процесс", "track_category": "Трек"}
+            )
+            fig_gantt.update_yaxes(autorange="reversed")
+            fig_gantt.update_layout(height=450, margin=dict(l=150, r=20, t=30, b=20), xaxis_title="Плановые временные рамки")
+            st.plotly_chart(fig_gantt, use_container_width=True)
+
+    # ------------------------------------------
+    # Подвкладка 4: Тепловая карта трения
+    # ------------------------------------------
+    with tabs[3]:
+        st.markdown("### 🌡️ Матрицы рисков и технологического трения")
+        
+        heatmap_mode = st.radio("Анализировать:", ["Юридические задержки (Бюрократия)", "Проблемные итерации (Технология)"], horizontal=True, key="an_heat_mode")
+
+        if heatmap_mode == "Юридические задержки (Бюрократия)":
+            st.caption("Показывает среднее количество дней задержки дедлайна по каждому Поставщику и документарному этапу.")
+            buro_data = filtered[filtered["track_category"] == "1. Документарный"].copy()
+            
+            if buro_data.empty:
+                st.info("Нет данных для построения карты.")
+            else:
+                # Вычисляем задержку в днях
+                buro_data["delay"] = 0
+                mask = buro_data["actual_end"].isna() & (buro_data["planned_end"] < TODAY)
+                buro_data.loc[mask, "delay"] = (TODAY - buro_data.loc[mask, "planned_end"]).dt.days
+                mask_act = buro_data["actual_end"].notna() & (buro_data["actual_end"] > buro_data["planned_end"])
+                buro_data.loc[mask_act, "delay"] = (buro_data.loc[mask_act, "actual_end"] - buro_data.loc[mask_act, "planned_end"]).dt.days
+                buro_data["delay"] = buro_data["delay"].clip(lower=0)
+
+                # Строим пивот
+                pivot = buro_data.pivot_table(index="supplier_name", columns="stage_name", values="delay", aggfunc="mean").round(1)
+                
+                fig_heat = px.imshow(pivot, labels=dict(x="Этап Бюрократии", y="Поставщик", color="Задержка (дн.)"),
+                                     color_continuous_scale="Reds", aspect="auto")
+                fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+        else:
+            st.caption("Показывает среднее количество кругов проверок (итераций) по каждому Набору данных и техническому этапу.")
+            tech_data = filtered[filtered["track_category"] == "2. Технологический"].copy()
+            
+            if tech_data.empty:
+                st.info("Нет данных для построения карты.")
+            else:
+                # Строим пивот
+                pivot = tech_data.pivot_table(index="dataset_name", columns="stage_name", values="iteration_count", aggfunc="mean").round(1)
+                
+                fig_heat = px.imshow(pivot, labels=dict(x="Этап Технологии", y="Набор данных", color="Итерации (среднее)"),
+                                     color_continuous_scale="Purples", aspect="auto")
+                fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+    # 📥 Сохраняем блок экспорта отчета в Excel (в самом низу вкладки)
+    st.markdown("---")
+    with st.expander("📥 Экспорт сводного отчета в Excel"):
+        if st.button("💾 Сформировать и скачать Excel", type="primary", key="an_excel_download"):
             try:
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    
-                    export_df = filtered.copy()
-                    today = pd.Timestamp.today()
-                    export_df["is_overdue"] = (
-                        export_df["planned_end"].notna() & 
-                        (export_df["planned_end"] < today) & 
-                        (export_df["stage_micro_status"] != "Выполнено")
-                    )
-
                     # Лист 1: Сводка
-                    summary = export_df.groupby(["supplier_name", "project_name"]).agg(
+                    summary = filtered.groupby(["supplier_name", "project_name"]).agg(
                         total=("stage_name", "count"),
-                        completed=("stage_micro_status", lambda x: (x == "Выполнено").sum()),
-                        overdue=("is_overdue", "sum")
+                        completed=("stage_micro_status", lambda x: (x == "Выполнено").sum())
                     ).reset_index()
-                    summary["progress_pct"] = (summary["completed"] / summary["total"] * 100).round(1)
                     summary.to_excel(writer, sheet_name="Сводка", index=False)
 
                     # Лист 2: Детализация
-                    detail = export_df.copy()
+                    detail = filtered.copy()
                     for col in date_cols:
                         if col in detail.columns:
                             detail[col] = pd.to_datetime(detail[col], errors="coerce").dt.strftime("%d.%m.%Y")
-                    detail = detail.drop(columns=["is_overdue"], errors="ignore")
                     detail.to_excel(writer, sheet_name="Детализация", index=False)
-
-                    # Лист 3: Данные для Ганта
-                    gantt_data = export_df[["project_name", "stage_name", "planned_start", "planned_end", "stage_micro_status"]].dropna(subset=["planned_start", "planned_end"])
-                    gantt_data[["planned_start", "planned_end"]] = gantt_data[["planned_start", "planned_end"]].apply(pd.to_datetime, errors="coerce").apply(lambda x: x.dt.strftime("%d.%m.%Y"))
-                    gantt_data.to_excel(writer, sheet_name="Данные_Гант", index=False)
-
-                    # Авто-ширина колонок
-                    workbook = writer.book
-                    for sheet_name in ["Сводка", "Детализация", "Данные_Гант"]:
-                        worksheet = writer.sheets[sheet_name]
-                        for i in range(10):  # Примерная ширина
-                            worksheet.set_column(i, i, 18)
 
                 buffer.seek(0)
                 filename = f"geodata_report_{pd.Timestamp.today().strftime('%Y%m%d_%H%M')}.xlsx"
                 st.download_button(
-                    label=f"📥 Скачать {filename}",
-                    data=buffer.getvalue(),
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label=f"📥 Скачать {filename}", data=buffer.getvalue(),
+                    file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 st.success("✅ Отчёт успешно сформирован!")
             except Exception as e:
                 st.error(f"❌ Ошибка генерации Excel: {e}")
-    
-    # 📊 Дополнительные блоки аналитики
-    render_process_summary(filtered)
-    render_gantt_chart(filtered)
-    render_progress_dashboard(filtered)
-
-def render_process_summary(filtered_df):
-    st.markdown("---")
-    st.subheader("📋 Сводная таблица процессов")
-    
-    if filtered_df.empty:
-        st.info("Нет данных для отображения.")
-        return
-
-    df_calc = filtered_df.copy()
-    today = pd.Timestamp.today().normalize()
-    
-    mask_overdue = df_calc["planned_end"].notna() & (df_calc["stage_micro_status"] != "Выполнено")
-    df_calc.loc[mask_overdue, "delay_days"] = (today - df_calc.loc[mask_overdue, "planned_end"]).dt.days
-    df_calc["delay_days"] = df_calc["delay_days"].fillna(0).clip(lower=0)
-    df_calc.loc[df_calc["stage_micro_status"] == "Выполнено", "delay_days"] = 0
-
-    summary_cols = [
-        "supplier_name", "project_name", "dataset_name", "info_name", 
-        "stage_name", "stage_micro_status", "delay_days", "stage_comments"
-    ]
-    valid_cols = [c for c in summary_cols if c in df_calc.columns]
-    
-    summary_df = df_calc[valid_cols].sort_values(by=valid_cols[:-2]).reset_index(drop=True)
-
-    supplier_palette = {}
-    colors = ["#e8f5e9", "#e3f2fd", "#fff3e0", "#f3e5f5", "#e0f7fa", "#fce4ec"]
-    
-    def get_supplier_bg(supplier):
-        if supplier not in supplier_palette:
-            idx = len(supplier_palette) % len(colors)
-            supplier_palette[supplier] = f"background-color: {colors[idx]}"
-        return supplier_palette[supplier]
-
-    def highlight_row(row):
-        supplier = row["supplier_name"]
-        delay = row.get("delay_days", 0)
-        status = row.get("stage_micro_status", "")
-        
-        if delay > 0 and status != "Выполнено":
-            return ["background-color: #ffebee"] * len(row)
-        return [get_supplier_bg(supplier)] * len(row)
-
-    styled = summary_df.style.apply(highlight_row, axis=1)
-    
-    styled = styled.format({
-        "delay_days": lambda x: f"{int(x)} дн." if x > 0 else "–",
-        "stage_comments": lambda x: (str(x)[:60] + "...") if pd.notna(x) and len(str(x)) > 60 else x
-    })
-
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=550)
-    st.caption("💡 *Красный фон = просроченный этап. Пастельный фон = группировка по поставщику.*")
-    
-def render_gantt_chart(filtered_df):
-    st.markdown("---")
-    st.subheader("📅 Гант: Временная шкала проектов")
-    
-    if filtered_df.empty:
-        st.info("Нет данных для отображения.")
-        return
-
-    gantt_data = filtered_df[["project_name", "stage_name", "planned_start", "planned_end", "stage_micro_status"]].copy()
-    gantt_data = gantt_data.dropna(subset=["planned_start", "planned_end"])
-    gantt_data = gantt_data[gantt_data["planned_end"] >= gantt_data["planned_start"]]
-    
-    if gantt_data.empty:
-        st.warning("⚠️ Нет корректных плановых дат для построения графика.")
-        return
-
-    color_map = {
-        "В работе": "#4CAF50",
-        "Планируется": "#2196F3",
-        "Ожидание": "#FF9800",
-        "Выполнено": "#9E9E9E",
-        "Просрочено": "#F44336",
-        "Отменено": "#607D8B"
-    }
-
-    fig = px.timeline(
-        gantt_data,
-        x_start="planned_start",
-        x_end="planned_end",
-        y="project_name", 
-        color="stage_micro_status",
-        color_discrete_map=color_map,
-        hover_data={"stage_name": True, "planned_start": "|%d.%m.%Y", "planned_end": "|%d.%m.%Y"},
-        labels={"project_name": "Проект", "stage_micro_status": "Статус этапа"}
-    )
-
-    fig.update_yaxes(autorange="reversed") 
-    fig.update_layout(
-        legend_title_text="Микростатус",
-        height=450,
-        margin=dict(l=150, r=20, t=30, b=20),
-        xaxis_title="Плановые сроки"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-    
-def render_progress_dashboard(filtered_df):
-    st.markdown("---")
-    st.subheader("📊 Прогресс выполнения")
-    
-    if filtered_df.empty:
-        st.info("Нет данных для отображения.")
-        return
-
-    st.markdown("### 🎯 Завершённость по уровням")
-    cards = st.columns(3)
-    
-    by_supplier = filtered_df.groupby("supplier_name").apply(
-        lambda x: (x["stage_micro_status"] == "Выполнено").sum() / len(x) * 100 if len(x) > 0 else 0
-    ).round(1)
-    
-    with cards[0]:
-        avg_supplier = by_supplier.mean()
-        st.metric("📁 В среднем по поставщикам", f"{avg_supplier:.1f}%")
-        st.progress(avg_supplier / 100)
-    
-    by_project = filtered_df.groupby("project_name").apply(
-        lambda x: (x["stage_micro_status"] == "Выполнено").sum() / len(x) * 100 if len(x) > 0 else 0
-    ).round(1)
-    
-    with cards[1]:
-        avg_project = by_project.mean()
-        st.metric("📂 В среднем по проектам", f"{avg_project:.1f}%")
-        st.progress(avg_project / 100)
-    
-    by_dataset = filtered_df.groupby("dataset_name").apply(
-        lambda x: (x["stage_micro_status"] == "Выполнено").sum() / len(x) * 100 if len(x) > 0 else 0
-    ).round(1)
-    
-    with cards[2]:
-        avg_dataset = by_dataset.mean()
-        st.metric("🗃️ В среднем по наборам", f"{avg_dataset:.1f}%")
-        st.progress(avg_dataset / 100)
-
-    st.markdown("### 📋 Детализация с прогресс-барами")
-    
-    progress_df = filtered_df.groupby(["supplier_name", "project_name", "dataset_name"]).agg(
-        total_stages=("stage_name", "count"),
-        completed_stages=("stage_micro_status", lambda x: (x == "Выполнено").sum()),
-        info_types=("info_name", lambda x: ", ".join(sorted(x.unique()))[:100])
-    ).reset_index()
-    
-    progress_df["progress_pct"] = (progress_df["completed_stages"] / progress_df["total_stages"] * 100).round(1)
-    progress_df["progress_pct"] = progress_df["progress_pct"].clip(0, 100)
-
-    st.dataframe(
-        progress_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "supplier_name": st.column_config.TextColumn("Поставщик"),
-            "project_name": st.column_config.TextColumn("Проект"),
-            "dataset_name": st.column_config.TextColumn("Набор"),
-            "total_stages": st.column_config.NumberColumn("Всего этапов", format="%d"),
-            "completed_stages": st.column_config.NumberColumn("✅ Завершено", format="%d"),
-            "progress_pct": st.column_config.ProgressColumn("Прогресс", min_value=0, max_value=100, format="%.1f%%"),
-            "info_types": st.column_config.TextColumn("Виды сведений", width="medium"),
-        }
-    )
-
-    st.markdown("### 🥧 Загрузка по микро-статусам")
-    
-    status_counts = filtered_df["stage_micro_status"].value_counts().reset_index()
-    status_counts.columns = ["status", "count"]
-    
-    fig = px.pie(
-        status_counts,
-        values="count",
-        names="status",
-        color="status",
-        color_discrete_map={
-            "В работе": "#4CAF50",
-            "Планируется": "#2196F3", 
-            "Ожидание": "#FF9800",
-            "Выполнено": "#9E9E9E",
-            "Просрочено": "#F44336",
-            "Отменено": "#607D8B"
-        },
-        hole=0.4
-    )
-    
-    fig.update_layout(
-        height=400,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
-        margin=dict(l=20, r=20, t=30, b=80)
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    st.dataframe(
-        status_counts.assign(доля=lambda x: (x["count"] / x["count"].sum() * 100).round(1).astype(str) + "%"),
-        hide_index=True,
-        use_container_width=True
-    )

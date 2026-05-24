@@ -10,6 +10,10 @@ def render_project_dashboard(session, user_role="user"):
     st.subheader("📂 Управление проектами")
     is_readonly = (user_role == "user")
 
+    # 🔹 Инициализация версии списка проектов (гарантирует сброс кэша виджета)
+    if "proj_list_ver" not in st.session_state:
+        st.session_state["proj_list_ver"] = 0
+        
     if "dash_edit_mode" not in st.session_state:
         st.session_state.dash_edit_mode = False
     if "selected_project_id" not in st.session_state:
@@ -18,27 +22,77 @@ def render_project_dashboard(session, user_role="user"):
     # 🔍 1. Зависимые фильтры
     suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
     sup_map = dict(zip(suppliers["supplier_name"], suppliers["supplier_id"]))
-    selected_sup = st.selectbox("🔍 Поставщик", ["Все"] + list(sup_map.keys()), key="dash_sup_filter")
+    
+    # ✅ ИСПРАВЛЕНИЕ 2: Полная очистка состояния при смене поставщика
+    def _on_supplier_change():
+        # 1. Сбрасываем глобальный ID
+        st.session_state["selected_project_id"] = None
+        
+        # 2. Высчитываем текущий ключ виджета "Проект" и удаляем его из памяти.
+        # Без своей памяти виджет принудительно посмотрит на параметр index=0.
+        current_ver = st.session_state.get("proj_list_ver", 0)
+        widget_key = f"dash_proj_filter_v{current_ver}"
+        if widget_key in st.session_state:
+            del st.session_state[widget_key]
 
+    selected_sup = st.selectbox(
+        "🔍 Поставщик", 
+        ["Все"] + list(sup_map.keys()), 
+        key="dash_sup_filter",
+        on_change=_on_supplier_change
+    )
+    
+    # Загружаем проекты
+    cache_buster = st.session_state.get("proj_list_ver", 0)
+    
     if selected_sup == "Все":
-        projects = query_db("SELECT project_id, project_name FROM projects ORDER BY project_name")
+        projects = query_db(f"SELECT project_id, project_name FROM projects ORDER BY project_name /* v{cache_buster} */")
     else:
-        projects = query_db("SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name", {"sid": sup_map[selected_sup]})
+        projects = query_db(f"SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name /* v{cache_buster} */", {"sid": sup_map[selected_sup]})
 
     proj_map = dict(zip(projects["project_id"], projects["project_name"]))
+    proj_options = [None] + list(proj_map.keys())
+
+    # ✅ ИСПРАВЛЕНИЕ 2: Вычисляем индекс, чтобы он либо сбросился в 0, либо удержал выбранный проект
+    current_proj = st.session_state.get("selected_project_id")
+    if current_proj in proj_options:
+        default_idx = proj_options.index(current_proj)
+    else:
+        default_idx = 0
+
     selected_proj_id = st.selectbox(
         "🔍 Проект", 
-        [None] + list(proj_map.keys()), 
+        proj_options, 
+        index=default_idx, # Управляем выбором через индекс
         format_func=lambda x: proj_map.get(x, "Выберите проект..."), 
-        key="dash_proj_filter"
+        # ✅ ИСПРАВЛЕНИЕ 3: Динамический ключ. При переименовании cache_buster увеличится,
+        # ключ изменится, и Streamlit ПРИНУДИТЕЛЬНО перерисует имена проектов!
+        key=f"dash_proj_filter_v{cache_buster}" 
     )
-    st.session_state["selected_project_id"] = selected_proj_id # 🔹 Сохраняем в сессию
+    
+    # Валидация и сохранение ID (стало проще и чище)
+    if selected_proj_id is not None:
+        try:
+            st.session_state["selected_project_id"] = int(selected_proj_id)
+        except (ValueError, TypeError):
+            st.session_state["selected_project_id"] = None
+    else:
+        st.session_state["selected_project_id"] = None
 
-    if not selected_proj_id:
+    # Если проект не выбран или невалиден — показываем подсказку
+    if not st.session_state.get("selected_project_id"):
         st.info("👆 Выберите поставщика и проект для начала работы.")
         return
 
-    # 📋 2. Карточка проекта
+    # Безопасное приведение к int
+    try:
+        proj_id_int = int(st.session_state["selected_project_id"])
+    except (ValueError, TypeError):
+        st.error("⚠️ Некорректный идентификатор проекта. Пожалуйста, выберите проект заново.")
+        st.session_state["selected_project_id"] = None
+        st.rerun()
+
+    # 📋 2. Карточка проекта (используем валидный proj_id_int)
     proj_data = query_db("""
         SELECT p.project_id, p.supplier_id, p.project_name, 
                s.supplier_name, c.full_name, rs.status_name, p.notes
@@ -47,7 +101,7 @@ def render_project_dashboard(session, user_role="user"):
         LEFT JOIN contacts c ON p.main_contact_id = c.contact_id
         LEFT JOIN ref_statuses rs ON p.status = rs.status_id
         WHERE p.project_id = :pid
-    """, {"pid": selected_proj_id}).iloc[0]
+    """, {"pid": proj_id_int}).iloc[0]
 
     st.markdown("### 📋 Детали проекта")
     st.metric("📂 Проект", proj_data['project_name'])
@@ -112,6 +166,9 @@ def render_project_dashboard(session, user_role="user"):
                         "notes": p_notes, "id": int(selected_proj_id)
                     })
                     session.commit(); clear_cache()
+                    # 🔹 Увеличиваем версию → виджет принудительно перестроит метки
+                    st.session_state["proj_list_ver"] += 1
+                    
                     st.session_state.dash_edit_mode = False
                     st.success("✅ Реквизиты обновлены!"); st.rerun()
                 except Exception as e:
@@ -138,7 +195,7 @@ def render_project_dashboard(session, user_role="user"):
         LEFT JOIN contacts c ON pi.tech_contact_id = c.contact_id
         WHERE pi.project_id = :pid
         ORDER BY d.dataset_name, i.info_name
-    """, {"pid": selected_proj_id})
+    """, {"pid": proj_id_int})
 
     st.dataframe(items_df[["dataset_name", "info_name", "tech_contact"]], 
                  use_container_width=True, hide_index=True,
@@ -265,6 +322,6 @@ def render_project_dashboard(session, user_role="user"):
     
     tab_buro, tab_tech = st.tabs(["📜 Бюрократия", "⚙️ Технология"])
     with tab_buro:
-        render_bureaucracy_tab(session, selected_proj_id, user_role=user_role)
+        render_bureaucracy_tab(session, proj_id_int, user_role=user_role)  # ✅ proj_id_int
     with tab_tech:
-        render_technology_tab(session, selected_proj_id, user_role=user_role)
+        render_technology_tab(session, proj_id_int, user_role=user_role)   # ✅ proj_id_int

@@ -36,6 +36,7 @@ services:
       SESSION_DIR: "/app/app_data/sessions"  # 🔹 Явный путь
     volumes:
       - ./app_data:/app/app_data  # 🔹 Монтируем папку с сессиями
+      - ./:/app                   # 🔹 пробрасывает весь код внутрь контейнера
     ports:
       - "8501:8501"
     #depends_on:
