@@ -16,7 +16,7 @@ def render_contacts_tab(session):
 
     if not df.empty:
         st.dataframe(df[["supplier_name", "full_name", "position", "email", "phone", "notes"]], 
-                     use_container_width=True, hide_index=True, column_config={
+                     width="stretch", hide_index=True, column_config={
             "supplier_name": "Поставщик",
             "full_name": "ФИО / Контакт",
             "position": "Должность",
@@ -45,7 +45,7 @@ def render_contacts_tab(session):
         supplier_map = {row["supplier_name"]: row["supplier_id"] for _, row in suppliers.iterrows()}
         selected_supplier = st.selectbox("Поставщик *", list(supplier_map.keys()))
 
-        submitted = st.form_submit_button("💾 Сохранить", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Сохранить", type="primary", width="stretch")
 
         if submitted:
             if not full_name.strip():

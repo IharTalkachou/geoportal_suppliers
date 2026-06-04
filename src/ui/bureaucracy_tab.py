@@ -46,7 +46,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
 
     # 🔐 Таблица ВСЕГДА в режиме просмотра
     st.dataframe(ps_df[["stage_name", "micro_status_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
-                 use_container_width=True, hide_index=True,
+                 width="stretch", hide_index=True,
                  column_config={
                      "stage_name": "Этап", "micro_status_name": "Микростатус",
                      "iteration_count": st.column_config.NumberColumn("Итерация", format="%d"),

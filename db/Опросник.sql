@@ -1,9 +1,10 @@
 -- создание типов для таблиц
 -- для surveys.it_regulations (виды ограничительных грифов)
---CREATE TYPE restrictions AS ENUM ('Открытые данные', 'Для служебного использования', 'Коммерческая информация', 'Иное');
+CREATE TYPE restrictions AS ENUM ('Открытые данные', 'Для служебного использования', 'Коммерческая информация', 'Иное');
 -- для surveys.it_coordinate_determining (виды способов определения координат)
---CREATE TYPE definitions AS ENUM ('Автоматический', 'Полуавтоматический', 'Ручной');
+CREATE TYPE definitions AS ENUM ('Автоматический', 'Полуавтоматический', 'Ручной', 'Иное');
 
+-- создание таблиц
 -- таблица-справочник вариантов информационного взаимодействия 
 CREATE TABLE ref_interactions (
     interaction_id SERIAL PRIMARY KEY,
@@ -16,7 +17,6 @@ CREATE TABLE surveys (
     survey_id SERIAL PRIMARY KEY,
     received_date DATE NOT NULL,
     supplier_id INTEGER NOT NULL, 
-    info_type_id INTEGER NOT NULL, 
     it_description TEXT NOT NULL,
     it_purpose TEXT NOT NULL,
     it_legal_status TEXT NOT NULL, 
@@ -30,7 +30,7 @@ CREATE TABLE surveys (
     it_metadata_base TEXT NOT NULL,
     it_coordinate_system TEXT NOT NULL,
     it_spatial_extent TEXT NOT NULL,
-    it_actual_date DATE NOT NULL,
+    it_actual_date TEXT NOT NULL,
     it_update TEXT NOT NULL,
     it_spatial_scale TEXT NOT NULL,
     it_classification TEXT NOT NULL,
@@ -42,7 +42,6 @@ CREATE TABLE surveys (
     it_distribution_method TEXT NOT NULL,
     it_distribution_protocol TEXT,
     it_base_services TEXT NOT NULL,
-    interaction_id INTEGER NOT NULL,
     it_cis_publication BOOLEAN NOT NULL,
 
     -- определение связей
@@ -50,11 +49,6 @@ CREATE TABLE surveys (
     CONSTRAINT fk_survey_supplier
         FOREIGN KEY (supplier_id)
         REFERENCES suppliers(supplier_id)
-        ON DELETE CASCADE,
-    -- внешний ключ вида сведений
-    CONSTRAINT fk_survey_info_type
-        FOREIGN KEY (info_type_id)
-        REFERENCES info_types(info_id)
         ON DELETE CASCADE,
     -- внешний ключ вариантов информационного взаимодействия
     CONSTRAINT fk_survey_interaction
@@ -68,7 +62,6 @@ COMMENT ON TABLE surveys IS 'Результаты первичной техни�
 COMMENT on COLUMN surveys.survey_id IS 'Идентификатор опросника';
 COMMENT on COLUMN surveys.received_date IS 'Дата получения заполненного опросника';
 COMMENT on COLUMN surveys.supplier_id IS 'Идентификатор поставщика';
-COMMENT on COLUMN surveys.info_type_id IS 'Идентификатор вида сведений';
 COMMENT on COLUMN surveys.it_description IS 'Описание набора ПД';
 COMMENT on COLUMN surveys.it_purpose IS 'Назначение набора ПД (предполагаемая целевая аудитория при размещении на НГ)';
 COMMENT on COLUMN surveys.it_legal_status IS 'Правовой статус набора ПД (основание для формирования и ведения набора ПД)';
@@ -94,7 +87,6 @@ COMMENT on COLUMN surveys.it_distribution_format IS 'Возможные форм
 COMMENT on COLUMN surveys.it_distribution_method IS 'Способы предоставления и протоколы обмена набора ПД в цифровой форме. Справочно: способы предоставления - на магнитном носителе, по электронной почте, в виде сервиса и другие';
 COMMENT on COLUMN surveys.it_distribution_protocol IS 'Способы предоставления и протоколы обмена набора ПД в цифровой форме. Справочно: протоколы обмена - HTTPS, WMS, WMTS, REST API и другие';
 COMMENT on COLUMN surveys.it_base_services IS 'Предполагаемые базовые сервисы на основе набора ПД для Национального геопортала. Справочно: визуализация, поиск, фильтрация, загрузка и другие';
-COMMENT on COLUMN surveys.interaction_id IS 'Наиболее предпочтительный вариант информационного взаимодействия с оператором Национального геопортала';
 COMMENT on COLUMN surveys.it_cis_publication IS 'Допускается размещение и публикация открытых наборов ПД на Геопортале инфраструктуры пространственных данных государств-участников СНГ';
 
 -- таблица-связка "опросник-контакты"
@@ -143,3 +135,36 @@ COMMENT ON TABLE survey_links IS 'Таблица-связка между опр�
 COMMENT on COLUMN survey_links.survey_link_id IS 'Идентификатор связи опросник-ссылка';
 COMMENT on COLUMN survey_links.survey_id IS 'Идентификатор опросника';
 COMMENT on COLUMN survey_links.survey_link IS 'Ссылка поставщика на НПД, сервис или вариант доступа';
+
+-- таблица-связка "опросник - вид сведений"
+CREATE TABLE survey_info_types (
+    link_id SERIAL PRIMARY KEY,
+    survey_id INTEGER NOT NULL REFERENCES surveys(survey_id) ON DELETE CASCADE,
+    info_id INTEGER NOT NULL REFERENCES info_types(info_id) ON DELETE CASCADE,
+    -- уникальность пары "опросник - вид сведений"
+    CONSTRAINT unique_survey_info UNIQUE (survey_id, info_id)
+);
+
+-- комментарии к таблице-связке "опросник - вид сведений"
+COMMENT ON TABLE survey_info_types IS 'Связь опросников с несколькими видами сведений';
+-- комментарии к полям таблицы-связки "опросник-ссылки"
+COMMENT ON COLUMN survey_info_types.link_id IS 'Идентификатор связи "опросник - вид сведений"';
+COMMENT ON COLUMN survey_info_types.survey_id IS 'Идентификатор опросника';
+COMMENT ON COLUMN survey_info_types.info_id IS 'Идентификатор вида сведений';
+
+
+-- таблица-связка для "опросник - варианты взаимодействия"
+CREATE TABLE survey_interactions (
+    link_id SERIAL PRIMARY KEY,
+    survey_id INTEGER NOT NULL REFERENCES surveys(survey_id) ON DELETE CASCADE,
+    interaction_id INTEGER NOT NULL REFERENCES ref_interactions(interaction_id) ON DELETE CASCADE,
+    -- уникальность пары "опросник - варианты взаимодействия"
+    CONSTRAINT unique_survey_interaction_link UNIQUE (survey_id, interaction_id)
+);
+
+-- комментарии к таблице-связке "опросник - варианты взаимодействия"
+COMMENT ON TABLE survey_interactions IS 'Связь опросников с несколькими вариантами взаимодействия';
+-- комментарии к полям таблицы-связки "опросник - варианты взаимодействия"
+COMMENT on COLUMN survey_interactions.link_id IS 'Идентификатор связи "опросник - варианты взаимодействия"'
+COMMENT on COLUMN survey_interactions.survey_id IS 'Идентификатор опросника'
+COMMENT on COLUMN survey_interactions.interaction_id IS 'Идентификатор варианта информационного взаимодействия с оператором Национального геопортала';

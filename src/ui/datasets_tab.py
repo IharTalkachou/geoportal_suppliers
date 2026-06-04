@@ -18,7 +18,7 @@ def render_datasets_tab(session, user_role="user"):
     show_mandatory_only = st.checkbox("Показывать только обязательные наборы", key="ds_mandatory_filter")
     display_ds = ds_df[ds_df["is_mandatory"]] if show_mandatory_only else ds_df
 
-    st.dataframe(display_ds[["dataset_name", "is_mandatory", "is_basic"]], use_container_width=True, hide_index=True,
+    st.dataframe(display_ds[["dataset_name", "is_mandatory", "is_basic"]], width="stretch", hide_index=True,
                  column_config={"dataset_name": "Название", "is_mandatory": "Обязательный", "is_basic": "Базовый"})
 
     # 🔽 2. Форма создания/редактирования (скрыта для user)
@@ -118,7 +118,7 @@ def render_datasets_tab(session, user_role="user"):
     """
     info_df = query_db(info_query, {"did": sel_ds_id})
 
-    st.dataframe(info_df[["info_name", "type", "format", "update", "suppliers"]], use_container_width=True, hide_index=True,
+    st.dataframe(info_df[["info_name", "type", "format", "update", "suppliers"]], width="stretch", hide_index=True,
                  column_config={"info_name": "Название", "type": "Тип", "format": "Формат", 
                                 "update": "Срок обновления", "suppliers": "Поставщики"})
 

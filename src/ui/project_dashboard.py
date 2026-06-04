@@ -113,7 +113,7 @@ def render_project_dashboard(session, user_role="user"):
     with col_note:
         st.markdown(f"**📝 Примечание:** {proj_data['notes'] or '-'}")
     with col_btn:
-        if not is_readonly and st.button("✏️ Изменить реквизиты", type="secondary", use_container_width=True):
+        if not is_readonly and st.button("✏️ Изменить реквизиты", type="secondary", width="stretch"):
             st.session_state.dash_edit_mode = not st.session_state.dash_edit_mode
 
     st.markdown("---")
@@ -198,7 +198,7 @@ def render_project_dashboard(session, user_role="user"):
     """, {"pid": proj_id_int})
 
     st.dataframe(items_df[["dataset_name", "info_name", "tech_contact"]], 
-                 use_container_width=True, hide_index=True,
+                 width="stretch", hide_index=True,
                  column_config={"dataset_name": "Набор данных", "info_name": "Вид сведений", "tech_contact": "Тех. контакт"})
 
     if not is_readonly:

@@ -71,7 +71,7 @@ def render_suppliers_tab(session, user_role="user"):
         
         with col_edit:
             if not is_readonly:
-                if st.button("✏️ Редактировать реквизиты", use_container_width=True):
+                if st.button("✏️ Редактировать реквизиты", width="stretch"):
                     st.session_state["sup_edit_mode"] = not st.session_state["sup_edit_mode"]
         
         # Показываем форму только если флаг True
@@ -109,7 +109,7 @@ def render_suppliers_tab(session, user_role="user"):
         
         if not items_df.empty:
             st.dataframe(items_df[["project_name", "dataset_name", "info_name", "tech_contact"]], 
-                         use_container_width=True, hide_index=True,
+                         width="stretch", hide_index=True,
                          column_config={"project_name": "Проект", "dataset_name": "Набор", "info_name": "Вид сведений", "tech_contact": "Тех. контакт"})
         else:
             st.info("📭 Пока нет привязанных наборов.")
@@ -185,39 +185,83 @@ def render_suppliers_tab(session, user_role="user"):
 
                 if st.button("🚀 Создать связь", type="primary"):
                     try:
-                        # А. Получаем/Создаем Проект
+                        # 1. Получаем/Создаем ПРОЕКТ
+                        p_id = None # Инициализируем
                         if sel_p == "(Новый проект)":
-                            if not new_p_name: st.error("Укажите имя проекта"); st.stop()
-                            p_id = session.execute(text("INSERT INTO projects (supplier_name, supplier_id, project_name, status) VALUES (:sn, :sid, :pn, 1) RETURNING project_id"), 
-                                                 {"sn": selected_sup_name, "sid": selected_sup_id, "pn": new_p_name}).scalar()
+                            if not new_p_name:
+                                st.error("❌ Укажите название нового проекта")
+                                st.stop()
+                            p_id = session.execute(text("""
+                                INSERT INTO projects (supplier_id, project_name, status) 
+                                VALUES (:sid, :pn, 1) RETURNING project_id
+                            """), {"sid": int(selected_sup_id), "pn": new_p_name.strip()}).scalar()
                         else:
-                            p_id = int(projs[projs["project_name"] == sel_p]["project_id"].iloc[0])
+                            # Безопасный поиск ID существующего проекта
+                            proj_row = projs[projs["project_name"] == sel_p]
+                            if not proj_row.empty:
+                                p_id = int(proj_row.iloc[0]["project_id"])
+                            else:
+                                st.error("❌ Проект не найден в базе")
+                                st.stop()
 
-                        # Б. Получаем/Создаем Набор
+                        # 2. Получаем/Создаем НАБОР
+                        d_id = None
                         if sel_d == "(Новый набор)":
-                            if not new_d_name: st.error("Укажите имя набора"); st.stop()
-                            d_id = session.execute(text("INSERT INTO datasets (dataset_name) VALUES (:n) RETURNING dataset_id"), {"n": new_d_name}).scalar()
+                            if not new_d_name:
+                                st.error("❌ Укажите название нового набора")
+                                st.stop()
+                            d_id = session.execute(text("INSERT INTO datasets (dataset_name) VALUES (:n) RETURNING dataset_id"), 
+                                                 {"n": new_d_name.strip()}).scalar()
                         else:
-                            d_id = int(dss[dss["dataset_name"] == sel_d]["dataset_id"].iloc[0])
+                            ds_row = dss[dss["dataset_name"] == sel_d]
+                            if not ds_row.empty:
+                                d_id = int(ds_row.iloc[0]["dataset_id"])
+                            else:
+                                st.error("❌ Набор данных не найден")
+                                st.stop()
 
-                        # В. Получаем/Создаем Вид сведений
-                        if not sel_i_id:
-                            if not new_i_name: st.error("Укажите имя вида"); st.stop()
+                        # 3. Получаем/Создаем ВИД СВЕДЕНИЙ
+                        i_id = None
+                        # Проверяем, выбрали ли мы существующий вид (sel_i_id был определен выше в коде при отрисовке)
+                        if sel_d != "(Новый набор)" and sel_i != "(Новый вид)":
+                            i_id = int(sel_i_id)
+                        else:
+                            if not new_i_name:
+                                st.error("❌ Укажите название нового вида сведений")
+                                st.stop()
                             i_id = session.execute(text("INSERT INTO info_types (dataset_id, info_name) VALUES (:did, :n) RETURNING info_id"), 
-                                                 {"did": d_id, "n": new_i_name}).scalar()
+                                                 {"did": int(d_id), "n": new_i_name.strip()}).scalar()
+
+                        # 4. Контакт (уже определен как sel_c)
+                        c_id = None
+                        if sel_c != "Не выбран":
+                            c_id = int(conts[conts["full_name"] == sel_c]["contact_id"].iloc[0])
+
+                        # 5. ФИНАЛЬНАЯ ПРОВЕРКА И ВСТАВКА
+                        if p_id and d_id and i_id:
+                            # Проверка на дубликат связи
+                            dup_check = session.execute(text("""
+                                SELECT 1 FROM project_items WHERE project_id = :pid AND info_id = :iid
+                            """), {"pid": p_id, "iid": i_id}).scalar()
+                            
+                            if dup_check:
+                                st.warning("⚠️ Такая связь (Проект + Вид сведений) уже существует!")
+                            else:
+                                session.execute(text("""
+                                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id) 
+                                    VALUES (:pid, :did, :iid, :cid)
+                                """), {"pid": p_id, "did": d_id, "iid": i_id, "cid": c_id})
+                                
+                                session.commit()
+                                st.cache_data.clear()
+                                st.success("✅ Связь успешно создана!")
+                                st.rerun()
                         else:
-                            i_id = sel_i_id
+                            st.error("❌ Не удалось определить все необходимые ID для создания связи.")
 
-                        # Г. Контакт
-                        c_id = int(conts[conts["full_name"] == sel_c]["contact_id"].iloc[0]) if sel_c != "Не выбран" else None
-
-                        # Д. Финальная вставка в project_items
-                        session.execute(text("INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id) VALUES (:pid, :did, :iid, :cid)"),
-                                        {"pid": p_id, "did": d_id, "iid": i_id, "cid": c_id})
-                        
-                        session.commit(); clear_cache(); st.success("✅ Все связи созданы!"); st.rerun()
                     except Exception as e:
-                        st.error(f"Ошибка БД: {e}"); session.rollback()
+                        st.error(f"❌ Ошибка БД: {e}")
+                        session.rollback()    
 
     # --- ТАБ 4: ОПРОСНИКИ (SURVEYS) ---
     with tab_survey:
@@ -276,7 +320,7 @@ def render_contacts_manager(session, supplier_id, is_readonly):
     
     if not contacts_df.empty:
         st.dataframe(contacts_df[["full_name", "position", "email", "phone", "notes"]], 
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
     else:
         st.info("📭 У этого поставщика пока нет контактов.")
     
@@ -351,22 +395,35 @@ def render_surveys_manager(session, supplier_id, is_readonly):
     st.write("### 📜 Реестр опросников")
     
     surveys_df = query_db("""
-        SELECT s.survey_id, s.received_date, d.dataset_name, i.info_name, s.it_regulations
+        SELECT 
+            s.survey_id, 
+            s.received_date, 
+            COALESCE(STRING_AGG(d.dataset_name || ' | ' || i.info_name, ', '), 'Виды не выбраны') as info_list,
+            s.it_regulations
         FROM surveys s
-        LEFT JOIN info_types i ON s.info_type_id = i.info_id
+        LEFT JOIN survey_info_types sit ON s.survey_id = sit.survey_id
+        LEFT JOIN info_types i ON sit.info_id = i.info_id
         LEFT JOIN datasets d ON i.dataset_id = d.dataset_id
-        WHERE s.supplier_id = :sid ORDER BY s.received_date DESC
+        WHERE s.supplier_id = :sid 
+        GROUP BY s.survey_id, s.received_date, s.it_regulations
+        ORDER BY s.received_date DESC
     """, {"sid": supplier_id})
 
     if not surveys_df.empty:
-        st.dataframe(surveys_df, use_container_width=True, hide_index=True)
+        st.dataframe(surveys_df, width='stretch', hide_index=True)
         
-        # Выбор для действий
-        survey_options = {f"{r['received_date']} | {r['info_name']} (ID: {r['survey_id']})": r['survey_id'] for _, r in surveys_df.iterrows()}
+        # 2. Добавляем str() и проверку на существование для безопасности
+        survey_options = {}
+        for _, r in surveys_df.iterrows():
+            # Гарантируем, что info_list — это строка, даже если SQL вернул что-то странное
+            info_text = str(r['info_list']) if r['info_list'] else "Нет видов сведений"
+            label = f"{r['received_date']} | {info_text[:50]}... (ID: {r['survey_id']})"
+            survey_options[label] = r['survey_id']
+            
         sel_label = st.selectbox("🎯 Выберите опросник для действий:", [""] + list(survey_options.keys()), key="survey_action_sel")
         
         if sel_label:
-            sid = survey_options[sel_label]
+            sid = survey_options[sel_label]  # <--- Переменная называется sid
             c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("👁 Просмотреть", use_container_width=True):
@@ -377,11 +434,17 @@ def render_surveys_manager(session, supplier_id, is_readonly):
                     st.session_state["survey_edit_id"] = sid
                     st.session_state["survey_view_id"] = None
             with c3:
-                if not is_readonly and st.button("🗑 Удалить", use_container_width=True):
+                # ✅ ИСПРАВЛЕНО: заменяем survey_id на sid
+                if not is_readonly and st.button("🗑 Удалить", use_container_width=True, key=f"del_srv_{sid}"):
                     try:
                         session.execute(text("DELETE FROM surveys WHERE survey_id = :id"), {"id": sid})
-                        session.commit(); st.cache_data.clear(); st.success("Удалено"); st.rerun()
-                    except Exception as e: st.error(f"Ошибка: {e}")
+                        session.commit()
+                        st.cache_data.clear()
+                        st.success("Удалено")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                        session.rollback()
 
     # Отрисовка компонентов в зависимости от выбора
     if st.session_state.get("survey_view_id"):
@@ -402,6 +465,14 @@ def render_survey_viewer(session, survey_id, is_readonly):
     """Детальный просмотр ВСЕХ полей опросника"""
     
     # 1. Загрузка данных
+    res = query_db("SELECT * FROM surveys WHERE survey_id = :sid", {"sid": survey_id})
+    
+    # 🛡 ЗАЩИТА: Если опросник только что удалили, выходим из функции
+    if res.empty:
+        st.session_state["survey_view_id"] = None
+        return
+
+    data = res.iloc[0]
     data = query_db("SELECT * FROM surveys WHERE survey_id = :sid", {"sid": survey_id}).iloc[0]
     contacts = query_db("""
         SELECT c.full_name FROM survey_contacts sc 
@@ -409,23 +480,27 @@ def render_survey_viewer(session, survey_id, is_readonly):
     """, {"sid": survey_id})
     links = query_db("SELECT survey_link FROM survey_links WHERE survey_id = :sid", {"sid": survey_id})
     
-    # Получаем название варианта взаимодействия
-    int_text = query_db("SELECT interaction_text FROM ref_interactions WHERE interaction_id = :id", 
-                        {"id": int(data['interaction_id'])}).iloc[0][0]
-
+    # Исправление просмотра значений массива грифов
+    current_regs = data['it_regulations']
+    # Если это строка, чистим её (как выше), если список — просто присоединяем
+    if isinstance(current_regs, str):
+        display_regs = current_regs.strip('{}').replace('"', '').replace(',', ', ')
+    else:
+        display_regs = ", ".join(current_regs)
+    
     st.success(f"📄 Опросный лист №{survey_id} от {data['received_date'].strftime('%d.%m.%Y')}")
 
     # --- СЕКЦИЯ 1: ПРАВО ---
-    with st.expander("⚖️ Правовой статус и доступ", expanded=True):
+    with st.expander("⚖️ Правовой статус и доступ", expanded=False):
         st.write(f"**Описание набора:** {data['it_description']}")
         st.write(f"**Назначение:** {data['it_purpose']}")
         st.write(f"**Правовой статус:** {data['it_legal_status']}")
         st.write(f"**НПА и ТНПА:** {data['it_statute']}")
-        st.write(f"**Гриф:** `{data['it_regulations']}`")
+        st.write(f"**Гриф(ы):** `{display_regs}`")
         st.write(f"**Иные ограничения:** {data['it_other_regulations']}")
 
     # --- СЕКЦИЯ 2: ТЕХНИКА ---
-    with st.expander("⚙️ Технические характеристики", expanded=True):
+    with st.expander("⚙️ Технические характеристики", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
             st.write(f"**Форма ведения:** {data['it_format']}")
@@ -443,13 +518,30 @@ def render_survey_viewer(session, survey_id, is_readonly):
             st.write(f"**Условные знаки:** {data['it_conventional_signs']}")
         
         st.divider()
-        st.write(f"**Способ определения координат:** {data['it_coordinate_determining']}")
+        current_det = data['it_coordinate_determining']
+        if isinstance(current_det, str):
+            display_det = current_det.strip('{}').replace('"', '').replace(',', ', ')
+        else:
+            display_det = ", ".join(current_det)
+
+        st.write(f"**Способ(ы) определения координат:** `{display_det}`")
         st.info(f"**Методика получения координат:**\n\n{data['it_coordinate_determining_text']}")
         st.write(f"**Использование у поставщика:** {data['it_use']}")
 
     # --- СЕКЦИЯ 3: ВЗАИМОДЕЙСТВИЕ ---
-    with st.expander("🤝 Взаимодействие и публикация", expanded=True):
-        st.write(f"**Вариант взаимодействия:** `{int_text}`")
+    with st.expander("🤝 Взаимодействие и публикация", expanded=False):
+        # Загружаем из новой таблицы-связки взаимодействий
+        ints_query = query_db("""
+            SELECT ri.interaction_text FROM survey_interactions si
+            JOIN ref_interactions ri ON si.interaction_id = ri.interaction_id
+            WHERE si.survey_id = :sid
+        """, {"sid": int(survey_id)})
+        
+        all_ints = ints_query["interaction_text"].tolist() if not ints_query.empty else ["Не указаны"]
+        
+        st.write(f"**Варианты взаимодействия:**")
+        st.info(" • " + "\n • ".join(all_ints))
+        
         st.write(f"**Форматы предоставления:** {data['it_distribution_format']}")
         st.write(f"**Способы предоставления:** {data['it_distribution_method']}")
         st.write(f"**Протоколы обмена:** {data['it_distribution_protocol']}")
@@ -475,27 +567,64 @@ def render_survey_viewer(session, survey_id, is_readonly):
 def render_full_survey_form(session, supplier_id, survey_id=None):
     """Универсальная форма: Создание (если survey_id=None) и Редактирование"""
     is_edit = survey_id is not None
-    st.markdown(f"### {'✏️ Редактирование' if is_edit else '📝 Новый'} опросник")
+
+    col_header, col_exit = st.columns([3, 1])
+    with col_header:
+        st.markdown(f"### {'✏️ Редактирование' if is_edit else '📝 Новый'} опросник")
+    with col_exit:
+        if st.button("🚪 Завершить редактирование", width='stretch'):
+            st.session_state["survey_edit_id"] = None
+            st.rerun()
     
     # 1. Загрузка данных при редактировании
     existing = None
     existing_contacts = []
     existing_links = ""
-    if is_edit:
+    processed_regs = [] 
+    existing_interactions = []
+    processed_det = []
+
+    if is_edit: 
         existing = query_db("SELECT * FROM surveys WHERE survey_id = :id", {"id": survey_id}).iloc[0]
+        
+        # --- ИСПРАВЛЕНИЕ: Превращаем строку Postgres {a,b} в список Python [a,b] ---
+        raw_regs = existing['it_regulations']
+        if isinstance(raw_regs, str):
+            processed_regs = raw_regs.strip('{}').replace('"', '').split(',')
+            processed_regs = [r.strip() for r in processed_regs if r.strip()]
+        elif isinstance(raw_regs, list):
+            processed_regs = raw_regs
+        
         # Загружаем список имен контактов
         c_data = query_db("""
             SELECT c.full_name FROM survey_contacts sc 
             JOIN contacts c ON sc.contact_id = c.contact_id WHERE sc.survey_id = :id
         """, {"id": survey_id})
         existing_contacts = c_data["full_name"].tolist() if not c_data.empty else []
+        
         # Загружаем ссылки текстом
         l_data = query_db("SELECT survey_link FROM survey_links WHERE survey_id = :id", {"id": survey_id})
         existing_links = "\n".join(l_data["survey_link"].tolist()) if not l_data.empty else ""
 
-    # 2. Подготовка справочников (как раньше)
+        # Загружаем текущие варианты взаимодействия (текстовые названия для мультиселекта)
+        int_data = query_db("""
+            SELECT ri.interaction_text FROM survey_interactions si
+            JOIN ref_interactions ri ON si.interaction_id = ri.interaction_id
+            WHERE si.survey_id = :id
+        """, {"id": int(survey_id)})
+        existing_interactions = int_data["interaction_text"].tolist() if not int_data.empty else []
+
+        # Загружаем способы определения координат
+        raw_det = existing['it_coordinate_determining']
+        if isinstance(raw_det, str):
+            processed_det = raw_det.strip('{}').replace('"', '').split(',')
+            processed_det = [r.strip() for r in processed_det if r.strip()]
+        elif isinstance(raw_det, list):
+            processed_det = raw_det
+
+    # 2. Подготовка справочников
     items_data = query_db("""
-        SELECT DISTINCT d.dataset_id, d.dataset_name, i.info_id, i.info_name
+        SELECT DISTINCT d.dataset_name, i.info_id, i.info_name
         FROM project_items pi
         JOIN datasets d ON pi.dataset_id = d.dataset_id
         JOIN info_types i ON pi.info_id = i.info_id
@@ -503,44 +632,58 @@ def render_full_survey_form(session, supplier_id, survey_id=None):
         WHERE p.supplier_id = :sid
     """, {"sid": supplier_id})
 
-    avail_ds = sorted(items_data["dataset_name"].unique().tolist())
-    
-    # Индексы для селектбоксов при редактировании
-    ds_idx = avail_ds.index(query_db("SELECT dataset_name FROM datasets WHERE dataset_id = (SELECT dataset_id FROM info_types WHERE info_id = :id)", {"id": int(existing['info_type_id'])}).iloc[0][0]) if is_edit else 0
-    
-    sel_ds = st.selectbox("📁 Набор данных *", avail_ds, index=ds_idx)
-    avail_infos = items_data[items_data["dataset_name"] == sel_ds]
-    info_names = avail_infos["info_name"].tolist()
-    info_idx = info_names.index(query_db("SELECT info_name FROM info_types WHERE info_id = :id", {"id": int(existing['info_type_id'])}).iloc[0][0]) if is_edit and sel_ds in avail_ds else 0
-    
-    sel_info = st.selectbox("📄 Вид сведений *", info_names, index=info_idx)
-    info_id = int(avail_infos[avail_infos["info_name"] == sel_info]["info_id"].iloc[0])
-
     # Справочники контактов и взаимодействий
     interactions = query_db("SELECT interaction_id, interaction_text FROM ref_interactions ORDER BY interaction_id")
     int_list = interactions["interaction_text"].tolist()
-    int_idx = int_list.index(query_db("SELECT interaction_text FROM ref_interactions WHERE interaction_id = :id", {"id": int(existing['interaction_id'])}).iloc[0][0]) if is_edit else 0
+    # Создаем словарь: { 'Название': ID }
+    int_map = dict(zip(interactions["interaction_text"], interactions["interaction_id"]))
     
     sup_contacts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": supplier_id})
     contact_map = dict(zip(sup_contacts["full_name"], sup_contacts["contact_id"]))
+
+    # Формируем список опций для мультиселекта: "Набор | Вид"
+    options_map = {f"{r['dataset_name']} | {r['info_name']}": int(r['info_id']) for _, r in items_data.iterrows()}
+
+    # Если мы в режиме редактирования, нужно достать текущие привязанные ID
+    selected_info_ids = []
+    if is_edit:
+        curr_infos = query_db("SELECT info_id FROM survey_info_types WHERE survey_id = :id", {"id": survey_id})
+        selected_info_ids = curr_infos["info_id"].tolist()
+
+    # Вычисляем значения по умолчанию для мультиселекта
+    default_options = [label for label, iid in options_map.items() if iid in selected_info_ids]
+
+    # ВАЖНО: Мультиселект ставим НАД формой, чтобы он был реактивным
+    sel_items_labels = st.multiselect(
+        "📁 Выберите наборы и виды сведений, к которым относится опросник *",
+        options=list(options_map.keys()),
+        default=default_options,
+        key="srv_multi_info"
+    )
 
     with st.form("survey_combined_form"):
         # СЕКЦИЯ 1: Общее
         received_date = st.date_input("Дата получения", value=existing['received_date'] if is_edit else date.today())
         
         # СЕКЦИЯ 2: Право
-        with st.expander("⚖️ Правовой статус", expanded=True):
+        with st.expander("⚖️ Правовой статус", expanded=False):
             it_descr = st.text_area("Описание", value=existing['it_description'] if is_edit else "Нет")
             it_purp = st.text_area("Назначение", value=existing['it_purpose'] if is_edit else "Нет")
             it_leg = st.text_area("Правовой статус", value=existing['it_legal_status'] if is_edit else "Нет")
             it_stat = st.text_area("НПА/ТНПА", value=existing['it_statute'] if is_edit else "Нет")
             
-            regs = ['Открытые данные', 'Для служебного использования', 'Коммерческая информация', 'Иное']
-            it_reg = st.selectbox("Гриф", regs, index=regs.index(existing['it_regulations']) if is_edit else 0)
+            #existing_regs = existing['it_regulations'] if is_edit else []
+            regs_options = ['Открытые данные', 'Для служебного использования', 'Коммерческая информация', 'Иное']
+            it_reg = st.multiselect(
+                "Ограничительный гриф(ы) *", 
+                regs_options, 
+                default=processed_regs if is_edit else ['Открытые данные'],
+                key="srv_reg_multi"
+            )
             it_oreg = st.text_area("Иные ограничения", value=existing['it_other_regulations'] if is_edit else "Нет")
 
-        # СЕКЦИЯ 3: Техника (укорочено для примера, добавь остальные по аналогии)
-        with st.expander("⚙️ Технические характеристики", expanded=True):
+        # СЕКЦИЯ 3: Техника
+        with st.expander("⚙️ Технические характеристики", expanded=False):
             c1, c2 = st.columns(2)
             with c1:
                 it_form = st.selectbox("Форма ведения", ["Цифровая", "Иная"], 
@@ -551,7 +694,7 @@ def render_full_survey_form(session, supplier_id, survey_id=None):
                 it_meta = st.text_area("Наличие инф. каталогов для метаданных", value=existing['it_metadata_base'] if is_edit else "Нет", height=68)
                 it_cs = st.text_input("Системы отсчёта координат и высот", value=existing['it_coordinate_system'] if is_edit else "Нет")
             with c2:
-                it_ad = st.date_input("Актуальность (год состояния местности)", value=existing['it_actual_date'] if is_edit else date.today())
+                it_ad = st.text_input("Актуальность (год состояния местности)", value=existing['it_actual_date'] if is_edit else "Нет")
                 it_upd = st.text_input("Периодичность обновления", value=existing['it_update'] if is_edit else "Нет")
                 it_ext = st.text_area("Территория (пространственный охват)", value=existing['it_spatial_extent'] if is_edit else "Нет", height=68)
                 it_scale = st.text_area("Пространственное разрешение или масштаб", value=existing['it_spatial_scale'] if is_edit else "Нет", height=68)
@@ -559,29 +702,38 @@ def render_full_survey_form(session, supplier_id, survey_id=None):
                 it_signs = st.text_input("Наличие каталога условных знаков", value=existing['it_conventional_signs'] if is_edit else "Нет")
             
             st.divider()
-            it_det = st.selectbox("Способ определения координат", ['Автоматический', 'Полуавтоматический', 'Ручной'], 
-                                 index=['Автоматический', 'Полуавтоматический', 'Ручной'].index(existing['it_coordinate_determining']) if is_edit else 0)
+            det_options = ['Автоматический', 'Полуавтоматический', 'Ручной', 'Иное']
+        
+            it_det = st.multiselect(
+                "Способ(ы) определения координат *", 
+                options=det_options,
+                default=processed_det if is_edit else ['Автоматический'],
+                key="srv_det_multi"
+            )
             it_det_txt = st.text_area("Методика, источник и инструмент получения координат", value=existing['it_coordinate_determining_text'] if is_edit else "Нет")
             it_use = st.text_area("Вариант использования набора у поставщика (ГИС, WEB)", value=existing['it_use'] if is_edit else "Нет")
 
         # СЕКЦИЯ 4: Взаимодействие
-        with st.expander("🤝 Взаимодействие и контакты", expanded=True):
+        with st.expander("🤝 Взаимодействие и контакты", expanded=False):
             it_dist_f = st.text_area("Возможные формы и форматы предоставления (бумага, цифра)", value=existing['it_distribution_format'] if is_edit else "Нет")
             it_dist_m = st.text_input("Способы предоставления (почта, сервис, носитель)", value=existing['it_distribution_method'] if is_edit else "Нет")
             it_dist_p = st.text_input("Протоколы обмена (HTTPS, WMS, REST...)", value=existing['it_distribution_protocol'] if is_edit else "Нет")
             it_base = st.text_input("Предполагаемые базовые сервисы (поиск, фильтрация...)", value=existing['it_base_services'] if is_edit else "Нет")
             
-            sel_int = st.selectbox("Предпочтительный вариант взаимодействия *", int_list, index=int_idx)
+            sel_ints = st.multiselect(
+                "Предпочтительные варианты взаимодействия *", 
+                options=int_list, 
+                default=existing_interactions if is_edit else [],
+                key="srv_int_multi"
+            )
             sel_conts = st.multiselect("Контактные лица по опроснику", list(contact_map.keys()), default=existing_contacts)
             links_raw = st.text_area("Ссылки (по одной на строку)", value=existing_links)
             it_cis = st.checkbox("Допускается публикация на Геопортале СНГ", value=existing['it_cis_publication'] if is_edit else False)
 
-        if st.form_submit_button("💾 Сохранить изменения" if is_edit else "🚀 Создать опросник"):
+        if st.form_submit_button("💾 Сохранить опросник", type="primary"):
             try:
-                raw_int_id = interactions[interactions["interaction_text"] == sel_int]["interaction_id"].iloc[0]
-
                 params = {
-                    "rd": received_date, "sid": int(supplier_id), "inf": int(info_id),
+                    "rd": received_date, "sid": int(supplier_id), 
                     "descr": it_descr, "purp": it_purp, "leg": it_leg, "stat": it_stat,
                     "reg": it_reg, "oreg": it_oreg, "form": it_form, "tp": it_type,
                     "df": it_df, "trans": it_trans, "meta": it_meta, "cs": it_cs, 
@@ -589,48 +741,55 @@ def render_full_survey_form(session, supplier_id, survey_id=None):
                     "classif": it_classif, "signs": it_signs, "det": it_det, 
                     "det_txt": it_det_txt, "use": it_use, "dist_f": it_dist_f, 
                     "dist_m": it_dist_m, "dist_p": it_dist_p, "base": it_base,
-                    "int_id": int(raw_int_id), "cis": it_cis
+                    "cis": it_cis
                 }
 
                 if is_edit:
                     params["survey_id"] = int(survey_id)
                     session.execute(text("""
                         UPDATE surveys SET 
-                            received_date=:rd, info_type_id=:inf, it_description=:descr, it_purpose=:purp,
-                            it_legal_status=:leg, it_statute=:stat, it_regulations=:reg, it_other_regulations=:oreg,
+                            received_date=:rd, it_description=:descr, it_purpose=:purp,
+                            it_legal_status=:leg, it_statute=:stat, it_regulations = CAST(:reg AS restrictions[]), it_other_regulations=:oreg,
                             it_format=:form, it_type=:tp, it_digital_format=:df, it_digital_transform=:trans,
                             it_metadata_base=:meta, it_coordinate_system=:cs, it_spatial_extent=:ext,
                             it_actual_date=:ad, it_update=:upd, it_spatial_scale=:scale, it_classification=:classif,
-                            it_conventional_signs=:signs, it_coordinate_determining=:det, it_coordinate_determining_text=:det_txt,
+                            it_conventional_signs=:signs, it_coordinate_determining = CAST(:det AS definitions[]), it_coordinate_determining_text=:det_txt,
                             it_use=:use, it_distribution_format=:dist_f, it_distribution_method=:dist_m, 
-                            it_distribution_protocol=:dist_p, it_base_services=:base, interaction_id=:int_id, 
-                            it_cis_publication=:cis
+                            it_distribution_protocol=:dist_p, it_base_services=:base, it_cis_publication=:cis
                         WHERE survey_id=:survey_id
                     """), params)
 
                     # Очищаем старые связи
+                    session.execute(text("DELETE FROM survey_info_types WHERE survey_id = :id"), {"id": int(survey_id)})
                     session.execute(text("DELETE FROM survey_contacts WHERE survey_id = :id"), {"id": int(survey_id)})
                     session.execute(text("DELETE FROM survey_links WHERE survey_id = :id"), {"id": int(survey_id)})
+                    session.execute(text("DELETE FROM survey_interactions WHERE survey_id = :id"), {"id": int(survey_id)})
                     final_id = int(survey_id)
                 else:
                     # ПОЛНЫЙ INSERT (все поля)
                     final_id = session.execute(text("""
                         INSERT INTO surveys (
-                            received_date, supplier_id, info_type_id, it_description, it_purpose, 
+                            received_date, supplier_id, it_description, it_purpose, 
                             it_legal_status, it_statute, it_regulations, it_other_regulations,
                             it_format, it_type, it_digital_format, it_digital_transform, 
                             it_metadata_base, it_coordinate_system, it_spatial_extent, 
                             it_actual_date, it_update, it_spatial_scale, it_classification, 
                             it_conventional_signs, it_coordinate_determining, it_coordinate_determining_text,
                             it_use, it_distribution_format, it_distribution_method, it_distribution_protocol,
-                            it_base_services, interaction_id, it_cis_publication
+                            it_base_services, it_cis_publication
                         ) VALUES (
-                            :rd, :sid, :inf, :descr, :purp, :leg, :stat, :reg, :oreg,
+                            :rd, :sid, :descr, :purp, :leg, :stat, CAST(:reg AS restrictions[]), :oreg,
                             :form, :tp, :df, :trans, :meta, :cs, :ext,
-                            :ad, :upd, :scale, :classif, :signs, :det, :det_txt,
-                            :use, :dist_f, :dist_m, :dist_p, :base, :int_id, :cis
+                            :ad, :upd, :scale, :classif, :signs, CAST(:det AS definitions[]), :det_txt,
+                            :use, :dist_f, :dist_m, :dist_p, :base, :cis
                         ) RETURNING survey_id
                     """), params).scalar()
+
+                # Вставка всех выбранных видов сведений
+                for label in sel_items_labels:
+                    info_id = options_map[label]
+                    session.execute(text("INSERT INTO survey_info_types (survey_id, info_id) VALUES (:sid, :iid)"),
+                                    {"sid": int(final_id), "iid": int(info_id)})
 
                 # Вставка контактов (приводим к int)
                 for c_name in sel_conts:
@@ -643,9 +802,19 @@ def render_full_survey_form(session, supplier_id, survey_id=None):
                     session.execute(text("INSERT INTO survey_links (survey_id, survey_link) VALUES (:sid, :link)"),
                                     {"sid": int(final_id), "link": l})
 
+                # Запись нескольких взаимодействий
+                for int_text in sel_ints:
+                    # Находим ID по тексту из нашего словаря
+                    it_id = int(int_map[int_text]) 
+                    
+                    session.execute(text("""
+                        INSERT INTO survey_interactions (survey_id, interaction_id) 
+                        VALUES (:sid, :iid)
+                    """), {"sid": int(final_id), "iid": it_id})
+
                 session.commit()
                 st.cache_data.clear()
-                st.session_state["survey_edit_id"] = None # Выходим из режима редактирования
+                #st.session_state["survey_edit_id"] = None # Выходим из режима редактирования
                 st.success("✅ Данные успешно сохранены!")
                 st.rerun()
             except Exception as e:

@@ -77,7 +77,7 @@ def render_analytics_tab(user_role="user"):
         
         with cols[3]:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🔄 Сбросить", use_container_width=True, key="an_reset_btn"):
+            if st.button("🔄 Сбросить", width="stretch", key="an_reset_btn"):
                 st.session_state.an_sup_filter = "Все"
                 st.session_state.an_proj_filter = "Все"
                 st.session_state.an_period_filter = "Все"
@@ -177,7 +177,7 @@ def render_analytics_tab(user_role="user"):
             fig_pie = px.pie(status_counts, values="count", names="status", color="status",
                              color_discrete_map=color_map, hole=0.4)
             fig_pie.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width="stretch")
 
         with col_bar:
             st.markdown("##### 📊 Распределение активных задач по этапам")
@@ -190,7 +190,7 @@ def render_analytics_tab(user_role="user"):
                                  labels={"tasks_count": "Количество активных задач", "stage_name": "Этап", "track_category": "Трек"},
                                  color_discrete_map={"1. Документарный": "#2196F3", "2. Технологический": "#4CAF50"})
                 fig_bar.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, width="stretch")
             else:
                 st.info("Нет активных задач в выбранном диапазоне.")
 
@@ -285,7 +285,7 @@ def render_analytics_tab(user_role="user"):
             )
             fig_gantt.update_yaxes(autorange="reversed")
             fig_gantt.update_layout(height=450, margin=dict(l=150, r=20, t=30, b=20), xaxis_title="Плановые временные рамки")
-            st.plotly_chart(fig_gantt, use_container_width=True)
+            st.plotly_chart(fig_gantt, width="stretch")
 
     # ------------------------------------------
     # Подвкладка 4: Тепловая карта трения
@@ -316,7 +316,7 @@ def render_analytics_tab(user_role="user"):
                 fig_heat = px.imshow(pivot, labels=dict(x="Этап Бюрократии", y="Поставщик", color="Задержка (дн.)"),
                                      color_continuous_scale="Reds", aspect="auto")
                 fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig_heat, use_container_width=True)
+                st.plotly_chart(fig_heat, width="stretch")
 
         else:
             st.caption("Показывает среднее количество кругов проверок (итераций) по каждому Набору данных и техническому этапу.")
@@ -331,7 +331,7 @@ def render_analytics_tab(user_role="user"):
                 fig_heat = px.imshow(pivot, labels=dict(x="Этап Технологии", y="Набор данных", color="Итерации (среднее)"),
                                      color_continuous_scale="Purples", aspect="auto")
                 fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig_heat, use_container_width=True)
+                st.plotly_chart(fig_heat, width="stretch")
 
     # 📥 Сохраняем блок экспорта отчета в Excel (в самом низу вкладки)
     st.markdown("---")

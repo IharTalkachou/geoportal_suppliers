@@ -60,7 +60,7 @@ if "auth" not in st.session_state:
             with st.form("login_form"):
                 username = st.text_input("👤 Имя пользователя")
                 password = st.text_input("🔑 Пароль", type="password")
-                submit = st.form_submit_button("🚪 Войти", type="primary", use_container_width=True)
+                submit = st.form_submit_button("🚪 Войти", type="primary", width="stretch")
                 
                 if submit:
                     if not username or not password:
@@ -100,15 +100,15 @@ with header_right:
             st.caption(f"🔑 Роль: `{st.session_state['auth']['role_name']}`")
             
         if st.session_state.get("show_admin", False):
-            if st.button("⬅️ Назад к проектам", use_container_width=True, type="secondary", key="btn_back"):
+            if st.button("⬅️ Назад к проектам", width="stretch", type="secondary", key="btn_back"):
                 st.session_state["show_admin"] = False
                 st.rerun()
         elif st.session_state["auth"]["role"] == "admin":
-            if st.button("⚙️ Админ-панель", use_container_width=True, type="secondary", key="btn_admin"):
+            if st.button("⚙️ Админ-панель", width="stretch", type="secondary", key="btn_admin"):
                 st.session_state["show_admin"] = True
                 st.rerun()
 
-        if st.button("🚪 Выйти", use_container_width=True, type="primary", key="btn_logout"):
+        if st.button("🚪 Выйти", width="stretch", type="primary", key="btn_logout"):
             uid = st.session_state.get("auth", {}).get("user_id")
             token = st.query_params.get("session")
             if uid and token:

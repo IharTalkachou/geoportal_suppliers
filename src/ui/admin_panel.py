@@ -22,7 +22,7 @@ def render_admin_panel(session):
         """)
 
         st.dataframe(users_df[["username", "display_name", "role", "is_active", "last_login"]],
-                     use_container_width=True, hide_index=True,
+                     width="stretch", hide_index=True,
                      column_config={
                          "username": "Логин", "display_name": "Имя", "role": "Роль",
                          "is_active": "Активен", "last_login": "Последний вход"
@@ -65,7 +65,7 @@ def render_admin_panel(session):
                 curr_role = st.session_state.get("adm_role_in", "user")
                 safe_idx = role_keys.index(curr_role) if curr_role in role_keys else 0
                 st.selectbox("Роль", role_keys, format_func=lambda x: ROLE_NAMES[x], key="adm_role_in")
-                st.checkbox("Активен", value=st.session_state.get("adm_act_in", True), key="adm_act_in")
+                st.checkbox("Активен", key="adm_act_in")
 
             st.text_input("Пароль" + (" (оставьте пустым, чтобы не менять)" if is_editing else ""), 
                           type="password", value=st.session_state.get("adm_pwd_in", ""), key="adm_pwd_in")
@@ -136,7 +136,7 @@ def render_admin_panel(session):
         st.subheader("История изменений и входов")
         
         # 🔹 Кнопка принудительного сброса кэша
-        if st.button("🔄 Обновить журнал", type="secondary", use_container_width=True, key="btn_refresh_audit"):
+        if st.button("🔄 Обновить журнал", type="secondary", width="stretch", key="btn_refresh_audit"):
             from config.cache import clear_cache
             clear_cache()
             st.rerun()
@@ -172,7 +172,7 @@ def render_admin_panel(session):
         if log_df.empty:
             st.info("📭 Записей за выбранный период не найдено. Нажмите `🔄 Обновить журнал` или измените даты.")
         else:
-            st.dataframe(log_df, use_container_width=True, hide_index=True)
+            st.dataframe(log_df, width="stretch", hide_index=True)
             st.download_button("📥 Экспорт в CSV", data=log_df.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"audit_log_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
 

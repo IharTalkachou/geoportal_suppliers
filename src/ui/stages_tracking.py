@@ -59,7 +59,7 @@ def render_stages_tab(session):
             actual_start = st.date_input("Фактическое начало", value=planned_start)
             comments = st.text_area("Комментарий", height=100)
 
-        submit_btn = st.form_submit_button("💾 Сохранить этап", type="primary", use_container_width=True)
+        submit_btn = st.form_submit_button("💾 Сохранить этап", type="primary", width="stretch")
 
         if submit_btn:
             # 🔧 ЛОГИКА 2: IterationCount (автоинкремент)
