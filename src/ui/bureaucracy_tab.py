@@ -36,20 +36,29 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
     ps_df = query_db("""
         SELECT ps.stage_progress_id, s.stage_name, ms.micro_status_name,
                ps.iteration_count, ps.planned_start, ps.planned_end,
-               ps.actual_start, ps.actual_end, ps.comments
+               ps.actual_start, ps.actual_end, ps.comments,
+               u.display_name as responsible_name, 
+               ps.responsible_id                   
         FROM project_stages ps
         JOIN stages s ON ps.stage_id = s.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        LEFT JOIN users u ON ps.responsible_id = u.user_id 
         WHERE ps.project_id = :pid
         ORDER BY s.stage_order, ps.iteration_count
     """, {"pid": project_id})
 
+    # 👥 Загружаем список сотрудников для выбора
+    staff_df = query_db("SELECT user_id, display_name FROM users WHERE show_in_staff = TRUE AND is_active = TRUE ORDER BY display_name")
+    staff_map = dict(zip(staff_df["display_name"], staff_df["user_id"]))
+    staff_options = ["Не назначен"] + list(staff_map.keys())
+
     # 🔐 Таблица ВСЕГДА в режиме просмотра
-    st.dataframe(ps_df[["stage_name", "micro_status_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
-                 width="stretch", hide_index=True,
+    st.dataframe(ps_df[["stage_name", "micro_status_name", "responsible_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
+                 width='stretch', hide_index=True,
                  column_config={
                      "stage_name": "Этап", "micro_status_name": "Микростатус",
-                     "iteration_count": st.column_config.NumberColumn("Итерация", format="%d"),
+                     "responsible_name": "Ответственный", # ⬅️ Настройка колонки
+                     "iteration_count": st.column_config.NumberColumn("Ит.", format="%d"),
                      "planned_start": "План. начало", "planned_end": "План. конец",
                      "actual_start": "Факт. начало", "actual_end": "Факт. окончание", "comments": "Комментарий"
                  })
@@ -82,6 +91,15 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         if st.session_state.get("buro_sel_prev") != sel_item:
             if is_editing:
                 curr = ps_df[ps_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
+
+                # Находим имя сотрудника по ID из базы
+                resp_id = curr.get("responsible_id")
+                resp_name = "Не назначен"
+                if pd.notna(resp_id):
+                    matching_staff = staff_df[staff_df["user_id"] == int(resp_id)]
+                    if not matching_staff.empty:
+                        resp_name = matching_staff.iloc[0]["display_name"]
+                
                 # Пишем напрямую в ключи с суффиксом _in (как у самих виджетов)
                 st.session_state["buro_stage_in"] = curr["stage_name"]
                 st.session_state["buro_status_in"] = curr["micro_status_name"]
@@ -90,6 +108,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                 st.session_state["buro_a_start_in"] = get_safe_date(curr["actual_start"])
                 st.session_state["buro_a_end_in"] = get_safe_date(curr["actual_end"])
                 st.session_state["buro_comments_in"] = curr["comments"] if pd.notna(curr["comments"]) else ""
+                # сотрудник
+                st.session_state["buro_resp_in"] = resp_name
             else:
                 # Безопасный дефолт, если выбираем "(Добавить новый)"
                 default_stage = list(stage_map.keys())[0] if stage_map else None
@@ -102,6 +122,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                 st.session_state["buro_a_start_in"] = None
                 st.session_state["buro_a_end_in"] = None
                 st.session_state["buro_comments_in"] = ""
+                # сотрудник
+                st.session_state["buro_resp_in"] = "Не назначен"
                 
             st.session_state["buro_sel_prev"] = sel_item
 
@@ -111,8 +133,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
             # Убраны index=..., так как Streamlit сам возьмет нужные значения из ключей (key)
             stage_name = st.selectbox("Этап", list(stage_map.keys()), key="buro_stage_in")
             micro_status = st.selectbox("Микростатус", list(micro_map.keys()), key="buro_status_in")
-            st.number_input("🔒 Итерация", disabled=True, key="buro_iter_in")
-
+            #st.number_input("🔒 Итерация", disabled=True, key="buro_iter_in")
+            sel_resp = st.selectbox("👤 Ответственный за этап", staff_options, key="buro_resp_in")
         with col2:
             # Оставлен value=None как "запасной парашют", чтобы по умолчанию не ставилась "сегодняшняя" дата
             p_start = st.date_input("План. начало", value=None, key="buro_p_start_in")
@@ -136,6 +158,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
             if st.button("💾 Сохранить", type="primary", key="buro_save"):
                 stage_info = stage_map[stage_name]
                 micro_id = micro_map[micro_status]
+                # Получаем ID ответственного
+                r_id = staff_map.get(sel_resp) if sel_resp != "Не назначен" else None
 
                 # 1. Расчёт итерации
                 if is_editing:
@@ -149,7 +173,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                         WHERE project_id = :pid AND stage_id = :sid
                     """), {"pid": project_id, "sid": stage_info["id"]}).scalar()
 
-                # 2. Логика дат (как мы правили ранее)
+                # 2. Логика дат
                 if stage_info["type"] == "Веха":
                     p_end = p_start
                     a_end = a_start
@@ -158,26 +182,38 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
 
                 # 3. Сама вставка/обновление
                 try:
+                    # Подготовка общих параметров
+                    params = {
+                        "sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
+                        "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, 
+                        "comm": comments, "rid": r_id, "pid": project_id,
+                        "id": int(item_ids_map[sel_item]) if is_editing else None
+                    }
+
                     if is_editing:
-                        # Достаем curr для лога
+                        # Достаем текущие значения для лога
                         curr = ps_df[ps_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
                         
                         session.execute(text("""
-                            UPDATE project_stages SET stage_id=:sid, micro_status=:mst, iteration_count=:iter,
-                                planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm
+                            UPDATE project_stages SET 
+                                stage_id=:sid, micro_status=:mst, iteration_count=:iter,
+                                planned_start=:ps, planned_end=:pe, actual_start=:as, 
+                                actual_end=:ae, comments=:comm, responsible_id=:rid
                             WHERE stage_progress_id=:id
-                        """), {"sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
-                            "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments,
-                            "id": int(item_ids_map[sel_item])})
+                        """), params)
+                        
+                        log_action(st.session_state["auth"]["user_id"], "UPDATE_STAGE", "project_stages", params["id"],
+                            old={"status": curr["micro_status_name"], "a_start": str(curr["actual_start"]), "resp": str(curr.get("responsible_name", "Нет"))},
+                            new={"status": micro_status, "a_start": str(a_start), "resp": sel_resp})
                     else:
                         session.execute(text("""
                             INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count,
-                                planned_start, planned_end, actual_start, actual_end, comments)
-                            VALUES (:pid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm)
-                        """), {"pid": project_id, "sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
-                               "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments})
+                                planned_start, planned_end, actual_start, actual_end, comments, responsible_id)
+                            VALUES (:pid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm, :rid)
+                        """), params)
+                        
                         log_action(st.session_state["auth"]["user_id"], "CREATE_STAGE", "project_stages",
-                            new={"stage": stage_name, "status": micro_status, "iteration": iter_val})
+                            new={"stage": stage_name, "status": micro_status, "iteration": iter_val, "resp": sel_resp})
                     
                     session.commit(); clear_cache()
                     st.success("✅ Этап сохранён!"); st.rerun()
@@ -187,13 +223,14 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         with col_del:
             if is_editing and st.button("🗑 Удалить", type="secondary", key="buro_del"):
                 try:
-                    # 👈 ДОБАВЛЯЕМ ЭТУ СТРОКУ (Достаем текущие значения для лога)
+                    # Извлекаем текущую строку для лога перед удалением
                     curr = ps_df[ps_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
 
                     log_action(st.session_state["auth"]["user_id"], "DELETE_STAGE", "project_stages", int(item_ids_map[sel_item]),
                         old={"stage": curr["stage_name"], "status": curr["micro_status_name"]})
                     
-                    session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"), {"id": int(item_ids_map[sel_item])})
+                    session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"), 
+                                    {"id": int(item_ids_map[sel_item])})
                     session.commit(); clear_cache()
                     st.success("🗑 Этап удалён!"); st.rerun()
                 except Exception as e:

@@ -16,22 +16,25 @@ def render_admin_panel(session):
     # ==========================================
     with tab_users:
         st.subheader("Учётные записи")
+        # 🔹 ДОБАВЛЕНО: show_in_staff в запрос
         users_df = query_db("""
-            SELECT user_id, username, display_name, role, is_active, last_login 
+            SELECT user_id, username, display_name, role, is_active, show_in_staff, last_login 
             FROM users ORDER BY user_id
         """)
 
-        st.dataframe(users_df[["username", "display_name", "role", "is_active", "last_login"]],
+        # 🔹 ДОБАВЛЕНО: Колонка в таблицу для наглядности
+        st.dataframe(users_df[["username", "display_name", "role", "is_active", "show_in_staff", "last_login"]],
                      width="stretch", hide_index=True,
                      column_config={
                          "username": "Логин", "display_name": "Имя", "role": "Роль",
-                         "is_active": "Активен", "last_login": "Последний вход"
+                         "is_active": "Активен", 
+                         "show_in_staff": "Сотрудник", # ⬅️ Показываем статус
+                         "last_login": "Последний вход"
                      })
 
         with st.expander("➕ Добавить / ✏️ Редактировать пользователя", expanded=True):
-            # 🔹 FIX: Сброс состояния формы ПОСЛЕ удаления, но ДО рендера виджетов
             if st.session_state.get("adm_user_deleted"):
-                for k in ["adm_un_in", "adm_dn_in", "adm_role_in", "adm_act_in", "adm_pwd_in", "adm_sel_user_prev"]:
+                for k in ["adm_un_in", "adm_dn_in", "adm_role_in", "adm_act_in", "adm_staff_in", "adm_pwd_in", "adm_sel_user_prev"]:
                     st.session_state.pop(k, None)
                 st.session_state.pop("adm_user_deleted", None)
 
@@ -39,7 +42,7 @@ def render_admin_panel(session):
             sel_user = st.selectbox("Выберите пользователя:", user_options, key="adm_sel_user")
             is_editing = sel_user != "(Новый пользователь)"
 
-            # Авто-подстановка ТОЛЬКО при смене выбора
+            # Авто-подстановка
             if "adm_sel_user_prev" not in st.session_state or st.session_state["adm_sel_user_prev"] != sel_user:
                 if is_editing:
                     curr = users_df[users_df["username"] == sel_user].iloc[0]
@@ -47,28 +50,34 @@ def render_admin_panel(session):
                     st.session_state["adm_dn_in"] = curr["display_name"] or curr["username"]
                     st.session_state["adm_role_in"] = curr["role"]
                     st.session_state["adm_act_in"] = bool(curr["is_active"])
+                    st.session_state["adm_staff_in"] = bool(curr["show_in_staff"]) # ⬅️ Подстановка нового поля
                     st.session_state["adm_pwd_in"] = ""
                 else:
                     st.session_state["adm_un_in"] = ""
                     st.session_state["adm_dn_in"] = ""
                     st.session_state["adm_role_in"] = "user"
                     st.session_state["adm_act_in"] = True
+                    st.session_state["adm_staff_in"] = False # ⬅️ Сброс
                     st.session_state["adm_pwd_in"] = ""
                 st.session_state["adm_sel_user_prev"] = sel_user
 
             col1, col2 = st.columns(2)
             with col1:
-                st.text_input("Логин", value=st.session_state.get("adm_un_in", ""), disabled=is_editing, key="adm_un_in")
-                st.text_input("Отображаемое имя", value=st.session_state.get("adm_dn_in", ""), key="adm_dn_in")
+                st.text_input("Логин", disabled=is_editing, key="adm_un_in")
+                st.text_input("Отображаемое имя", key="adm_dn_in")
             with col2:
                 role_keys = list(ROLE_NAMES.keys())
-                curr_role = st.session_state.get("adm_role_in", "user")
-                safe_idx = role_keys.index(curr_role) if curr_role in role_keys else 0
                 st.selectbox("Роль", role_keys, format_func=lambda x: ROLE_NAMES[x], key="adm_role_in")
-                st.checkbox("Активен", key="adm_act_in")
+                
+                # Чекбоксы признаков
+                c_act, c_staff = st.columns(2)
+                with c_act:
+                    st.checkbox("Активен", key="adm_act_in")
+                with c_staff:
+                    st.checkbox("В списке сотрудников", key="adm_staff_in") # ⬅️ НОВЫЙ ЧЕКБОКС
 
             st.text_input("Пароль" + (" (оставьте пустым, чтобы не менять)" if is_editing else ""), 
-                          type="password", value=st.session_state.get("adm_pwd_in", ""), key="adm_pwd_in")
+                          type="password", key="adm_pwd_in")
 
             col_btn, col_del = st.columns([3, 1])
             with col_btn:
@@ -77,54 +86,59 @@ def render_admin_panel(session):
                     d = st.session_state["adm_dn_in"].strip()
                     r = st.session_state["adm_role_in"]
                     a = st.session_state["adm_act_in"]
+                    s = st.session_state["adm_staff_in"] # ⬅️ Значение из чекбокса
                     p = st.session_state["adm_pwd_in"]
 
                     try:
                         if is_editing:
                             curr = users_df[users_df["username"] == u].iloc[0]
-                            # 📝 Лог изменения
                             log_action(st.session_state["auth"]["user_id"], "UPDATE_USER", 
                                        "users", int(curr["user_id"]),
-                                       old={"role": curr["role"], "active": bool(curr["is_active"])},
-                                       new={"role": r, "active": a})
+                                       old={"role": curr["role"], "active": bool(curr["is_active"]), "staff": bool(curr["show_in_staff"])},
+                                       new={"role": r, "active": a, "staff": s})
                                        
+                            # 🔹 ДОБАВЛЕНО: show_in_staff=:s в оба запроса UPDATE
                             if p:
-                                session.execute(text("UPDATE users SET display_name=:d, role=:r, is_active=:a, password_hash=:h WHERE username=:u"),
-                                                {"d": d or u, "r": r, "a": a, "h": hash_password(p), "u": u})
+                                session.execute(text("""
+                                    UPDATE users SET display_name=:d, role=:r, is_active=:a, show_in_staff=:s, password_hash=:h 
+                                    WHERE username=:u
+                                """), {"d": d or u, "r": r, "a": a, "s": s, "h": hash_password(p), "u": u})
                             else:
-                                session.execute(text("UPDATE users SET display_name=:d, role=:r, is_active=:a WHERE username=:u"),
-                                                {"d": d or u, "r": r, "a": a, "u": u})
+                                session.execute(text("""
+                                    UPDATE users SET display_name=:d, role=:r, is_active=:a, show_in_staff=:s 
+                                    WHERE username=:u
+                                """), {"d": d or u, "r": r, "a": a, "s": s, "u": u})
                         else:
                             if not u or not p:
-                                st.error("❌ Логин и пароль обязательны для создания")
+                                st.error("❌ Логин и пароль обязательны")
                                 st.stop()
                             
-                            session.execute(text("INSERT INTO users (username, display_name, password_hash, role, is_active) VALUES (:u, :d, :h, :r, :a)"),
-                                            {"u": u, "d": d or u, "h": hash_password(p), "r": r, "a": a})
+                            # 🔹 ДОБАВЛЕНО: show_in_staff (:s) в INSERT
+                            session.execute(text("""
+                                INSERT INTO users (username, display_name, password_hash, role, is_active, show_in_staff) 
+                                VALUES (:u, :d, :h, :r, :a, :s)
+                            """), {"u": u, "d": d or u, "h": hash_password(p), "r": r, "a": a, "s": s})
                             
-                            # 📝 Лог создания
                             new_id = session.execute(text("SELECT currval(pg_get_serial_sequence('users', 'user_id'))")).scalar()
-                            log_action(st.session_state["auth"]["user_id"], "CREATE_USER", "users", int(new_id), new={"username": u, "role": r})
+                            log_action(st.session_state["auth"]["user_id"], "CREATE_USER", "users", int(new_id), new={"username": u, "staff": s})
+                        
                         session.commit()
                         st.cache_data.clear()
-                        st.success("✅ Пользователь сохранён!"); st.rerun()
+                        st.success("✅ Сохранено!"); st.rerun()
                     except Exception as e:
                         st.error(f"❌ Ошибка БД: {e}"); session.rollback()
 
             with col_del:
                 if is_editing and sel_user != "admin":
-                    st.warning("⚠️ Удаление пользователя нельзя отменить.")
                     if st.button("🗑 Удалить навсегда", type="secondary", key="adm_del"):
                         try:
                             curr = users_df[users_df["username"] == sel_user].iloc[0]
-                            # 📝 Лог удаления
                             log_action(st.session_state["auth"]["user_id"], "DELETE_USER", "users", int(curr["user_id"]), old={"username": sel_user})
-                            
                             session.execute(text("DELETE FROM users WHERE username = :u"), {"u": sel_user})
                             session.commit()
                             st.cache_data.clear()
                             st.session_state["adm_user_deleted"] = True
-                            st.success("🗑 Пользователь удалён"); st.rerun()
+                            st.rerun()
                         except Exception as e:
                             st.error(f"❌ Ошибка удаления: {e}"); session.rollback()
 

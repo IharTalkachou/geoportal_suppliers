@@ -69,22 +69,41 @@ def render_technology_tab(session, project_id, user_role="user"):
     stages_df = query_db("""
         SELECT ist.stage_progress_id, s.stage_name, ms.micro_status_name,
                ist.iteration_count, ist.planned_start, ist.planned_end,
-               ist.actual_start, ist.actual_end, ist.comments
+               ist.actual_start, ist.actual_end, ist.comments,
+               u.display_name as responsible_name,
+               ist.responsible_id          
         FROM item_stages ist
         JOIN stages s ON ist.stage_id = s.stage_id
         JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
+        LEFT JOIN users u ON ist.responsible_id = u.user_id
         WHERE ist.item_id = :iid
         ORDER BY s.stage_order, ist.iteration_count
     """, {"iid": selected_item_id})
 
+    # 👥 Загружаем список сотрудников для выбора
+    staff_df = query_db("SELECT user_id, display_name FROM users WHERE show_in_staff = TRUE AND is_active = TRUE ORDER BY display_name")
+    staff_map = dict(zip(staff_df["display_name"], staff_df["user_id"]))
+    staff_options = ["Не назначен"] + list(staff_map.keys())
+
+    cols_to_show = [
+        "stage_name", "micro_status_name", "responsible_name", 
+        "iteration_count", "planned_start", "planned_end", 
+        "actual_start", "actual_end", "comments"
+    ]
+
     # 🔐 Таблица ВСЕГДА в режиме просмотра
-    st.dataframe(stages_df[["stage_name", "micro_status_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
-                 width="stretch", hide_index=True,
+    st.dataframe(stages_df[cols_to_show], 
+                 width='stretch', hide_index=True,
                  column_config={
-                     "stage_name": "Этап", "micro_status_name": "Микростатус",
-                     "iteration_count": st.column_config.NumberColumn("Итерация", format="%d"),
-                     "planned_start": "План. начало", "planned_end": "План. конец",
-                     "actual_start": "Факт. начало", "actual_end": "Факт. окончание", "comments": "Комментарий"
+                     "stage_name": "Этап", 
+                     "micro_status_name": "Микростатус",
+                     "responsible_name": "Ответственный", # ⬅️ Красивый заголовок
+                     "iteration_count": st.column_config.NumberColumn("Ит.", format="%d"),
+                     "planned_start": "План. начало", 
+                     "planned_end": "План. конец",
+                     "actual_start": "Факт. начало", 
+                     "actual_end": "Факт. окончание", 
+                     "comments": "Комментарий"
                  })
     
     if is_readonly:
@@ -113,29 +132,44 @@ def render_technology_tab(session, project_id, user_role="user"):
         # 🔍 РЕАКТИВНОЕ ОБНОВЛЕНИЕ: Перезаписываем ключи самих виджетов при смене выбора
         if st.session_state.get("tech_sel_prev") != sel_item:
             if is_editing:
-                curr_pre = stages_df[stages_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
-                st.session_state["tech_stage_in"] = curr_pre["stage_name"]
-                st.session_state["tech_status_in"] = curr_pre["micro_status_name"]
-                st.session_state["tech_iter_in"] = int(curr_pre["iteration_count"]) if pd.notna(curr_pre["iteration_count"]) else 1
-                st.session_state["tech_p_start_in"] = get_safe_date(curr_pre["planned_start"])
-                st.session_state["tech_a_start_in"] = get_safe_date(curr_pre["actual_start"])
-                st.session_state["tech_a_end_in"] = get_safe_date(curr_pre["actual_end"])
-                st.session_state["tech_comments_in"] = curr_pre["comments"] if pd.notna(curr_pre["comments"]) else ""
+                curr = stages_df[stages_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
+                
+                st.session_state["tech_stage_in"] = curr["stage_name"]
+                st.session_state["tech_status_in"] = curr["micro_status_name"]
+                st.session_state["tech_iter_in"] = int(curr["iteration_count"]) if pd.notna(curr["iteration_count"]) else 1
+                st.session_state["tech_p_start_in"] = get_safe_date(curr["planned_start"])
+                st.session_state["tech_a_start_in"] = get_safe_date(curr["actual_start"])
+                st.session_state["tech_a_end_in"] = get_safe_date(curr["actual_end"])
+                st.session_state["tech_comments_in"] = curr["comments"] if pd.notna(curr["comments"]) else ""
+                
+                # 👤 Логика ответственного
+                resp_id = curr.get("responsible_id")
+                resp_name = "Не назначен"
+                if pd.notna(resp_id):
+                    matching_staff = staff_df[staff_df["user_id"] == int(resp_id)]
+                    if not matching_staff.empty:
+                        resp_name = matching_staff.iloc[0]["display_name"]
+                
+                st.session_state["tech_resp_in"] = resp_name
             else:
-                st.session_state["tech_stage_in"] = list(stage_map.keys())[0]
-                st.session_state["tech_status_in"] = list(micro_map.keys())[0]
+                # Сброс для нового этапа
+                st.session_state["tech_stage_in"] = list(stage_map.keys())[0] if stage_map else None
+                st.session_state["tech_status_in"] = list(micro_map.keys())[0] if micro_map else None
                 st.session_state["tech_iter_in"] = 1
                 st.session_state["tech_p_start_in"] = None
                 st.session_state["tech_a_start_in"] = None
                 st.session_state["tech_a_end_in"] = None
                 st.session_state["tech_comments_in"] = ""
+                st.session_state["tech_resp_in"] = "Не назначен"
+
             st.session_state["tech_sel_prev"] = sel_item
 
         col1, col2 = st.columns(2)
         with col1:
             stage_name = st.selectbox("Этап", list(stage_map.keys()), key="tech_stage_in")
             micro_status = st.selectbox("Микростатус", list(micro_map.keys()), key="tech_status_in")
-            st.number_input("🔒 Итерация", disabled=True, key="tech_iter_in")
+            #st.number_input("🔒 Итерация", disabled=True, key="tech_iter_in")
+            sel_resp = st.selectbox("👤 Ответственный за этап", staff_options, key="tech_resp_in")
 
         with col2:
             p_start = st.date_input("План. начало", value=None, key="tech_p_start_in")
@@ -157,6 +191,7 @@ def render_technology_tab(session, project_id, user_role="user"):
             if st.button("💾 Сохранить", type="primary", key="tech_save"):
                 stage_info = stage_map[stage_name]
                 micro_id = micro_map[micro_status]
+                r_id = staff_map.get(sel_resp) if sel_resp != "Не назначен" else None
 
                 # 🛡 ЗАЩИТА ЛОГИКИ ВЕХ И ДАТ
                 if stage_info["type"] == "Веха":
@@ -189,11 +224,11 @@ def render_technology_tab(session, project_id, user_role="user"):
                         
                         session.execute(text("""
                             UPDATE item_stages SET stage_id=:sid, micro_status=:mst, iteration_count=:iter,
-                                planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm
+                                planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm, responsible_id=:rid
                             WHERE stage_progress_id=:id
                         """), {"sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
                                "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments,
-                               "id": int(item_ids_map[sel_item])})
+                               "id": int(item_ids_map[sel_item]), "rid": r_id})
                         
                         # 🚨 ИСПРАВЛЕНА ТАБЛИЦА: item_stages вместо project_stages
                         log_action(st.session_state["auth"]["user_id"], "UPDATE_STAGE", "item_stages", int(item_ids_map[sel_item]),
@@ -202,10 +237,10 @@ def render_technology_tab(session, project_id, user_role="user"):
                     else:
                         session.execute(text("""
                             INSERT INTO item_stages (item_id, stage_id, micro_status, iteration_count,
-                                planned_start, planned_end, actual_start, actual_end, comments)
-                            VALUES (:iid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm)
+                                planned_start, planned_end, actual_start, actual_end, comments, responsible_id)
+                            VALUES (:iid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm, :rid)
                         """), {"iid": selected_item_id, "sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
-                               "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments})
+                               "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments, "rid": r_id})
                         
                         # 🚨 ИСПРАВЛЕНА ТАБЛИЦА: item_stages
                         log_action(st.session_state["auth"]["user_id"], "CREATE_STAGE", "item_stages",

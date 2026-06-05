@@ -18,7 +18,7 @@ def render_project_dashboard(session, user_role="user"):
     if "selected_project_id" not in st.session_state:
         st.session_state.selected_project_id = None
 
-    # 🔍 2. Глобальные фильтры (Вынесены над табами)
+    # 🔍 2. Глобальные фильтры
     suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
     sup_map = dict(zip(suppliers["supplier_name"], suppliers["supplier_id"]))
     
@@ -76,6 +76,7 @@ def render_project_dashboard(session, user_role="user"):
     # ТАБ 1: ПАСПОРТ ПРОЕКТА
     # ------------------------------------------
     with tab_passport:
+        # Загружаем основные данные проекта
         proj_data = query_db("""
             SELECT p.project_id, p.supplier_id, p.project_name, 
                    s.supplier_name, c.full_name, rs.status_name, p.notes
@@ -86,23 +87,63 @@ def render_project_dashboard(session, user_role="user"):
             WHERE p.project_id = :pid
         """, {"pid": proj_id_int}).iloc[0]
 
-        # Вывод данных обычным шрифтом (на уровне с Примечанием)
+        '''# 🔹 ДОБАВЛЕНО: Загрузка текущих ответственных для отображения
+        resp_df = query_db("""
+            SELECT u.display_name FROM users u
+            JOIN project_responsibles pr ON u.user_id = pr.user_id
+            WHERE pr.project_id = :pid
+        """, {"pid": proj_id_int})
+        responsibles_str = ", ".join(resp_df["display_name"].tolist()) if not resp_df.empty else "Не назначены"'''
+        
+        # 🔹 АВТОМАТИЧЕСКИЙ СБОР ОТВЕТСТВЕННЫХ ИЗ ВСЕХ ЭТАПОВ
+        # Собираем уникальные имена из Бюрократии И Технологии этого проекта
+        combined_resp_query = """
+            SELECT DISTINCT u.display_name 
+            FROM users u
+            WHERE u.user_id IN (
+                -- Ответственные из документарных этапов
+                SELECT responsible_id FROM project_stages WHERE project_id = :pid AND responsible_id IS NOT NULL
+                UNION
+                -- Ответственные из технологических этапов всех элементов состава
+                SELECT responsible_id FROM item_stages 
+                WHERE item_id IN (SELECT item_id FROM project_items WHERE project_id = :pid) 
+                AND responsible_id IS NOT NULL
+            )
+        """
+        
+        resp_df = query_db(combined_resp_query, {"pid": proj_id_int})
+        responsibles_str = ", ".join(resp_df["display_name"].tolist()) if not resp_df.empty else "Не назначены"
+
         st.markdown(f"**📂 Проект:** {proj_data['project_name']}")
         st.markdown(f"**📊 Статус:** {proj_data['status_name']}")
         st.markdown(f"**👤 Основной контакт:** {proj_data['full_name'] or 'Не указан'}")
+        '''# 🔹 ВЫВОД НОВОГО ПОЛЯ
+        st.markdown(f"**👥 Ответственные сотрудники:** {responsibles_str}")'''
+        # Теперь это поле заполняется само!
+        st.markdown(f"**👥 Команда проекта (из этапов):** {responsibles_str}")
         st.markdown(f"**📝 Примечание:** {proj_data['notes'] or '-'}")
 
         if not is_readonly:
-            st.write("") # отступ
+            st.write("")
             if st.button("✏️ Изменить реквизиты проекта", type="secondary"):
                 st.session_state.dash_edit_mode = not st.session_state.dash_edit_mode
             
             if st.session_state.dash_edit_mode:
                 with st.form("edit_proj_form"):
                     st.markdown("#### 📝 Редактирование реквизитов")
+                    
+                    # Подготовка списков для формы
                     sup_list = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
                     cont_list = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid ORDER BY full_name", {"sid": int(proj_data['supplier_id'])})
                     stat_list = query_db("SELECT status_id, status_name FROM ref_statuses ORDER BY status_name")
+                    
+                    # 🔹 ДОБАВЛЕНО: Список кандидатов в ответственные (только show_in_staff)
+                    staff_list = query_db("SELECT user_id, display_name FROM users WHERE show_in_staff = TRUE AND is_active = TRUE ORDER BY display_name")
+                    staff_map = dict(zip(staff_list["display_name"], staff_list["user_id"]))
+                    
+                    # Текущие ID ответственных для default в multiselect
+                    curr_resp_ids = query_db("SELECT user_id FROM project_responsibles WHERE project_id = :pid", {"pid": proj_id_int})["user_id"].tolist()
+                    curr_resp_names = [name for name, uid in staff_map.items() if uid in curr_resp_ids]
 
                     sup_names = sup_list["supplier_name"].tolist()
                     stat_names = stat_list["status_name"].tolist()
@@ -112,9 +153,11 @@ def render_project_dashboard(session, user_role="user"):
                     with col_f1:
                         p_name_in = st.text_input("Название проекта", value=proj_data['project_name'])
                         p_sup_in = st.selectbox("Поставщик", sup_names, index=sup_names.index(proj_data['supplier_name']) if proj_data['supplier_name'] in sup_names else 0)
-                    with col_f2:
                         p_stat_in = st.selectbox("Статус", stat_names, index=stat_names.index(proj_data['status_name']) if proj_data['status_name'] in stat_names else 0)
+                    with col_f2:
                         p_contact_in = st.selectbox("Основной контакт", ["Не указан"] + cont_names, index=cont_names.index(proj_data['full_name'])+1 if proj_data['full_name'] in cont_names else 0)
+                        '''# 🔹 НОВЫЙ ВИДЖЕТ: Мультиселект ответственных
+                        p_resp_in = st.multiselect("Ответственные сотрудники", options=list(staff_map.keys()), default=curr_resp_names)'''
                     
                     p_notes_in = st.text_area("Примечание", value=proj_data['notes'] or "")
 
@@ -124,13 +167,22 @@ def render_project_dashboard(session, user_role="user"):
                             new_stat_id = int(stat_list[stat_list["status_name"]==p_stat_in]["status_id"].iloc[0])
                             new_cont_id = int(cont_list[cont_list["full_name"]==p_contact_in]["contact_id"].iloc[0]) if p_contact_in != "Не указан" else None
 
+                            # 1. Обновляем основную таблицу
                             session.execute(text("""UPDATE projects SET project_name=:name, supplier_id=:sup, 
                                 main_contact_id=:cont, status=:stat, notes=:notes WHERE project_id=:id"""), 
                             {"name": p_name_in, "sup": new_sup_id, "cont": new_cont_id, "stat": new_stat_id, "notes": p_notes_in, "id": proj_id_int})
+                            
+                            '''# 2. 🔹 ДОБАВЛЕНО: Обновление ответственных (Sync)
+                            session.execute(text("DELETE FROM project_responsibles WHERE project_id = :pid"), {"pid": proj_id_int})
+                            for name in p_resp_in:
+                                u_id = int(staff_map[name])
+                                session.execute(text("INSERT INTO project_responsibles (project_id, user_id) VALUES (:pid, :uid)"),
+                                                {"pid": proj_id_int, "uid": u_id})'''
+
                             session.commit(); clear_cache()
                             st.session_state["proj_list_ver"] += 1
                             st.session_state.dash_edit_mode = False
-                            st.success("✅ Сохранено!"); st.rerun()
+                            st.success("✅ Данные проекта и список ответственных обновлены!"); st.rerun()
                         except Exception as e: st.error(f"Ошибка: {e}"); session.rollback()
 
     # ------------------------------------------
@@ -170,7 +222,6 @@ def render_project_dashboard(session, user_role="user"):
                 sel_item = st.selectbox("Выберите элемент:", item_options, key="crud_item_sel")
                 is_editing = sel_item != "(Добавить новый)"
 
-                # Логика подстановки
                 if st.session_state.get("crud_item_sel_prev") != sel_item:
                     if is_editing:
                         curr = items_df[items_df["item_id"] == item_ids_map[sel_item]].iloc[0]

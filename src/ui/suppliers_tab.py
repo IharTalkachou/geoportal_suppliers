@@ -426,16 +426,16 @@ def render_surveys_manager(session, supplier_id, is_readonly):
             sid = survey_options[sel_label]  # <--- Переменная называется sid
             c1, c2, c3 = st.columns(3)
             with c1:
-                if st.button("👁 Просмотреть", use_container_width=True):
+                if st.button("👁 Просмотреть", width='stretch'):
                     st.session_state["survey_view_id"] = sid
                     st.session_state["survey_edit_id"] = None
             with c2:
-                if not is_readonly and st.button("✏️ Редактировать", use_container_width=True):
+                if not is_readonly and st.button("✏️ Редактировать", width='stretch'):
                     st.session_state["survey_edit_id"] = sid
                     st.session_state["survey_view_id"] = None
             with c3:
                 # ✅ ИСПРАВЛЕНО: заменяем survey_id на sid
-                if not is_readonly and st.button("🗑 Удалить", use_container_width=True, key=f"del_srv_{sid}"):
+                if not is_readonly and st.button("🗑 Удалить", width='stretch', key=f"del_srv_{sid}"):
                     try:
                         session.execute(text("DELETE FROM surveys WHERE survey_id = :id"), {"id": sid})
                         session.commit()
