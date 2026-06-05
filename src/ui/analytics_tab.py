@@ -429,8 +429,9 @@ def render_agreement_registry_report(sel_supplier, sel_period):
         st.info("📭 Подписанные соглашения не найдены (проверьте флаг 'Проект первичного подключения' в реквизитах проектов).")
         return
 
-    # 2. Формирование дат и динамического номера (как раньше)
+    # 2. Формирование дат и динамического номера
     df['agreement_date'] = pd.to_datetime(df['agreement_date'])
+
     
     # ❗ ВАЖНО: Фильтр по периоду применяем к уже готовому списку
     # (здесь можно добавить логику фильтрации по sel_period аналогично KPI)
@@ -445,9 +446,187 @@ def render_agreement_registry_report(sel_supplier, sel_period):
     
     st.dataframe(
         display_df.style.format({"Дата соглашения": lambda x: x.strftime('%d.%m.%Y')}),
-        use_container_width=True,
+        width='stretch',
         hide_index=True
     )
     
-    csv = display_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 Скачать реестр (CSV)", csv, "agreement_registry.csv", "text/csv")
+    # Экспорт в XLSX (с защитой формата)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        display_df.to_excel(writer, sheet_name='Реестр', index=False)
+        
+        workbook  = writer.book
+        worksheet = writer.sheets['Реестр']
+        
+        # Устанавливаем текстовый формат для первой колонки (A), чтобы 1/2026 не стал датой
+        text_format = workbook.add_format({'num_format': '@'}) 
+        # Формат для даты (ДД.ММ.ГГГГ)
+        date_format = workbook.add_format({'num_format': 'dd.mm.yyyy'})
+
+        worksheet.set_column('A:A', 20, text_format)
+        worksheet.set_column('B:B', 85)
+        worksheet.set_column('C:C', 15, date_format)
+
+    st.download_button(
+        label="📥 Скачать реестр (Excel)",
+        data=buffer.getvalue(),
+        file_name=f"registry_{pd.Timestamp.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+def render_progress_bureaucracy_report(sel_supplier, sel_period):
+    '''Сводный отчёт по остальным поставщикам'''
+    st.markdown("#### ⚙️ Настройки отчёта")
+    # Чекбокс фильтрации (пункт 2 твоего запроса)
+    hide_completed = st.checkbox("🚫 Скрыть поставщиков с уже подписанными соглашениями", value=False)
+
+    # SQL запрос: теперь тянем и stage_order
+    query = """
+        WITH last_iterations AS (
+            SELECT 
+                s.supplier_id,
+                s.supplier_name,
+                s.is_mandatory,
+                stg.stage_name,
+                stg.stage_order,
+                ps.comments,
+                ps.actual_end,
+                ROW_NUMBER() OVER(
+                    PARTITION BY s.supplier_id, stg.stage_id 
+                    ORDER BY ps.iteration_count DESC
+                ) as rn
+            FROM project_stages ps
+            JOIN projects p ON ps.project_id = p.project_id
+            JOIN suppliers s ON p.supplier_id = s.supplier_id
+            JOIN stages stg ON ps.stage_id = stg.stage_id
+            WHERE stg.track_category = '1. Документарный'
+              AND p.is_agreement_project = TRUE
+              AND ps.actual_end IS NOT NULL
+        ),
+        completed_suppliers AS (
+            -- Находим тех, у кого этап 'Документ подписан' (order=8) уже выполнен
+            SELECT DISTINCT supplier_id FROM last_iterations WHERE stage_order = 8
+        )
+        SELECT 
+            li.supplier_id,
+            li.supplier_name,
+            li.is_mandatory,
+            li.stage_name,
+            li.stage_order,
+            li.comments,
+            li.actual_end
+        FROM last_iterations li
+        WHERE li.rn = 1
+    """
+    
+    if hide_completed:
+        query += " AND li.supplier_id NOT IN (SELECT supplier_id FROM completed_suppliers)"
+
+    params = {}
+    if sel_supplier != "Все":
+        query += " AND li.supplier_name = :sup"
+        params["sup"] = sel_supplier
+
+    # Сортировка для корректной работы группировки: Поставщик -> Порядок этапа
+    query += " ORDER BY li.supplier_name, li.stage_order ASC"
+    
+    df = query_db(query, params)
+
+    if df.empty:
+        st.info("📭 Данные не найдены.")
+        return
+
+    # Переходим к обработке (Шаг 2)
+    process_and_show_bureaucracy_report_v2(df)
+
+def process_and_show_bureaucracy_report_v2(df):
+    '''формирование и отрисовка для отчёта по остальным поставщикам'''
+    df['actual_end'] = pd.to_datetime(df['actual_end'])
+    
+    # 1. Рассчитываем степень проработки для каждого поставщика (пункт 3 запроса)
+    # Находим максимальный stage_order для каждого supplier_id
+    max_stages = df.groupby('supplier_name')['stage_order'].max().reset_index()
+    
+    def define_rank(order):
+        return "Высокая (этапы 7-8)" if order >= 7 else "Низкая (этапы 1-6)"
+    
+    max_stages['rank'] = max_stages['stage_order'].apply(define_rank)
+    
+    # Мерджим ранг обратно в основной DF
+    df = df.merge(max_stages[['supplier_name', 'rank']], on='supplier_name')
+
+    # Формируем строку этапа
+    df['Пройденные этапы'] = df.apply(
+        lambda x: f"{x['stage_name']} | {x['comments']}" if pd.notna(x['comments']) and x['comments'] != 'Нет' 
+        else x['stage_name'], axis=1
+    )
+
+    df_mandatory = df[df['is_mandatory'] == True].copy()
+    df_others = df[df['is_mandatory'] == False].copy()
+
+    def render_smart_table(sub_df, title, color, use_ranking=False):
+        if sub_df.empty: return
+        
+        st.markdown(f"<h4 style='color: {color};'>{title}</h4>", unsafe_allow_html=True)
+        
+        # 1. Формируем список колонок и направлений сортировки динамически
+        if use_ranking:
+            sort_cols = ['rank', 'supplier_name', 'stage_order']
+            # В алфавите "В" (Высокая) идет раньше "Н" (Низкая), поэтому True поставит "Высокую" вверх
+            asc_logic = [True, True, True] 
+        else:
+            sort_cols = ['supplier_name', 'stage_order']
+            asc_logic = [True, True]
+
+        # Применяем сортировку
+        sub_df = sub_df.sort_values(by=sort_cols, ascending=asc_logic)
+        
+        # 2. Присваиваем № п/п каждому уникальному поставщику в текущем наборе
+        # Используем dict.fromkeys, чтобы сохранить порядок появления после сортировки
+        unique_sups = list(dict.fromkeys(sub_df['supplier_name']))
+        sup_to_no = {name: i+1 for i, name in enumerate(unique_sups)}
+        sub_df['№ п/п'] = sub_df['supplier_name'].map(sup_to_no)
+
+        # 3. МЕТОД ЧИСТОЙ ГРУППЫ
+        # Отмечаем строки, которые НЕ являются первыми в группе поставщика
+        sub_df['is_duplicated'] = sub_df.duplicated(subset=['supplier_name'])
+        
+        display_df = sub_df.copy()
+        
+        # ИСПРАВЛЕНИЕ: Принудительно переводим колонки в строковый тип ПЕРЕД занулением
+        # Это предотвратит конфликт типов int64 и string
+        display_df['№ п/п'] = display_df['№ п/п'].astype(str)
+        display_df['supplier_name'] = display_df['supplier_name'].astype(str)
+        if use_ranking:
+            display_df['rank'] = display_df['rank'].astype(str)
+
+        display_df['Дата'] = display_df['actual_end'].dt.strftime('%d.%m.%Y')
+        
+        # Зануляем (очищаем) ячейки для всех строк, кроме первой в группе
+        display_df.loc[display_df['is_duplicated'] == True, ['№ п/п', 'supplier_name', 'rank' if use_ranking else 'supplier_name']] = ""
+
+        # Выбираем колонки для показа
+        final_cols = ['№ п/п', 'supplier_name']
+        if use_ranking:
+            final_cols.append('rank')
+        final_cols.extend(['Пройденные этапы', 'Дата'])
+
+        # Переименовываем заголовки для красоты
+        rename_map = {
+            'supplier_name': 'Наименование поставщика',
+            'rank': 'Проработка'
+        }
+        # Расчет высоты: заголовок (~35px) + (кол-во строк * высота строки ~35px) + запас
+        # Ограничиваем сверху 600 пикселями
+        dynamic_height = min(600, (len(display_df) + 1) * 35 + 3)
+        
+        st.dataframe(
+            display_df[final_cols].rename(columns=rename_map), 
+            width='stretch', 
+            hide_index=True,
+            height=dynamic_height
+        )
+
+    # Вывод
+    render_smart_table(df_mandatory, "⭐ Поставщики обязательных наборов (ОНПД)", "#ff4b4b", use_ranking=True)
+    render_smart_table(df_others, "📂 Прочие поставщики", "#31333F", use_ranking=False)
