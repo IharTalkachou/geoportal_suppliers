@@ -137,31 +137,29 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                 stage_info = stage_map[stage_name]
                 micro_id = micro_map[micro_status]
 
-                # 📅 Авто-расчёт планового окончания
-                # 🛡 ЗАЩИТА ЛОГИКИ ВЕХ И ДАТ
+                # 1. Расчёт итерации
+                if is_editing:
+                    # Если редактируем, берем значение из заблокированного поля ввода
+                    iter_val = int(st.session_state["buro_iter_in"])
+                else:
+                    # Если новый, считаем MAX + 1 из базы
+                    iter_val = session.execute(text("""
+                        SELECT COALESCE(MAX(iteration_count), 0) + 1 
+                        FROM project_stages 
+                        WHERE project_id = :pid AND stage_id = :sid
+                    """), {"pid": project_id, "sid": stage_info["id"]}).scalar()
+
+                # 2. Логика дат (как мы правили ранее)
                 if stage_info["type"] == "Веха":
-                    # Для вехи начало и конец всегда совпадают (даже если это None)
                     p_end = p_start
                     a_end = a_start
                 else:
-                    # Для обычного этапа считаем план от длительности
                     p_end = p_start + timedelta(days=stage_info["duration"]) if p_start else None
 
-                # 🎯 Авто-закрытие предыдущего этапа (только если стоит чекбокс!)
-                if not is_editing and auto_close_prev and a_start is not None and completed_status_id is not None:
-                    session.execute(text("""
-                        UPDATE project_stages SET actual_end = :close_date, micro_status = :completed_id
-                        WHERE stage_progress_id = (
-                            SELECT ps.stage_progress_id FROM project_stages ps
-                            WHERE ps.project_id = :pid AND ps.actual_end IS NULL
-                            ORDER BY (SELECT s.stage_order FROM stages s WHERE s.stage_id = ps.stage_id) DESC, ps.iteration_count DESC
-                            LIMIT 1
-                        )
-                    """), {"close_date": a_start, "completed_id": completed_status_id, "pid": project_id})
-
+                # 3. Сама вставка/обновление
                 try:
                     if is_editing:
-                        # 👈 ДОБАВЛЯЕМ ВОТ ЭТУ СТРОКУ (Достаем текущие значения из базы для логов)
+                        # Достаем curr для лога
                         curr = ps_df[ps_df["stage_progress_id"] == item_ids_map[sel_item]].iloc[0]
                         
                         session.execute(text("""
@@ -169,12 +167,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                                 planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm
                             WHERE stage_progress_id=:id
                         """), {"sid": stage_info["id"], "mst": micro_id, "iter": iter_val,
-                               "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments,
-                               "id": int(item_ids_map[sel_item])})
-                               
-                        log_action(st.session_state["auth"]["user_id"], "UPDATE_STAGE", "project_stages", int(item_ids_map[sel_item]),
-                            old={"status": curr["micro_status_name"], "a_start": curr["actual_start"]},
-                            new={"status": micro_status, "a_start": a_start})
+                            "ps": p_start, "pe": p_end, "as": a_start, "ae": a_end, "comm": comments,
+                            "id": int(item_ids_map[sel_item])})
                     else:
                         session.execute(text("""
                             INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count,
