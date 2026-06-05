@@ -191,13 +191,17 @@ def render_project_dashboard(session, user_role="user"):
     with tab_composition:
         st.markdown("#### 📦 Состав проекта (Наборы → Виды)")
         
+        # 1. Загружаем справочники
         datasets_all = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
         info_types_all = query_db("SELECT info_id, info_name, dataset_id FROM info_types ORDER BY info_name")
         ds_map = dict(zip(datasets_all["dataset_name"], datasets_all["dataset_id"]))
+        # info_map хранит и ID вида, и ID набора для проверки
         info_map = {row["info_name"]: {"id": row["info_id"], "ds_id": row["dataset_id"]} for _, row in info_types_all.iterrows()}
 
+        # 2. Загружаем текущий состав проекта
         items_df = query_db("""
-            SELECT pi.item_id, d.dataset_name, i.info_name, c.full_name as tech_contact
+            SELECT pi.item_id, d.dataset_name, i.info_name, c.full_name as tech_contact,
+                   pi.provision_right
             FROM project_items pi
             JOIN datasets d ON pi.dataset_id = d.dataset_id
             JOIN info_types i ON pi.info_id = i.info_id
@@ -206,12 +210,17 @@ def render_project_dashboard(session, user_role="user"):
             ORDER BY d.dataset_name, i.info_name
         """, {"pid": proj_id_int})
 
-        st.dataframe(items_df[["dataset_name", "info_name", "tech_contact"]], 
+        st.dataframe(items_df[["dataset_name", "info_name", "tech_contact", "provision_right"]], 
                      width='stretch', hide_index=True,
-                     column_config={"dataset_name": "Набор данных", "info_name": "Вид сведений", "tech_contact": "Тех. контакт"})
+                     column_config={
+                         "dataset_name": "Набор данных", 
+                         "info_name": "Вид сведений", 
+                         "tech_contact": "Тех. контакт",
+                         "provision_right": "Право предоставления"
+                     })
 
         if not is_readonly:
-            with st.expander("➕ Добавить / ✏️ Редактировать элемент состава"):
+            with st.expander("➕ Добавить / ✏️ Редактировать элемент состава", expanded=True):
                 item_options = ["(Добавить новый)"]
                 item_ids_map = {}
                 for _, row in items_df.iterrows():
@@ -219,51 +228,107 @@ def render_project_dashboard(session, user_role="user"):
                     item_options.append(label)
                     item_ids_map[label] = row["item_id"]
 
-                sel_item = st.selectbox("Выберите элемент:", item_options, key="crud_item_sel")
+                sel_item = st.selectbox("Выберите элемент для редактирования:", item_options, key="crud_item_sel")
                 is_editing = sel_item != "(Добавить новый)"
 
+                # Список опций (ВАЖНО: Должен СТРОГО совпадать с БД)
+                prov_options = [
+                    'Протокол не заключён',
+                    'Оператор и Поставщик',
+                    'Только Поставщик',
+                    'Не предоставляется'
+                ]
+
+                # Логика подстановки значений
                 if st.session_state.get("crud_item_sel_prev") != sel_item:
                     if is_editing:
                         curr = items_df[items_df["item_id"] == item_ids_map[sel_item]].iloc[0]
                         st.session_state["crud_ds_in"] = curr["dataset_name"]
                         st.session_state["crud_info_in"] = curr["info_name"]
                         st.session_state["crud_cont_in"] = curr["tech_contact"] if pd.notna(curr["tech_contact"]) else "Не выбран"
+                        st.session_state["crud_prov_in"] = curr["provision_right"] if pd.notna(curr["provision_right"]) else prov_options[0]
                     else:
                         st.session_state["crud_ds_in"] = list(ds_map.keys())[0] if ds_map else ""
                         st.session_state["crud_info_in"] = ""
                         st.session_state["crud_cont_in"] = "Не выбран"
+                        st.session_state["crud_prov_in"] = prov_options[0]
                     st.session_state["crud_item_sel_prev"] = sel_item
 
+                # Виджеты
                 sel_ds = st.selectbox("Набор данных *", list(ds_map.keys()), key="crud_ds_in")
-                valid_infos = [k for k, v in info_map.items() if v["ds_id"] == ds_map[sel_ds]]
-                sel_info = st.selectbox("Вид сведений *", valid_infos if valid_infos else ["(Пусто)"], key="crud_info_in")
-
+                
+                # Фильтрация видов
+                current_ds_id = ds_map.get(sel_ds)
+                valid_infos = [k for k, v in info_map.items() if v["ds_id"] == current_ds_id]
+                if not valid_infos: valid_infos = ["(Пусто)"]
+                
+                sel_info = st.selectbox("Вид сведений *", valid_infos, key="crud_info_in")
+                
+                # Контакты поставщика
                 proj_sup_id = int(proj_data['supplier_id'])
                 sup_contacts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid ORDER BY full_name", {"sid": proj_sup_id})
                 sup_cont_map = dict(zip(sup_contacts["full_name"], sup_contacts["contact_id"]))
+                
                 sel_cont = st.selectbox("Тех. контакт", ["Не выбран"] + list(sup_cont_map.keys()), key="crud_cont_in")
+                sel_prov = st.selectbox("Право предоставления *", prov_options, key="crud_prov_in")
 
                 c_btn, c_del = st.columns([3, 1])
                 with c_btn:
-                    if st.button("💾 Сохранить в состав", type="primary"):
-                        try:
-                            ds_id = ds_map[sel_ds]
-                            info_id = info_map[sel_info]["id"]
-                            cont_id = sup_cont_map.get(sel_cont) if sel_cont != "Не выбран" else None
-                            
-                            if is_editing:
-                                session.execute(text("UPDATE project_items SET dataset_id=:d, info_id=:i, tech_contact_id=:c WHERE item_id=:id"),
-                                                {"d": ds_id, "i": info_id, "c": cont_id, "id": int(item_ids_map[sel_item])})
-                            else:
-                                session.execute(text("INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id) VALUES (:p, :d, :i, :c)"),
-                                                {"p": proj_id_int, "d": ds_id, "i": info_id, "c": cont_id})
-                            session.commit(); clear_cache(); st.success("✅ Состав обновлен!"); st.rerun()
-                        except Exception as e: st.error(f"Ошибка: {e}"); session.rollback()
+                    if st.button("💾 Сохранить в состав", type="primary", width='stretch'):
+                        if sel_info == "(Пусто)":
+                            st.error("❌ Выберите корректный Вид сведений")
+                        else:
+                            try:
+                                # Извлекаем ID из маппингов
+                                d_id = int(ds_map[sel_ds])
+                                i_id = int(info_map[sel_info]["id"])
+                                c_id = int(sup_cont_map[sel_cont]) if sel_cont != "Не выбран" else None
+                                
+                                if is_editing:
+                                    target_item_id = int(item_ids_map[sel_item])
+                                    session.execute(text("""
+                                        UPDATE project_items 
+                                        SET dataset_id=:d, info_id=:i, tech_contact_id=:c, 
+                                            provision_right = CAST(:prov AS data_provision_type)
+                                        WHERE item_id=:id
+                                    """), {"d": d_id, "i": i_id, "c": c_id, "prov": sel_prov, "id": target_item_id})
+                                else:
+                                    # Проверка на дубликат перед вставкой
+                                    is_dup = not items_df[(items_df["dataset_name"] == sel_ds) & (items_df["info_name"] == sel_info)].empty
+                                    if is_dup:
+                                        st.warning("⚠️ Этот вид сведений уже есть в проекте")
+                                        st.stop()
+                                        
+                                    session.execute(text("""
+                                        INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right) 
+                                        VALUES (:p, :d, :i, :c, CAST(:prov AS data_provision_type))
+                                    """), {"p": proj_id_int, "d": d_id, "i": i_id, "c": c_id, "prov": sel_prov})
+                                
+                                session.commit()
+                                clear_cache()
+                                st.success("✅ Сохранено!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Ошибка БД: {e}")
+                                session.rollback()
                 
                 with c_del:
-                    if is_editing and st.button("🗑 Удалить", type="secondary", key="del_item_btn"):
-                        session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(item_ids_map[sel_item])})
-                        session.commit(); clear_cache(); st.success("Удалено"); st.rerun()
+                    if is_editing and st.button("🗑 Удалить", type="secondary", key="del_item_btn", width='stretch'):
+                        try:
+                            target_item_id = int(item_ids_map[sel_item])
+                            # Проверка на этапы
+                            check_stages = query_db("SELECT 1 FROM item_stages WHERE item_id = :id LIMIT 1", {"id": target_item_id})
+                            if not check_stages.empty:
+                                st.error("❌ Нельзя удалить: есть связанные технологические этапы!")
+                            else:
+                                session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": target_item_id})
+                                session.commit()
+                                clear_cache()
+                                st.success("Удалено")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Ошибка: {e}")
+                            session.rollback()
 
     # ------------------------------------------
     # ТАБ 3: ЭТАПЫ ПРОЕКТА

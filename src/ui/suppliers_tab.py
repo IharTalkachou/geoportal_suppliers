@@ -10,7 +10,8 @@ RU_LABELS = {
     "supplier_name": "Наименование", "supplier_address": "Адрес",
     "supplier_email": "Email", "supplier_phone": "Телефон",
     "supplier_website": "Сайт", "supplier_manager": "Руководитель",
-    "supplier_notes": "Примечание"
+    "supplier_notes": "Примечание",
+    "is_mandatory": "Поставщик ОПНД"
 }
 
 def render_suppliers_tab(session, user_role="user"):
@@ -58,6 +59,11 @@ def render_suppliers_tab(session, user_role="user"):
     # --- ТАБ 1: КАРТОЧКА ---
     with tab_card:
         sup_data = query_db("SELECT * FROM suppliers WHERE supplier_id = :sid", {"sid": selected_sup_id}).iloc[0]
+        
+        # индикатор обязательности
+        if sup_data.get('is_mandatory'):
+            st.warning("⭐ **Поставщик ОНПД**")
+        
         col_info, col_edit = st.columns([2, 1])
         
         # Управление режимом редактирования через единый ключ
@@ -66,7 +72,10 @@ def render_suppliers_tab(session, user_role="user"):
                 
         with col_info:
             for col, label in RU_LABELS.items():
-                if pd.notna(sup_data.get(col)):
+                if col in ["supplier_id", "supplier_name", "is_mandatory"]: 
+                    continue
+                
+                if pd.notna(sup_data.get(col)) and str(sup_data[col]).strip() != "":
                     st.write(f"**{label}:** {sup_data[col]}")
         
         with col_edit:
@@ -97,7 +106,8 @@ def render_suppliers_tab(session, user_role="user"):
                 pi.item_id, p.project_name, p.project_id,
                 d.dataset_name, d.dataset_id,
                 i.info_name, i.info_id,
-                c.full_name as tech_contact
+                c.full_name as tech_contact,
+                pi.provision_right
             FROM project_items pi
             JOIN projects p ON pi.project_id = p.project_id
             JOIN datasets d ON pi.dataset_id = d.dataset_id
@@ -108,9 +118,10 @@ def render_suppliers_tab(session, user_role="user"):
         """, {"sid": selected_sup_id})
         
         if not items_df.empty:
-            st.dataframe(items_df[["project_name", "dataset_name", "info_name", "tech_contact"]], 
+            st.dataframe(items_df[["project_name", "dataset_name", "info_name", "tech_contact", "provision_right"]], 
                          width="stretch", hide_index=True,
-                         column_config={"project_name": "Проект", "dataset_name": "Набор", "info_name": "Вид сведений", "tech_contact": "Тех. контакт"})
+                         column_config={"project_name": "Проект", "dataset_name": "Набор", "info_name": "Вид сведений", 
+                                        "tech_contact": "Тех. контакт", "provision_right": "Право предоставления"})
         else:
             st.info("📭 Пока нет привязанных наборов.")
 
@@ -182,6 +193,13 @@ def render_suppliers_tab(session, user_role="user"):
                 conts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": selected_sup_id})
                 cont_opt = ["Не выбран"] + conts["full_name"].tolist()
                 sel_c = st.selectbox("Технический контакт", cont_opt, key="ds_cont_sel")
+                prov_options = [
+                    'Оператор и Поставщик',
+                    'Только Поставщик',
+                    'Не предоставляется',
+                    'Протокол не заключён'
+                ]
+                sel_prov_new = st.selectbox("Право предоставления *", prov_options, key="ds_prov_new")
 
                 if st.button("🚀 Создать связь", type="primary"):
                     try:
@@ -248,9 +266,15 @@ def render_suppliers_tab(session, user_role="user"):
                                 st.warning("⚠️ Такая связь (Проект + Вид сведений) уже существует!")
                             else:
                                 session.execute(text("""
-                                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id) 
-                                    VALUES (:pid, :did, :iid, :cid)
-                                """), {"pid": p_id, "did": d_id, "iid": i_id, "cid": c_id})
+                                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right) 
+                                    VALUES (:pid, :did, :iid, :cid, CAST(:prov AS data_provision_type)) -- ⬅️ CAST ТУТ
+                                """), {
+                                    "pid": int(p_id), 
+                                    "did": int(d_id), 
+                                    "iid": int(i_id), 
+                                    "cid": c_id, 
+                                    "prov": sel_prov_new 
+                                })
                                 
                                 session.commit()
                                 st.cache_data.clear()
@@ -282,6 +306,7 @@ def render_supplier_form(session, existing_data=None):
             name = st.text_input("Наименование *", value=existing_data['supplier_name'] if is_editing else "")
             addr = st.text_input("Адрес", value=existing_data['supplier_address'] if is_editing else "")
             email = st.text_input("Email", value=existing_data['supplier_email'] if is_editing else "")
+            is_mand = st.checkbox("Поставщик ОНПД", value=bool(existing_data['is_mandatory']) if is_editing else False)
         with col2:
             phone = st.text_input("Телефон", value=existing_data['supplier_phone'] if is_editing else "")
             mgr = st.text_input("Руководитель", value=existing_data['supplier_manager'] if is_editing else "")
@@ -295,21 +320,37 @@ def render_supplier_form(session, existing_data=None):
                 # Явно приводим ID к стандартному int
                 target_id = int(existing_data['supplier_id']) if is_editing else None
                 
+                params = {
+                    "n": name, "a": addr, "e": email, "p": phone, 
+                    "m": mgr, "notes": notes, "is_m": is_mand, "id": target_id
+                }
+                
                 if is_editing:
+                    # Логируем изменение признака
+                    log_action(st.session_state["auth"]["user_id"], "UPDATE_SUPPLIER", "suppliers", target_id,
+                               old={"name": existing_data['supplier_name'], "mandatory": bool(existing_data['is_mandatory'])},
+                               new={"name": name, "mandatory": is_mand})
+
                     session.execute(text("""
-                        UPDATE suppliers SET supplier_name=:n, supplier_address=:a, supplier_email=:e,
-                        supplier_phone=:p, supplier_manager=:m, supplier_notes=:notes WHERE supplier_id=:id
-                    """), {"n": name, "a": addr, "e": email, "p": phone, "m": mgr, "notes": notes, "id": target_id})
+                        UPDATE suppliers SET 
+                            supplier_name=:n, supplier_address=:a, supplier_email=:e,
+                            supplier_phone=:p, supplier_manager=:m, supplier_notes=:notes,
+                            is_mandatory=:is_m 
+                        WHERE supplier_id=:id
+                    """), params)
                 else:
                     session.execute(text("""
-                        INSERT INTO suppliers (supplier_name, supplier_address, supplier_email, supplier_phone, supplier_manager, supplier_notes)
-                        VALUES (:n, :a, :e, :p, :m, :notes)
-                    """), {"n": name, "a": addr, "e": email, "p": phone, "m": mgr, "notes": notes})
+                        INSERT INTO suppliers (supplier_name, supplier_address, supplier_email, supplier_phone, supplier_manager, supplier_notes, is_mandatory)
+                        VALUES (:n, :a, :e, :p, :m, :notes, :is_m)
+                    """), params)
+                    
+                    # Логируем создание
+                    log_action(st.session_state["auth"]["user_id"], "CREATE_SUPPLIER", "suppliers", None, new={"name": name, "mandatory": is_mand})
                 
                 session.commit(); clear_cache()
-                st.success("Данные обновлены!"); st.rerun()
+                st.success("Данные поставщика обновлены!"); st.rerun()
             except Exception as e:
-                st.error(f"Ошибка: {e}"); session.rollback()
+                st.error(f"Ошибка БД: {e}"); session.rollback()
 
 def render_contacts_manager(session, supplier_id, is_readonly):
     """Управление контактами"""
