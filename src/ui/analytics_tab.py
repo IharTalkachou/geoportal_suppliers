@@ -36,6 +36,15 @@ def load_analytics_data():
     """)
 
 def render_analytics_tab(user_role="user"):
+    """Отрисовка вкладки 'Аналитика'"""
+    # --- ФУНКЦИЯ СБРОСА (Callback) ---
+    def reset_analytics_filters():
+        # Вместо присвоения "Все", мы просто удаляем ключи. 
+        # Тогда виджеты при следующей отрисовке возьмут значения по умолчанию (index=0).
+        for key in ["an_sup_filter", "an_proj_filter", "an_period_filter"]:
+            if key in st.session_state:
+                del st.session_state[key]
+    
     st.subheader("📊 Аналитика и операционный контроль")
     
     # Загружаем мастер-данные
@@ -77,11 +86,12 @@ def render_analytics_tab(user_role="user"):
         
         with cols[3]:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🔄 Сбросить", width="stretch", key="an_reset_btn"):
-                st.session_state.an_sup_filter = "Все"
-                st.session_state.an_proj_filter = "Все"
-                st.session_state.an_period_filter = "Все"
-                st.rerun()
+            st.button(
+                "🔄 Сбросить", 
+                width='stretch', 
+                key="an_reset_btn", 
+                on_click=reset_analytics_filters
+            )
 
     # Применение фильтров
     filtered = df_raw.copy()
@@ -121,7 +131,7 @@ def render_analytics_tab(user_role="user"):
     # ==========================================
     # 🗂️ ТЕХНИЧЕСКИЕ ПОДВКЛАДКИ СТРИМЛИТ
     # ==========================================
-    tabs = st.tabs(["🎯 KPI", "📅 Календарь", "📊 Диаграмма Ганта", "🌡️ Тепловая карта трения"])
+    tabs = st.tabs(["🎯 KPI", "📅 Календарь", "📊 Диаграмма Ганта", "🌡️ Тепловая карта трения", "📄 Отчёты"])
 
     # ------------------------------------------
     # Подвкладка 1: KPI и Загрузка
@@ -333,6 +343,27 @@ def render_analytics_tab(user_role="user"):
                 fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
                 st.plotly_chart(fig_heat, width="stretch")
 
+    # ------------------------------------------
+    # Подвкладка 5: Отчёты
+    # ------------------------------------------
+    with tabs[4]:
+        st.markdown("### 📋 Формирование регламентных отчётов")
+        
+        report_type = st.selectbox(
+            "Выберите тип отчёта для формирования:",
+            [
+                "1. Реестр подписанных соглашений",
+                "2. Сводный отчёт о ходе выполнения (Бюрократия)"
+            ],
+            index=0
+        )
+        st.divider()
+
+        if report_type == "1. Реестр подписанных соглашений":
+            render_agreement_registry_report(sel_supplier, sel_period)
+        else:
+            render_progress_bureaucracy_report(sel_supplier, sel_period)
+
     # 📥 Сохраняем блок экспорта отчета в Excel (в самом низу вкладки)
     st.markdown("---")
     with st.expander("📥 Экспорт сводного отчета в Excel"):
@@ -363,3 +394,60 @@ def render_analytics_tab(user_role="user"):
                 st.success("✅ Отчёт успешно сформирован!")
             except Exception as e:
                 st.error(f"❌ Ошибка генерации Excel: {e}")
+
+# Функции создания отчётов (тест)
+def render_agreement_registry_report(sel_supplier, sel_period):
+    """Отчёт 1: Реестр соглашений с учетом фильтра проекта-соглашения"""
+    
+    # 1. SQL запрос с фильтром по признаку проекта-соглашения
+    query = """
+        SELECT 
+            s.supplier_name,
+            ps.actual_end as agreement_date
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE stg.stage_name = 'Документ подписан' 
+          AND ms.micro_status_name = 'Выполнено'
+          AND ps.actual_end IS NOT NULL
+          AND p.is_agreement_project = TRUE  -- 👈 ГЛАВНЫЙ ФИЛЬТР
+    """
+    
+    # Добавляем фильтрацию по поставщику, если он выбран в глобальных фильтрах
+    params = {}
+    if sel_supplier != "Все":
+        query += " AND s.supplier_name = :sup"
+        params["sup"] = sel_supplier
+
+    query += " ORDER BY ps.actual_end ASC"
+    
+    df = query_db(query, params)
+
+    if df.empty:
+        st.info("📭 Подписанные соглашения не найдены (проверьте флаг 'Проект первичного подключения' в реквизитах проектов).")
+        return
+
+    # 2. Формирование дат и динамического номера (как раньше)
+    df['agreement_date'] = pd.to_datetime(df['agreement_date'])
+    
+    # ❗ ВАЖНО: Фильтр по периоду применяем к уже готовому списку
+    # (здесь можно добавить логику фильтрации по sel_period аналогично KPI)
+
+    df = df.sort_values('agreement_date').reset_index(drop=True)
+    df.insert(0, "Номер соглашения", "")
+    for i in range(len(df)):
+        df.loc[i, "Номер соглашения"] = f"{i + 1}/{df.loc[i, 'agreement_date'].year}"
+
+    display_df = df[["Номер соглашения", "supplier_name", "agreement_date"]]
+    display_df.columns = ["Номер соглашения", "Наименование поставщика", "Дата соглашения"]
+    
+    st.dataframe(
+        display_df.style.format({"Дата соглашения": lambda x: x.strftime('%d.%m.%Y')}),
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    csv = display_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 Скачать реестр (CSV)", csv, "agreement_registry.csv", "text/csv")

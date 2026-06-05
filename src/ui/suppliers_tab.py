@@ -164,6 +164,7 @@ def render_suppliers_tab(session, user_role="user"):
                 new_p_name = ""
                 if sel_p == "(Новый проект)":
                     new_p_name = st.text_input("Название нового проекта *", key="ds_new_p_name")
+                    new_p_is_agr = st.checkbox("Проект первичного подключения (Соглашение)", key="new_p_agr_check")
                 
                 # 2. ВЫБОР НАБОРА (Глобальный)
                 dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
@@ -210,9 +211,13 @@ def render_suppliers_tab(session, user_role="user"):
                                 st.error("❌ Укажите название нового проекта")
                                 st.stop()
                             p_id = session.execute(text("""
-                                INSERT INTO projects (supplier_id, project_name, status) 
-                                VALUES (:sid, :pn, 1) RETURNING project_id
-                            """), {"sid": int(selected_sup_id), "pn": new_p_name.strip()}).scalar()
+                                INSERT INTO projects (supplier_id, project_name, status, is_agreement_project) 
+                                VALUES (:sid, :pn, 1, :is_agr) RETURNING project_id
+                            """), {
+                                "sid": int(selected_sup_id), 
+                                "pn": new_p_name.strip(), 
+                                "is_agr": new_p_is_agr
+                            }).scalar()
                         else:
                             # Безопасный поиск ID существующего проекта
                             proj_row = projs[projs["project_name"] == sel_p]
