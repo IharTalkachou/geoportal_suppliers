@@ -44,7 +44,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
         LEFT JOIN users u ON ps.responsible_id = u.user_id 
         WHERE ps.project_id = :pid
-        ORDER BY s.stage_order, ps.iteration_count
+        ORDER BY ps.actual_end ASC NULLS LAST, s.stage_order ASC, ps.iteration_count ASC
     """, {"pid": project_id})
 
     # 👥 Загружаем список сотрудников для выбора

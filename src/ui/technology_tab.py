@@ -77,7 +77,7 @@ def render_technology_tab(session, project_id, user_role="user"):
         JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
         LEFT JOIN users u ON ist.responsible_id = u.user_id
         WHERE ist.item_id = :iid
-        ORDER BY s.stage_order, ist.iteration_count
+        ORDER BY ist.actual_end ASC NULLS LAST, s.stage_order ASC, ist.iteration_count ASC
     """, {"iid": selected_item_id})
 
     # 👥 Загружаем список сотрудников для выбора

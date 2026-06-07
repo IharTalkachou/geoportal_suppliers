@@ -42,11 +42,21 @@ def render_project_dashboard(session, user_role="user"):
     else:
         projects = query_db(f"SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name /* v{cache_buster} */", {"sid": sup_map[selected_sup]})
 
-    proj_map = dict(zip(projects["project_id"], projects["project_name"]))
+    # Формируем словарь: {ID: Название}
+    # Принудительно приводим ключи к int, чтобы избежать ошибок типов
+    proj_map = {int(row["project_id"]): row["project_name"] for _, row in projects.iterrows()}
+    
+    # Список опций состоит из None и числовых ID
     proj_options = [None] + list(proj_map.keys())
 
+    # Вычисляем индекс для возврата к выбранному проекту
     current_proj = st.session_state.get("selected_project_id")
-    default_idx = proj_options.index(current_proj) if current_proj in proj_options else 0
+    
+    # 🛡️ ЗАЩИТА: проверяем, что в сессии лежит именно число, а не текст от старой версии кода
+    if isinstance(current_proj, (int, float)) and int(current_proj) in proj_options:
+        default_idx = proj_options.index(int(current_proj))
+    else:
+        default_idx = 0
 
     selected_proj_id = st.selectbox(
         "🔍 Проект", 
@@ -56,8 +66,14 @@ def render_project_dashboard(session, user_role="user"):
         key=f"dash_proj_filter_v{cache_buster}" 
     )
     
-    if selected_proj_id:
-        st.session_state["selected_project_id"] = int(selected_proj_id)
+    # 🛡️ БЕЗОПАСНОЕ СОХРАНЕНИЕ
+    if selected_proj_id is not None:
+        try:
+            # Если вдруг пришел текст (как в ошибке), int() вызовет исключение, 
+            # и мы просто сбросим выбор вместо краша приложения
+            st.session_state["selected_project_id"] = int(selected_proj_id)
+        except (ValueError, TypeError):
+            st.session_state["selected_project_id"] = None
     else:
         st.session_state["selected_project_id"] = None
         st.info("👆 Выберите поставщика и проект для начала работы.")

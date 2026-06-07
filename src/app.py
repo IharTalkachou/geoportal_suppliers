@@ -89,37 +89,89 @@ if "auth" not in st.session_state:
 # ==========================================
 check_session_timeout()
 
-header_left, header_right = st.columns([0.7, 0.3])
-with header_left:
-    st.title("🗺️ Управление поставщиками пространственных данных")
+st.markdown("""
+    <style>
+        /* 1. Общий контейнер */
+        .block-container {
+            padding-top: 3rem;
+            padding-bottom: 0rem;
+        }
+        
+        /* 2. Заголовок Header 3 */
+        h3 {
+            margin-top: -0.5rem;
+            margin-bottom: 0rem;
+            font-size: 1.4rem !important;
+        }
 
-with header_right:
-    with st.container():
-        st.markdown(f"👤 **{st.session_state['auth']['display_name']}**", unsafe_allow_html=True)
-        if st.session_state["auth"]["role"] in ("admin", "editor"):
-            st.caption(f"🔑 Роль: `{st.session_state['auth']['role_name']}`")
-            
+        /* 3. Информация о пользователе */
+        .user-info {
+            font-size: 0.8rem;
+            line-height: 1.1;
+            margin-bottom: 0.4rem;
+            text-align: right;
+            color: #555;
+        }
+
+        /* 4. КНОПКИ: Делаем их действительно маленькими */
+        .stButton button {
+            height: 1.6rem !important;   /* Очень маленькая высота */
+            font-size: 0.75rem !important; /* Уменьшенный шрифт */
+            padding: 0px 8px !important;   /* Компактные внутренние отступы */
+            border-radius: 4px !important;
+            margin-top: 0px;
+        }
+        
+        /* Убираем лишние отступы между кнопками в колонках */
+        [data-testid="stHorizontalBlock"] {
+            gap: 0.5rem !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# Ряд заголовка
+h_col1, h_col2 = st.columns([0.6, 0.4])
+
+with h_col1:
+    st.markdown("### 🗺️ Управление поставщиками Национального геопортала") # Сократил для экономии места
+
+with h_col2:
+    auth = st.session_state['auth']
+    role_str = f"{auth['role_name']}"
+    
+    # Имя и роль в одну компактную строку справа
+    st.markdown(f"""
+        <div class="user-info">
+            <b>{auth['display_name']}</b> | {role_str}
+        </div>
+    """, unsafe_allow_html=True)
+
+    # Кнопки управления (теперь они будут крошечными)
+    btn_col1, btn_col2 = st.columns([0.5, 0.5])
+    
+    with btn_col1:
         if st.session_state.get("show_admin", False):
-            if st.button("⬅️ Назад к проектам", width="stretch", type="secondary", key="btn_back"):
+            if st.button("⬅️ Назад", width='stretch', key="btn_back"):
                 st.session_state["show_admin"] = False
                 st.rerun()
         elif st.session_state["auth"]["role"] == "admin":
-            if st.button("⚙️ Админ-панель", width="stretch", type="secondary", key="btn_admin"):
+            if st.button("⚙️ Админ-панель", width='stretch', key="btn_admin"):
                 st.session_state["show_admin"] = True
                 st.rerun()
 
-        if st.button("🚪 Выйти", width="stretch", type="primary", key="btn_logout"):
+    with btn_col2:
+        if st.button("🚪 Выход", width='stretch', type="primary", key="btn_logout"):
             uid = st.session_state.get("auth", {}).get("user_id")
             token = st.query_params.get("session")
             if uid and token:
                 try:
+                    from sqlalchemy.orm import Session
                     with Session(engine) as log_sess:
                         log_action(log_sess, uid, "LOGOUT", target_table="auth")
                 except: pass
             destroy_session(token or "")
-            st.query_params.pop("session", None)
-            st.session_state.pop("auth", None)
-            st.session_state.pop("show_admin", None)
+            st.query_params.clear()
+            st.session_state.clear()
             st.rerun()
 
 st.markdown("---")
