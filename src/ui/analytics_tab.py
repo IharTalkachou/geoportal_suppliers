@@ -1,408 +1,361 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 from config.cache import query_db, clear_cache
+from config.database import engine  # 👈 Импортируем существующий движок
 import plotly.express as px
-import plotly.graph_objects as go
 import io
+from datetime import datetime, timedelta
 from ui.shared_components import render_survey_viewer
 
-@st.cache_data(ttl=60, show_spinner=False)
-def load_analytics_data():
+# ==========================================
+# 🔄 СЕРВИСНЫЕ ФУНКЦИИ
+# ==========================================
+
+def sync_overdue_log():
     """
-    Загружает плоский срез данных из v_bi_flat_export, обогащая его 
-    информацией о типе трека (Бюрократия/Технология) и итерациях.
+    Автоматически фиксирует просроченные этапы в таблицу overdue_log.
+    Создает 'снимок' данных на момент совершения просрочки.
     """
-    return query_db("""
+    # 1. Запрос для Бюрократии (Проекты первичного подключения)
+    query_buro = """
+        INSERT INTO overdue_log (source_table, stage_progress_id, supplier_name, project_name, stage_name, responsible_name, planned_start, planned_end, actual_start, comments)
         SELECT 
-            v.supplier_name,
-            v.project_name,
-            v.project_status,
-            v.dataset_name,
-            v.info_name,
-            v.stage_name,
-            v.stage_micro_status,
-            v.planned_start,
-            v.planned_end,
-            v.actual_start,
-            v.actual_end,
-            v.stage_comments,
-            v.document_url,
-            s.track_category,
-            s.stage_type,
-            COALESCE(v.iteration_count, 1) as iteration_count
-        FROM v_bi_flat_export v
-        LEFT JOIN stages s ON v.stage_name = s.stage_name
-        WHERE v.stage_progress_id IS NOT NULL
-    """)
+            'project_stages', ps.stage_progress_id, s.supplier_name, p.project_name, stg.stage_name, u.display_name,
+            ps.planned_start, ps.planned_end, ps.actual_start, ps.comments
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        LEFT JOIN users u ON ps.responsible_id = u.user_id
+        WHERE ps.actual_end IS NULL 
+          AND ps.planned_end < CURRENT_DATE
+          AND p.is_agreement_project = TRUE
+        ON CONFLICT (source_table, stage_progress_id) DO NOTHING
+    """
+    
+    # 2. Запрос для Технологии
+    query_tech = """
+        INSERT INTO overdue_log (source_table, stage_progress_id, supplier_name, project_name, info_name, stage_name, responsible_name, planned_start, planned_end, actual_start, comments)
+        SELECT 
+            'item_stages', ist.stage_progress_id, s.supplier_name, p.project_name, it.info_name, stg.stage_name, u.display_name,
+            ist.planned_start, ist.planned_end, ist.actual_start, ist.comments
+        FROM item_stages ist
+        JOIN project_items pi ON ist.item_id = pi.item_id
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN info_types it ON pi.info_id = it.info_id
+        JOIN stages stg ON ist.stage_id = stg.stage_id
+        LEFT JOIN users u ON ist.responsible_id = u.user_id
+        WHERE ist.actual_end IS NULL 
+          AND ist.planned_end < CURRENT_DATE
+        ON CONFLICT (source_table, stage_progress_id) DO NOTHING
+    """
+    
+    try:
+        with Session(engine) as session:
+            session.execute(text(query_buro))
+            session.execute(text(query_tech))
+            session.commit()
+    except:
+        pass
+
+# ==========================================
+# 📊 ОСНОВНАЯ ФУНКЦИЯ ВКЛАДКИ
+# ==========================================
 
 def render_analytics_tab(user_role="user"):
-    """Отрисовка вкладки 'Аналитика'"""
-    # --- ФУНКЦИЯ СБРОСА (Callback) ---
-    def reset_analytics_filters():
-        # Вместо присвоения "Все", мы просто удаляем ключи. 
-        # Тогда виджеты при следующей отрисовке возьмут значения по умолчанию (index=0).
-        for key in ["an_sup_filter", "an_proj_filter", "an_period_filter"]:
-            if key in st.session_state:
-                del st.session_state[key]
-    
-    st.subheader("📊 Аналитика и операционный контроль")
-    
-    # Загружаем мастер-данные
-    with st.spinner("🔄 Загрузка аналитики..."):
-        df_raw = load_analytics_data()
-    
-    if df_raw.empty:
-        st.warning("⚠️ База пуста. Добавьте данные через вкладки 'Поставщики' или 'Проекты'.")
-        st.stop()
+    # Синхронизируем просрочки
+    sync_overdue_log()
 
-    # Приводим даты к datetime64
-    date_cols = ["planned_start", "planned_end", "actual_start", "actual_end"]
-    for col in date_cols:
-        if col in df_raw.columns:
-            df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
-
-    # ==========================================
-    # 🔍 ГЛОБАЛЬНЫЕ ФИЛЬТРЫ (Вверху вкладки)
-    # ==========================================
-    with st.expander("🔍 Глобальные фильтры данных", expanded=True):
-        cols = st.columns([2, 2, 2, 1])
-        
-        with cols[0]:
-            suppliers = ["Все"] + sorted(df_raw["supplier_name"].dropna().unique().tolist())
-            sel_supplier = st.selectbox("Поставщик", suppliers, key="an_sup_filter", index=0)
-        
-        with cols[1]:
-            # Зависимый фильтр проектов
-            if sel_supplier == "Все":
-                available_projects = sorted(df_raw["project_name"].dropna().unique().tolist())
-            else:
-                available_projects = sorted(df_raw[df_raw["supplier_name"] == sel_supplier]["project_name"].dropna().unique().tolist())
-            projects = ["Все"] + available_projects
-            sel_project = st.selectbox("Проект", projects, key="an_proj_filter", index=0)
-            
-        with cols[2]:
-            periods = ["Все", "Текущая неделя", "Текущий месяц", "Текущий квартал", "Текущий год"]
-            sel_period = st.selectbox("Отчётный период", periods, key="an_period_filter", index=0)
-        
-        with cols[3]:
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.button(
-                "🔄 Сбросить", 
-                width='stretch', 
-                key="an_reset_btn", 
-                on_click=reset_analytics_filters
-            )
-
-    # Применение фильтров
-    filtered = df_raw.copy()
-    if sel_supplier != "Все":
-        filtered = filtered[filtered["supplier_name"] == sel_supplier]
-    if sel_project != "Все":
-        filtered = filtered[filtered["project_name"] == sel_project]
-        
-    TODAY = pd.Timestamp.today().normalize()
-
-    # Применение фильтра по периоду (попадание в плановые сроки)
-    if sel_period != "Все":
-        if sel_period == "Текущая неделя":
-            start_p = TODAY - pd.Timedelta(days=TODAY.weekday())
-            end_p = start_p + pd.Timedelta(days=6)
-        elif sel_period == "Текущий месяц":
-            start_p = TODAY.replace(day=1)
-            next_m = (start_p + pd.Timedelta(days=32)).replace(day=1)
-            end_p = next_m - pd.Timedelta(days=1)
-        elif sel_period == "Текущий квартал":
-            quarter = (TODAY.month - 1) // 3 + 1
-            start_p = pd.Timestamp(year=TODAY.year, month=(quarter - 1) * 3 + 1, day=1)
-            next_q_month = start_p.month + 3
-            if next_q_month > 12:
-                end_p = pd.Timestamp(year=TODAY.year, month=12, day=31)
-            else:
-                end_p = pd.Timestamp(year=TODAY.year, month=next_q_month, day=1) - pd.Timedelta(days=1)
-        elif sel_period == "Текущий год":
-            start_p = pd.Timestamp(year=TODAY.year, month=1, day=1)
-            end_p = pd.Timestamp(year=TODAY.year, month=12, day=31)
-
-        filtered = filtered[
-            ((filtered["planned_start"] >= start_p) & (filtered["planned_start"] <= end_p)) |
-            ((filtered["planned_end"] >= start_p) & (filtered["planned_end"] <= end_p))
-        ]
-
-    # ==========================================
-    # 🗂️ ТЕХНИЧЕСКИЕ ПОДВКЛАДКИ СТРИМЛИТ
-    # ==========================================
     tabs = st.tabs(["🎯 KPI", "📅 Календарь", "📊 Диаграмма Ганта", "🌡️ Тепловая карта трения", "📄 Отчёты"])
 
-    # ------------------------------------------
-    # Подвкладка 1: KPI и Загрузка
-    # ------------------------------------------
     with tabs[0]:
-        st.markdown("### 🎯 Ключевые управленческие показатели")
-        
-        # Считаем показатели по типам процессов
-        # Соглашения (Проекты) - Бюрократический трек
-        active_agreements = filtered[
-            (filtered["track_category"] == "1. Документарный") & 
-            (filtered["stage_micro_status"] != "Выполнено")
-        ]["project_name"].nunique()
+        render_kpi_dashboard_v3(user_role)
 
-        # Протоколы (Наборы) - Технологический трек
-        active_protocols = filtered[
-            (filtered["track_category"] == "2. Технологический") & 
-            (filtered["stage_micro_status"] != "Выполнено")
-        ].groupby(["project_name", "dataset_name", "info_name"]).ngroups
-
-        # Просрочки по всем трекам
-        overdue_stages = len(filtered[
-            filtered["planned_end"].notna() & 
-            (filtered["planned_end"] < TODAY) & 
-            (filtered["stage_micro_status"] != "Выполнено")
-        ])
-
-        # Ближайшие дедлайны
-        upcoming_deadlines = len(filtered[
-            filtered["planned_end"].notna() & 
-            (filtered["planned_end"] >= TODAY) & 
-            (filtered["planned_end"] <= TODAY + pd.Timedelta(days=7)) & 
-            (filtered["stage_micro_status"] != "Выполнено")
-        ])
-
-        kpi_cols = st.columns(4)
-        with kpi_cols[0]: st.metric("📜 Соглашений в работе", active_agreements)
-        with kpi_cols[1]: st.metric("⚙️ Протоколов в работе", active_protocols)
-        with kpi_cols[2]: st.metric("🚨 Просрочено этапов", overdue_stages, delta_color="inverse")
-        with kpi_cols[3]: st.metric("📅 Дедлайны ≤7 дней", upcoming_deadlines)
-
-        st.markdown("---")
-        col_pie, col_bar = st.columns(2)
-
-        with col_pie:
-            st.markdown("##### 🥧 Доли этапов по микростатусам")
-            status_counts = filtered["stage_micro_status"].value_counts().reset_index()
-            status_counts.columns = ["status", "count"]
-            color_map = {
-                "В работе": "#4CAF50", "Планируется": "#2196F3", "Ожидание": "#FF9800",
-                "Выполнено": "#9E9E9E", "Просрочено": "#F44336", "Отменено": "#607D8B"
-            }
-            fig_pie = px.pie(status_counts, values="count", names="status", color="status",
-                             color_discrete_map=color_map, hole=0.4)
-            fig_pie.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_pie, width="stretch")
-
-        with col_bar:
-            st.markdown("##### 📊 Распределение активных задач по этапам")
-            active_tasks = filtered[filtered["stage_micro_status"] != "Выполнено"]
-            if not active_tasks.empty:
-                # Группируем по этапам и категории трека
-                workload = active_tasks.groupby(["stage_name", "track_category"]).size().reset_index(name="tasks_count")
-                fig_bar = px.bar(workload, x="tasks_count", y="stage_name", color="track_category",
-                                 orientation="h",
-                                 labels={"tasks_count": "Количество активных задач", "stage_name": "Этап", "track_category": "Трек"},
-                                 color_discrete_map={"1. Документарный": "#2196F3", "2. Технологический": "#4CAF50"})
-                fig_bar.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_bar, width="stretch")
-            else:
-                st.info("Нет активных задач в выбранном диапазоне.")
-
-    # ------------------------------------------
-    # Подвкладка 2: Календарь-Agenda
-    # ------------------------------------------
     with tabs[1]:
-        st.markdown("### 📅 Интерактивное расписание и планировщик")
-        st.caption("Отображаются плановые даты старта и дедлайнов по всем активным процессам.")
+        st.info("📅 Календарь: в разработке")
 
-        events = []
-        for _, row in filtered.iterrows():
-            p_start = row["planned_start"]
-            p_end = row["planned_end"]
-            status = row["stage_micro_status"]
-            track = "📜 Бюрократия" if row["track_category"] == "1. Документарный" else "⚙️ Технология"
-            label_details = f"{row['dataset_name']} → {row['info_name']}" if pd.notna(row['dataset_name']) else "Соглашение"
-
-            if pd.notna(p_start):
-                events.append({
-                    "date": p_start.date(),
-                    "type": "🚀 Старт этапа",
-                    "track": track,
-                    "project": row["project_name"],
-                    "stage": row["stage_name"],
-                    "details": label_details,
-                    "status": status
-                })
-            if pd.notna(p_end):
-                is_overdue = p_end < TODAY and status != "Выполнено"
-                icon = "🚨 Нарушен дедлайн" if is_overdue else "🎯 Плановый дедлайн"
-                events.append({
-                    "date": p_end.date(),
-                    "type": icon,
-                    "track": track,
-                    "project": row["project_name"],
-                    "stage": row["stage_name"],
-                    "details": label_details,
-                    "status": status
-                })
-
-        if not events:
-            st.info("📭 Нет запланированных событий на выбранный период.")
-        else:
-            events_df = pd.DataFrame(events).sort_values(by="date")
-            grouped_events = events_df.groupby("date")
-            
-            for ev_date, group in grouped_events:
-                # Красивое форматирование даты
-                date_str = ev_date.strftime("%d.%m.%Y (%A)")
-                if ev_date == TODAY.date():
-                    date_str = f"🔥 СЕГОДНЯ — {date_str}"
-                
-                # Показываем красивый спойлер с количеством задач на этот день
-                with st.expander(f"📅 {date_str}  —  Событий: {len(group)}"):
-                    for _, ev in group.iterrows():
-                        color_emoji = "🔴" if "Нарушен" in ev["type"] else ("🟢" if "Старт" in ev["type"] else "🟡")
-                        st.markdown(
-                            f"{color_emoji} **{ev['type']}** | {ev['track']} | **{ev['project']}** — "
-                            f"*{ev['stage']}* | `{ev['details']}` | Статус: `{ev['status']}`"
-                        )
-
-    # ------------------------------------------
-    # Подвкладка 3: Диаграмма Ганта (Два трека каскадом)
-    # ------------------------------------------
     with tabs[2]:
-        st.markdown("### 📊 Каскадный Гант-план")
-        st.caption("Каскадный график наглядно показывает переход от Бюрократии (синий цвет) к Технологии (зеленый).")
+        st.info("📊 Диаграмма Ганта: в разработке")
 
-        gantt_data = filtered.dropna(subset=["planned_start", "planned_end"]).copy()
-        gantt_data = gantt_data[gantt_data["planned_end"] >= gantt_data["planned_start"]]
-
-        if gantt_data.empty:
-            st.warning("⚠️ Нет корректных плановых дат для построения графика.")
-        else:
-            gantt_mode = st.radio("Режим отображения Ганта", ["По проектам (Общий)", "По наборам данных (Детально)"], horizontal=True, key="an_gantt_mode")
-            
-            if gantt_mode == "По проектам (Общий)":
-                gantt_data["y_axis"] = gantt_data["project_name"]
-            else:
-                gantt_data["y_axis"] = gantt_data["project_name"] + " | " + gantt_data["dataset_name"].fillna("Бюрократия")
-
-            fig_gantt = px.timeline(
-                gantt_data,
-                x_start="planned_start",
-                x_end="planned_end",
-                y="y_axis",
-                color="track_category",
-                color_discrete_map={"1. Документарный": "#1E88E5", "2. Технологический": "#43A047"},
-                hover_data={"stage_name": True, "planned_start": "|%d.%m.%Y", "planned_end": "|%d.%m.%Y", "stage_micro_status": True},
-                labels={"y_axis": "Процесс", "track_category": "Трек"}
-            )
-            fig_gantt.update_yaxes(autorange="reversed")
-            fig_gantt.update_layout(height=450, margin=dict(l=150, r=20, t=30, b=20), xaxis_title="Плановые временные рамки")
-            st.plotly_chart(fig_gantt, width="stretch")
-
-    # ------------------------------------------
-    # Подвкладка 4: Тепловая карта трения
-    # ------------------------------------------
     with tabs[3]:
-        st.markdown("### 🌡️ Матрицы рисков и технологического трения")
-        
-        heatmap_mode = st.radio("Анализировать:", ["Юридические задержки (Бюрократия)", "Проблемные итерации (Технология)"], horizontal=True, key="an_heat_mode")
+        st.info("🌡️ Тепловая карта трения: в разработке")
 
-        if heatmap_mode == "Юридические задержки (Бюрократия)":
-            st.caption("Показывает среднее количество дней задержки дедлайна по каждому Поставщику и документарному этапу.")
-            buro_data = filtered[filtered["track_category"] == "1. Документарный"].copy()
-            
-            if buro_data.empty:
-                st.info("Нет данных для построения карты.")
-            else:
-                # Вычисляем задержку в днях
-                buro_data["delay"] = 0
-                mask = buro_data["actual_end"].isna() & (buro_data["planned_end"] < TODAY)
-                buro_data.loc[mask, "delay"] = (TODAY - buro_data.loc[mask, "planned_end"]).dt.days
-                mask_act = buro_data["actual_end"].notna() & (buro_data["actual_end"] > buro_data["planned_end"])
-                buro_data.loc[mask_act, "delay"] = (buro_data.loc[mask_act, "actual_end"] - buro_data.loc[mask_act, "planned_end"]).dt.days
-                buro_data["delay"] = buro_data["delay"].clip(lower=0)
-
-                # Строим пивот
-                pivot = buro_data.pivot_table(index="supplier_name", columns="stage_name", values="delay", aggfunc="mean").round(1)
-                
-                fig_heat = px.imshow(pivot, labels=dict(x="Этап Бюрократии", y="Поставщик", color="Задержка (дн.)"),
-                                     color_continuous_scale="Reds", aspect="auto")
-                fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig_heat, width="stretch")
-
-        else:
-            st.caption("Показывает среднее количество кругов проверок (итераций) по каждому Набору данных и техническому этапу.")
-            tech_data = filtered[filtered["track_category"] == "2. Технологический"].copy()
-            
-            if tech_data.empty:
-                st.info("Нет данных для построения карты.")
-            else:
-                # Строим пивот
-                pivot = tech_data.pivot_table(index="dataset_name", columns="stage_name", values="iteration_count", aggfunc="mean").round(1)
-                
-                fig_heat = px.imshow(pivot, labels=dict(x="Этап Технологии", y="Набор данных", color="Итерации (среднее)"),
-                                     color_continuous_scale="Purples", aspect="auto")
-                fig_heat.update_layout(height=350, margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig_heat, width="stretch")
-
-    # ------------------------------------------
-    # Подвкладка 5: Отчёты
-    # ------------------------------------------
     with tabs[4]:
-        st.markdown("### 📋 Формирование регламентных отчётов")
-        
-        report_type = st.selectbox(
-            "Выберите тип отчёта для формирования:",
-            [
-                "1. Реестр подписанных соглашений",
-                "2. Сводный отчёт о ходе выполнения (Бюрократия)",
-                "3. Реестр предоставляемых сведений",
-                "4. Просмотр технических опросников"
-            ],
-            index=0
-        )
-        st.divider()
+        render_reports_view()
 
-        if report_type == "1. Реестр подписанных соглашений":
-            render_agreement_registry_report(sel_supplier, sel_period)
-        elif report_type == "2. Сводный отчёт о ходе выполнения (Бюрократия)":
-            render_progress_bureaucracy_report(sel_supplier, sel_period)
-        elif report_type == "3. Реестр предоставляемых сведений":
-            render_provided_data_registry() # 👈 Новый вызов
-        else:
-            render_survey_explorer_report() # 👈 Новый вызов
+# ==========================================
+# 🎯 KPI DASHBOARD (V3)
+# ==========================================
+def render_kpi_dashboard_v3(user_role):
+    TODAY = pd.Timestamp.today().normalize()
 
-    # 📥 Сохраняем блок экспорта отчета в Excel (в самом низу вкладки)
+    # Вспомогательная функция для нумерации
+    def get_kpi_with_details(query_sql, params=None):
+        df = query_db(query_sql, params)
+        if not df.empty:
+            df.insert(0, '№ п/п', range(1, len(df) + 1))
+        return df
+
+    # ==========================================
+    # 1. 📜 Соглашения в работе
+    # ==========================================
+    q_ag_details = """
+        SELECT s.supplier_name as "Поставщик", p.project_name as "Проект", 
+               stg.stage_name as "Стадия", ms.micro_status_name as "Статус", 
+               ps.comments as "Комментарий", ps.actual_start as "Старт", 
+               u.display_name as "Ответственный"
+        FROM project_stages ps 
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id 
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+        LEFT JOIN users u ON ps.responsible_id = u.user_id
+        WHERE p.is_agreement_project = TRUE 
+          AND ms.micro_status_name IN ('В работе', 'Ожидание')
+          AND NOT EXISTS (
+              SELECT 1 FROM project_stages ps3 JOIN stages s3 ON ps3.stage_id = s3.stage_id 
+              JOIN ref_micro_statuses ms3 ON ps3.micro_status = ms3.micro_status_id
+              WHERE ps3.project_id = p.project_id AND s3.stage_name = 'Документ подписан' AND ms3.micro_status_name = 'Выполнено'
+          )
+        ORDER BY ps.actual_start ASC NULLS LAST
+    """
+    ag_df = get_kpi_with_details(q_ag_details)
+    st.metric("📜 Соглашений в работе", len(ag_df))
+    with st.expander("Детализация соглашений в работе", expanded=False):
+        if not ag_df.empty:
+            st.dataframe(ag_df, width="stretch", hide_index=True)
+        else: st.info("Нет активных стадий по соглашениям.")
     st.markdown("---")
-    with st.expander("📥 Экспорт сводного отчета в Excel"):
-        if st.button("💾 Сформировать и скачать Excel", type="primary", key="an_excel_download"):
-            try:
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                    # Лист 1: Сводка
-                    summary = filtered.groupby(["supplier_name", "project_name"]).agg(
-                        total=("stage_name", "count"),
-                        completed=("stage_micro_status", lambda x: (x == "Выполнено").sum())
-                    ).reset_index()
-                    summary.to_excel(writer, sheet_name="Сводка", index=False)
 
-                    # Лист 2: Детализация
-                    detail = filtered.copy()
-                    for col in date_cols:
-                        if col in detail.columns:
-                            detail[col] = pd.to_datetime(detail[col], errors="coerce").dt.strftime("%d.%m.%Y")
-                    detail.to_excel(writer, sheet_name="Детализация", index=False)
+    # ==========================================
+    # 2. ⚙️ Текущая техническая работа
+    # ==========================================
+    q_tech_details = """
+        SELECT s.supplier_name as "Поставщик", p.project_name as "Проект", 
+               it.info_name as "Вид сведений", stg.stage_name as "Стадия", 
+               ms.micro_status_name as "Статус", ist.comments as "Комментарий", 
+               ist.actual_start as "Старт", u.display_name as "Ответственный"
+        FROM item_stages ist 
+        JOIN project_items pi ON ist.item_id = pi.item_id
+        JOIN projects p ON pi.project_id = p.project_id 
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN info_types it ON pi.info_id = it.info_id 
+        JOIN stages stg ON ist.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
+        LEFT JOIN users u ON ist.responsible_id = u.user_id
+        WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+          AND NOT EXISTS (
+              SELECT 1 FROM item_stages ist2 JOIN stages s2 ON ist2.stage_id = s2.stage_id 
+              JOIN ref_micro_statuses ms2 ON ist2.micro_status = ms2.micro_status_id
+              WHERE ist2.item_id = pi.item_id AND s2.stage_name = 'Публикация набора' AND ms2.micro_status_name = 'Выполнено'
+          )
+        ORDER BY ist.actual_start ASC NULLS LAST
+    """
+    tech_df = get_kpi_with_details(q_tech_details)
+    st.metric("⚙️ Текущая техническая работа", len(tech_df))
+    with st.expander("Детализация технической работы", expanded=False):
+        if not tech_df.empty:
+            st.dataframe(tech_df, width="stretch", hide_index=True)
+        else: st.info("Нет активных технических задач.")
+    st.markdown("---")
 
-                buffer.seek(0)
-                filename = f"geodata_report_{pd.Timestamp.today().strftime('%Y%m%d_%H%M')}.xlsx"
-                st.download_button(
-                    label=f"📥 Скачать {filename}", data=buffer.getvalue(),
-                    file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                st.success("✅ Отчёт успешно сформирован!")
-            except Exception as e:
-                st.error(f"❌ Ошибка генерации Excel: {e}")
+    # ==========================================
+    # 3. 📅 Дедлайны ≤7 дней
+    # ==========================================
+    q_soon_sql = """
+        SELECT supplier_name, project_name, info_name, stage_name, micro_status_name, 
+               comments, planned_start, planned_end, actual_start, responsible_name
+        FROM (
+            SELECT s.supplier_name, p.project_name, '—' as info_name, stg.stage_name, 
+                   ms.micro_status_name, ps.comments, ps.planned_start, ps.planned_end, ps.actual_start, u.display_name as responsible_name
+            FROM project_stages ps 
+            JOIN projects p ON ps.project_id = p.project_id 
+            JOIN suppliers s ON p.supplier_id = s.supplier_id 
+            JOIN stages stg ON ps.stage_id = stg.stage_id 
+            JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+            LEFT JOIN users u ON ps.responsible_id = u.user_id
+            UNION ALL
+            SELECT s.supplier_name, p.project_name, it.info_name, stg.stage_name, 
+                   ms.micro_status_name, ist.comments, ist.planned_start, ist.planned_end, ist.actual_start, u.display_name as responsible_name
+            FROM item_stages ist 
+            JOIN project_items pi ON ist.item_id = pi.item_id 
+            JOIN projects p ON pi.project_id = p.project_id 
+            JOIN suppliers s ON p.supplier_id = s.supplier_id 
+            JOIN info_types it ON pi.info_id = it.info_id 
+            JOIN stages stg ON ist.stage_id = stg.stage_id 
+            JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
+            LEFT JOIN users u ON ist.responsible_id = u.user_id
+        ) as combined
+        WHERE planned_end BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' 
+          AND micro_status_name != 'Выполнено'
+        ORDER BY planned_end ASC
+    """
+    soon_df = get_kpi_with_details(q_soon_sql)
+    st.metric("📅 Дедлайны ≤7 дней", len(soon_df))
+    with st.expander("Задачи с близким дедлайном", expanded=False):
+        if not soon_df.empty:
+            st.dataframe(soon_df, width="stretch", hide_index=True)
+        else: st.info("На ближайшие 7 дней дедлайнов не обнаружено.")
+    st.markdown("---")
 
-# Функции создания отчётов (тест)
+    # ==========================================
+    # 4. 🚨 Просрочено этапов (Логика по planned_end)
+    # ==========================================
+    st.markdown("#### 🚨 Просрочено этапов")
+    p_choice = st.selectbox("Период совершения просрочки (по плану):", ["Все время", "Текущая неделя", "Текущий месяц", "Квартал", "Год"], key="overdue_filter")
+    
+    q_overdue = """
+        SELECT supplier_name, project_name, stage_name, planned_start, planned_end, actual_start, responsible_name 
+        FROM overdue_log 
+    """
+    if p_choice != "Все время":
+        interval_map = {
+            "Текущая неделя": "week",
+            "Текущий месяц": "month",
+            "Квартал": "quarter",
+            "Год": "year"
+        }
+        q_overdue += f" WHERE planned_end >= date_trunc('{interval_map[p_choice]}', now())"
+    
+    overdue_data = get_kpi_with_details(q_overdue + " ORDER BY planned_end DESC")
+    st.metric("Кол-во зафиксированных просрочек", len(overdue_data))
+    with st.expander("Просмотр истории просрочек", expanded=False):
+        if not overdue_data.empty:
+            st.dataframe(overdue_data, width="stretch", hide_index=True)
+    st.markdown("---")
+
+    # ==========================================
+    # 5. ✅ Статистика выполненных задач
+    # ==========================================
+    st.markdown("#### ✅ Статистика выполненных задач")
+    done_p_choice = st.selectbox("Период фактического завершения:", ["Все время", "Текущая неделя", "Текущий месяц", "Квартал", "Год"], key="done_period_sel")
+    
+    q_done_base = """
+        SELECT p.project_name, stg.stage_name, ps.comments, ps.planned_start, ps.planned_end, ps.actual_start, ps.actual_end, u.display_name as responsible_name
+        FROM project_stages ps 
+        JOIN projects p ON ps.project_id = p.project_id 
+        JOIN stages stg ON ps.stage_id = stg.stage_id 
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+        JOIN users u ON ps.responsible_id = u.user_id
+        WHERE ms.micro_status_name = 'Выполнено'
+        UNION ALL
+        SELECT p.project_name, stg.stage_name, ist.comments, ist.planned_start, ist.planned_end, ist.actual_start, ist.actual_end, u.display_name as responsible_name
+        FROM item_stages ist 
+        JOIN project_items pi ON ist.item_id = pi.item_id 
+        JOIN projects p ON pi.project_id = p.project_id 
+        JOIN stages stg ON ist.stage_id = stg.stage_id 
+        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
+        JOIN users u ON ist.responsible_id = u.user_id
+        WHERE ms.micro_status_name = 'Выполнено'
+    """
+    
+    # Обработка фильтров периода и сотрудников для Выполненных задач
+    df_done_all = query_db(q_done_base)
+    df_done_filtered = pd.DataFrame()
+
+    if not df_done_all.empty:
+        df_done_all['actual_end'] = pd.to_datetime(df_done_all['actual_end'])
+        df_done_filtered = df_done_all.copy()
+        
+        if done_p_choice != "Все время":
+            if done_p_choice == "Текущая неделя":
+                start_date = TODAY - pd.Timedelta(days=TODAY.weekday())
+            elif done_p_choice == "Текущий месяц":
+                start_date = TODAY.replace(day=1)
+            elif done_p_choice == "Квартал":
+                start_date = TODAY - pd.offsets.QuarterBegin(startingMonth=1)
+            else: # Год
+                start_date = TODAY.replace(month=1, day=1)
+            df_done_filtered = df_done_filtered[df_done_filtered['actual_end'] >= start_date]
+
+        # Фильтр сотрудников для выполненных
+        done_staff_stats = df_done_filtered.groupby("responsible_name").size().reset_index(name="cnt")
+        done_staff_opts = [f"{r['responsible_name']} | {r['cnt']} вып." for _, r in done_staff_stats.iterrows()]
+        sel_done_staff = st.multiselect("Фильтр по исполнителям (выполненные):", options=done_staff_opts, placeholder="Все сотрудники", key="done_staff_sel")
+        
+        if sel_done_staff:
+            names = [s.split(" | ")[0] for s in sel_done_staff]
+            df_done_filtered = df_done_filtered[df_done_filtered["responsible_name"].isin(names)]
+
+    with st.expander("Список выполненных задач", expanded=False):
+        if not df_done_filtered.empty:
+            df_done_filtered.insert(0, '№ п/п', range(1, len(df_done_filtered)+1))
+            st.dataframe(df_done_filtered, width="stretch", hide_index=True)
+        else: st.info("Нет выполненных задач за выбранный период.")
+    st.markdown("---")
+
+    # ==========================================
+    # 6. 👤 Загрузка ответственных сотрудников
+    # ==========================================
+    with st.expander("👤 Загрузка ответственных сотрудников", expanded=True):
+        staff_stats = query_db("""
+            SELECT u.display_name, COUNT(*) as task_count
+            FROM (
+                SELECT responsible_id, micro_status FROM project_stages 
+                UNION ALL 
+                SELECT responsible_id, micro_status FROM item_stages
+            ) as tasks
+            JOIN users u ON tasks.responsible_id = u.user_id
+            JOIN ref_micro_statuses ms ON tasks.micro_status = ms.micro_status_id
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            GROUP BY u.display_name
+        """)
+        total_active_tasks = staff_stats['task_count'].sum()
+        staff_options = [f"{r['display_name']} | {r['task_count']} задач" for _, r in staff_stats.iterrows()]
+        
+        # Динамический плейсхолдер
+        sel_staff = st.multiselect(
+            "Выберите сотрудников для детализации загрузки:", 
+            options=staff_options, 
+            placeholder=f"Все сотрудники | {total_active_tasks} задач в работе",
+            key="staff_load_multi"
+        )
+
+        load_query = """
+            SELECT p.project_name, stg.stage_name, ps.comments, ps.planned_start, ps.planned_end, ps.actual_start, u.display_name as responsible_name
+            FROM project_stages ps JOIN projects p ON ps.project_id = p.project_id JOIN stages stg ON ps.stage_id = stg.stage_id JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id JOIN users u ON ps.responsible_id = u.user_id
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            UNION ALL
+            SELECT p.project_name, stg.stage_name, ist.comments, ist.planned_start, ist.planned_end, ist.actual_start, u.display_name as responsible_name
+            FROM item_stages ist JOIN project_items pi ON ist.item_id = pi.item_id JOIN projects p ON pi.project_id = p.project_id JOIN stages stg ON ist.stage_id = stg.stage_id JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id JOIN users u ON ist.responsible_id = u.user_id
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+        """
+        load_df = query_db(load_query)
+        if sel_staff:
+            selected_names = [s.split(" | ")[0] for s in sel_staff]
+            load_df = load_df[load_df["responsible_name"].isin(selected_names)]
+        
+        if not load_df.empty:
+            st.dataframe(load_df, width="stretch", hide_index=True)
+        else:
+            st.info("Нет активных задач.")
+
+# ==========================================
+# 📄 ФУНКЦИИ ОТЧЕТОВ (ВКЛАДКА 5)
+# ==========================================
+
+def render_reports_view():
+    st.markdown("### 📋 Формирование регламентных отчётов")
+    report_type = st.selectbox("Выберите тип отчёта:", [
+        "1. Реестр подписанных соглашений", 
+        "2. Сводный отчёт о ходе выполнения (Бюрократия)", 
+        "3. Реестр предоставляемых сведений", 
+        "4. Просмотр технических опросников"
+    ])
+    
+    if report_type == "1. Реестр подписанных соглашений":
+        render_agreement_registry_report("Все", "Все")
+    elif report_type == "2. Сводный отчёт о ходе выполнения (Бюрократия)":
+        render_progress_bureaucracy_report("Все", "Все")
+    elif report_type == "3. Реестр предоставляемых сведений":
+        render_provided_data_registry()
+    elif report_type == "4. Просмотр технических опросников":
+        render_survey_explorer_report()
+
+# Функции создания отчётов
 def render_agreement_registry_report(sel_supplier, sel_period):
     """Отчёт 1: Реестр соглашений с учетом фильтра проекта-соглашения"""
     
@@ -744,87 +697,164 @@ def export_bureaucracy_to_excel(grouped_df):
     return buffer.getvalue()
 
 def render_provided_data_registry():
-    """Отчёт 3: Реестр предоставляемых сведений (по завершенным проектам)"""
+    """Отчёт 3: Реестр предоставляемых сведений (с Номерами соглашений)"""
     st.markdown("#### ⚙️ Настройки отчёта")
     
-    # 1. Загружаем данные: только те виды сведений, по которым проект завершен
+    # 1. Сначала получаем ГЛОБАЛЬНЫЙ порядок всех соглашений для присвоения номеров
+    # Это гарантирует, что номер 1/2026 всегда будет у одного и того же поставщика во всех отчетах
+    global_numbers_query = """
+        SELECT s.supplier_name, ps.actual_end
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE stg.stage_order = 8 AND ms.micro_status_name = 'Выполнено' 
+          AND ps.actual_end IS NOT NULL AND p.is_agreement_project = TRUE
+        ORDER BY ps.actual_end ASC
+    """
+    df_numbers = query_db(global_numbers_query)
+    
+    # Создаем маппинг {Наименование: Номер}
+    agreement_map = {}
+    if not df_numbers.empty:
+        df_numbers['actual_end'] = pd.to_datetime(df_numbers['actual_end'])
+        for i, row in df_numbers.iterrows():
+            agreement_map[row['supplier_name']] = f"{i+1}/{row['actual_end'].year}"
+
+    # 2. Загружаем основные данные отчета
     query = """
         SELECT DISTINCT
-            s.supplier_name,
-            it.info_name,
-            pi.provision_right
+            s.supplier_name, s.is_mandatory,
+            it.info_name, pi.provision_right, ps.actual_end as sign_date
         FROM project_items pi
         JOIN projects p ON pi.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id
         JOIN info_types it ON pi.info_id = it.info_id
-        -- Проверка на наличие завершенного этапа подписания в Бюрократии
         JOIN project_stages ps ON p.project_id = ps.project_id
         JOIN stages stg ON ps.stage_id = stg.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE stg.stage_name = 'Документ подписан'
-          AND ms.micro_status_name = 'Выполнено'
-          AND ps.actual_end IS NOT NULL
+        WHERE stg.stage_order = 8 AND ms.micro_status_name = 'Выполнено'
+          AND ps.actual_end IS NOT NULL AND p.is_agreement_project = TRUE
+        ORDER BY ps.actual_end ASC, it.info_name ASC
     """
     df_raw = query_db(query)
 
     if df_raw.empty:
-        st.info("📭 Не найдено сведений по проектам с завершенным этапом 'Документ подписан'.")
+        st.info("📭 Не найдено сведений по завершенным соглашениям.")
         return
 
-    # 2. Фильтры (мультибоксы)
-    c1, c2 = st.columns(2)
+    # 3. Фильтры (те же, что были)
+    c1, c2, c3 = st.columns([2, 2, 1])
     with c1:
         all_sups = sorted(df_raw["supplier_name"].unique())
-        sel_sups = st.multiselect("🏢 Фильтр по поставщикам:", all_sups, placeholder="Все доступные")
-    
+        sel_sups = st.multiselect("🏢 Поставщики:", all_sups, placeholder="Все", key="reg3_sup_filter")
     with c2:
-        # Берем только те значения прав, которые реально есть в текущем наборе (п. 2 твоего запроса)
         all_rights = sorted(df_raw["provision_right"].unique())
-        sel_rights = st.multiselect("⚖️ Фильтр по правам предоставления:", all_rights, placeholder="Все доступные")
+        sel_rights = st.multiselect("⚖️ Права предоставления:", all_rights, placeholder="Все", key="reg3_right_filter")
+    with c3:
+        only_mand = st.checkbox("⭐ Только ОНПД", value=False, key="reg3_mand_check")
 
     # Применение фильтрации
-    df_final = df_raw.copy()
+    df_filtered = df_raw.copy()
     if sel_sups:
-        df_final = df_final[df_final["supplier_name"].isin(sel_sups)]
+        df_filtered = df_filtered[df_filtered["supplier_name"].isin(sel_sups)]
     if sel_rights:
-        df_final = df_final[df_final["provision_right"].isin(sel_rights)]
+        df_filtered = df_filtered[df_filtered["provision_right"].isin(sel_rights)]
+    if only_mand:
+        df_filtered = df_filtered[df_filtered["is_mandatory"] == True]
 
-    if df_final.empty:
-        st.warning("По выбранным фильтрам данных нет.")
+    if df_filtered.empty:
+        st.warning("По выбранным критериям данных нет.")
         return
 
-    # 3. Отображение
-    st.markdown(f"**Найдено записей:** {len(df_final)}")
+    # 4. ПОДГОТОВКА ДЛЯ ВИЗУАЛА
+    df_viz = df_filtered.copy()
+    df_viz['actual_end'] = pd.to_datetime(df_viz['sign_date'])
     
-    # Динамическая высота
-    h = min(600, (len(df_final) + 1) * 35 + 5)
+    # Присваиваем номер соглашения из нашего глобального маппинга
+    df_viz['№ Соглашения'] = df_viz['supplier_name'].map(agreement_map)
     
-    st.dataframe(
-        df_final.rename(columns={
-            "supplier_name": "Наименование поставщика",
-            "info_name": "Вид сведений",
-            "provision_right": "Право предоставления"
-        }),
-        width='stretch',
-        hide_index=True,
-        height=h
+    df_viz['Наименование поставщика'] = df_viz.apply(
+        lambda x: f"⭐ {x['supplier_name']}" if x['is_mandatory'] else x['supplier_name'], axis=1
     )
+    
+    # Маскируем дубликаты для чистой группы
+    df_viz['is_dup'] = df_viz.duplicated(subset=['supplier_name'])
+    display_df = df_viz.copy()
+    display_df.loc[display_df['is_dup'], ['№ Соглашения', 'Наименование поставщика']] = ""
 
-    # 4. Простой экспорт в Excel
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        df_final.to_excel(writer, sheet_name='Реестр сведений', index=False)
-        # Настройка ширины
-        worksheet = writer.sheets['Реестр сведений']
-        worksheet.set_column('A:B', 40)
-        worksheet.set_column('C:C', 30)
+    # Вывод
+    cols_show = ["№ Соглашения", "Наименование поставщика", "info_name", "provision_right"]
+    rename_map = {"info_name": "Вид сведений", "provision_right": "Право предоставления"}
+    
+    h = min(600, (len(display_df) + 1) * 35 + 5)
+    st.dataframe(display_df[cols_show].rename(columns=rename_map), width="stretch", hide_index=True, height=h)
 
+    # 5. КНОПКА EXCEL
+    st.markdown("---")
+    # Передаем в экспорт отфильтрованный DF, в который уже добавлен столбец с номерами
+    xlsx_data = export_registry_to_excel(df_viz[~df_viz['is_dup'].isna()]) 
     st.download_button(
         label="📥 Скачать реестр (Excel)",
-        data=buffer.getvalue(),
-        file_name=f"provided_data_{pd.Timestamp.today().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        data=xlsx_data,
+        file_name=f"registry_data_{pd.Timestamp.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="btn_dl_reg_3"
     )
+
+def export_registry_to_excel(df):
+    """Сложный экспорт Реестра сведений (с Номером соглашения)"""
+    buffer = io.BytesIO()
+    
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        worksheet = workbook.add_worksheet('Реестр сведений')
+        
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#DEEAF6', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        cell_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True})
+        center_fmt = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        text_num_fmt = workbook.add_format({'border': 1, 'align': 'center', 'valign': 'vcenter', 'num_format': '@'}) # Явный текстовый формат
+        mand_fmt = workbook.add_format({'border': 1, 'align': 'left', 'valign': 'vcenter', 'text_wrap': True, 'font_color': '#C00000', 'bold': True})
+
+        # Заголовок
+        headers = ['Номер соглашения', 'Наименование поставщика', 'Вид сведений', 'Право предоставления']
+        for col_num, header in enumerate(headers):
+            worksheet.write(0, col_num, header, header_fmt)
+        
+        curr_row = 1
+        # Группируем по поставщику, сохраняя порядок по дате соглашения
+        unique_sups = list(dict.fromkeys(df['supplier_name']))
+        
+        for sup_name in unique_sups:
+            sup_data = df[df['supplier_name'] == sup_name]
+            num_rows = len(sup_data)
+            is_mand = sup_data.iloc[0]['is_mandatory']
+            agr_num = sup_data.iloc[0]['№ Соглашения'] # Берем уже вычисленный номер
+            
+            current_cell_style = mand_fmt if is_mand else cell_fmt
+            sup_display_name = f"⭐ {sup_name}" if is_mand else sup_name
+
+            if num_rows > 1:
+                # Объединяем ячейки Номера и Поставщика
+                worksheet.merge_range(curr_row, 0, curr_row + num_rows - 1, 0, agr_num, text_num_fmt)
+                worksheet.merge_range(curr_row, 1, curr_row + num_rows - 1, 1, sup_display_name, current_cell_style)
+            else:
+                worksheet.write(curr_row, 0, agr_num, text_num_fmt)
+                worksheet.write(curr_row, 1, sup_display_name, current_cell_style)
+            
+            for _, row in sup_data.iterrows():
+                worksheet.write(curr_row, 2, row['info_name'], cell_fmt)
+                worksheet.write(curr_row, 3, row['provision_right'], cell_fmt)
+                curr_row += 1
+
+        worksheet.set_column('A:A', 18)
+        worksheet.set_column('B:B', 45)
+        worksheet.set_column('C:C', 50)
+        worksheet.set_column('D:D', 40)
+        worksheet.freeze_panes(1, 0)
+
+    return buffer.getvalue()
     
 def render_survey_explorer_report():
     """Отчёт 4: Просмотр технических опросников (Проводник)"""
@@ -896,3 +926,16 @@ def render_survey_explorer_report():
     st.divider()
     # Вызываем общую функцию (session передаем None, так как в аналитике только чтение)
     render_survey_viewer(None, selected_sid, is_readonly=True)
+    
+
+# [Сюда нужно вставить ранее написанные функции отчетов: render_agreement_registry_report, render_progress_bureaucracy_report, etc.]
+# Они остаются без изменений, просто вызываются внутри render_reports_view.
+
+def render_calendar_view():
+    st.info("В разработке: Интерактивное расписание")
+
+def render_gantt_view():
+    st.info("В разработке: Каскадный Гант-план")
+
+def render_heatmap_view():
+    st.info("В разработке: Матрицы рисков")
