@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_calendar import calendar
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -8,6 +9,8 @@ import plotly.express as px
 import io
 from datetime import datetime, timedelta
 from ui.shared_components import render_survey_viewer
+import time
+from datetime import datetime, timedelta
 
 # ==========================================
 # 🔄 СЕРВИСНЫЕ ФУНКЦИИ
@@ -75,7 +78,7 @@ def render_analytics_tab(user_role="user"):
         render_kpi_dashboard_v3(user_role)
 
     with tabs[1]:
-        st.info("📅 Календарь: в разработке")
+        render_calendar_view()
 
     with tabs[2]:
         st.info("📊 Диаграмма Ганта: в разработке")
@@ -932,7 +935,186 @@ def render_survey_explorer_report():
 # Они остаются без изменений, просто вызываются внутри render_reports_view.
 
 def render_calendar_view():
-    st.info("В разработке: Интерактивное расписание")
+    st.markdown("### 📅 Планировщик")
+
+    if "cal_version" not in st.session_state:
+        st.session_state["cal_version"] = 0
+    
+    # --- 1. НАСТРОЙКИ ОТОБРАЖЕНИЯ ---
+    c_feat1, _ = st.columns([2, 1])
+    with c_feat1:
+        show_all = st.checkbox("🔄 Показать все события (включая завершенные)", value=False)
+    
+    # --- 2. ЗАГРУЗКА ДАННЫХ (с усиленной фильтрацией) ---
+    # Логика: если НЕ show_all, берем только те, где нет фактического конца И статус НЕ 'Выполнено'
+    status_filter_buro = "" if show_all else """
+        AND ps.actual_end IS NULL 
+        AND ms.micro_status_name != 'Выполнено'
+    """
+    status_filter_tech = "" if show_all else """
+        AND ist.actual_end IS NULL 
+        AND ms.micro_status_name != 'Выполнено'
+    """
+
+    query = f"""
+        SELECT 
+            p.project_name, stg.stage_name, ms.micro_status_name, ps.comments,
+            ps.planned_start, ps.planned_end, ps.actual_start, ps.actual_end,
+            u.display_name as responsible_name, 'bureaucracy' as category, '—' as info_name
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        LEFT JOIN users u ON ps.responsible_id = u.user_id
+        WHERE ps.planned_start IS NOT NULL {status_filter_buro}
+        
+        UNION ALL
+        
+        SELECT 
+            p.project_name, stg.stage_name, ms.micro_status_name, ist.comments,
+            ist.planned_start, ist.planned_end, ist.actual_start, ist.actual_end,
+            u.display_name as responsible_name, 'tech' as category, it.info_name
+        FROM item_stages ist
+        JOIN project_items pi ON ist.item_id = pi.item_id
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN info_types it ON pi.info_id = it.info_id
+        JOIN stages stg ON ist.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
+        LEFT JOIN users u ON ist.responsible_id = u.user_id
+        WHERE ist.planned_start IS NOT NULL {status_filter_tech}
+    """
+    df_events = query_db(query)
+
+    # --- 3. ПОДГОТОВКА СОБЫТИЙ ---
+    calendar_events = []
+    for _, row in df_events.iterrows():
+        detail_text = row['info_name'] if row['info_name'] != '—' else row['stage_name']
+        short_detail = (detail_text[:47] + '...') if len(detail_text) > 50 else detail_text
+        title = f"{row['project_name']} | {short_detail}"
+        
+        is_done = pd.notna(row['actual_end']) or row['micro_status_name'] == 'Выполнено'
+        color = "#9E9E9E" if is_done else ("#1E88E5" if row['category'] == 'bureaucracy' else "#43A047")
+
+        calendar_events.append({
+            "title": title,
+            "start": row['planned_start'].strftime("%Y-%m-%d"),
+            "end": (row['planned_end'] + timedelta(days=1)).strftime("%Y-%m-%d"),
+            "color": color,
+            "extendedProps": {
+                "project": row['project_name'],
+                "stage": row['stage_name'],
+                "info": row['info_name'],
+                "status": row['micro_status_name'],
+                "responsible": row['responsible_name'] or "Не назначен",
+                "comments": row['comments'] or "Нет",
+                "p_start": row['planned_start'].strftime("%d.%m.%Y"),
+                "p_end": row['planned_end'].strftime("%d.%m.%Y"),
+                "a_start": row['actual_start'].strftime("%d.%m.%Y") if pd.notna(row['actual_start']) else "Ещё не начато",
+                "is_done": is_done
+            }
+        })
+
+    # --- 4. ВЕРСТКА: КАЛЕНДАРЬ + ДЕТАЛИ ---
+    st.markdown("<style>iframe[title='streamlit_calendar.calendar'] { min-height: 600px !important; }</style>", unsafe_allow_html=True)
+
+    with st.expander("📅 Календарное планирование", expanded=True):
+        col_cal, col_info = st.columns([0.7, 0.3])
+        
+        with col_cal:
+            calendar_options = {
+                "initialView": "dayGridMonth",
+                "headerToolbar": {"left": "prev,next", "center": "title", "right": "today"},
+                "locale": "ru", "firstDay": 1, "height": 600
+            }
+            state = calendar(events=calendar_events, options=calendar_options, key=f"cal_v{st.session_state['cal_version']}")
+
+        with col_info:
+            if state and "eventClick" in state:
+                props = state["eventClick"]["event"].get("extendedProps", {})
+                st.markdown(f"#### 🎯 Детали задачи")
+                st.info(f"**{props.get('project')}**")
+                
+                # Добавленные по вашему запросу строки:
+                st.write(f"📅 **План:** {props.get('p_start')} — {props.get('p_end')}")
+                st.write(f"🚦 **Статус:** `{props.get('status')}`")
+                st.write(f"⏳ **Факт. начало:** {props.get('a_start')}")
+                st.divider()
+                
+                st.write(f"**Этап:** {props.get('stage')}")
+                if props.get('info') != '—':
+                    st.write(f"**Вид:** {props.get('info')}")
+                st.write(f"**Ответственный:** {props.get('responsible')}")
+                st.caption(f"**Комментарий:** {props.get('comments')}")
+                
+                if props.get('is_done'):
+                    st.success("✅ Стадия завершена")
+
+                if st.button("❌ Закрыть детали", width='stretch'):
+                    st.session_state["cal_version"] += 1
+                    st.rerun()
+            else:
+                st.info("💡 Кликните на событие в календаре.")
+
+    # --- 3. ПОДГОТОВКА СОБЫТИЙ ---
+    # calendar_events = []
+    agenda_data = []
+    
+    for _, row in df_events.iterrows():
+        # Логика заголовка: Проект + обрезанный вид сведений/этап
+        detail_text = row['info_name'] if row['info_name'] != '—' else row['stage_name']
+        short_detail = (detail_text[:47] + '...') if len(detail_text) > 50 else detail_text
+        title = f"{row['project_name']} | {short_detail}"
+        
+        # Данные для сетки
+        calendar_events.append({
+            "title": title,
+            "start": row['planned_start'].strftime("%Y-%m-%d"),
+            "end": (row['planned_end'] + timedelta(days=1)).strftime("%Y-%m-%d"),
+            "color": "#1E88E5" if row['category'] == 'bureaucracy' else "#43A047",
+            "extendedProps": {
+                "project": row['project_name'],
+                "stage": row['stage_name'],
+                "info": row['info_name'],
+                "responsible": row['responsible_name'] or "Не назначен",
+                "comments": row['comments'] or "Нет"
+            }
+        })
+        
+        # Данные для текстовой Агенды
+        agenda_data.append({"date": row['planned_start'], "type": "🚀 Старт", "title": title})
+        agenda_data.append({"date": row['planned_end'], "type": "🎯 Дедлайн", "title": title})
+
+    # --- 4. CSS ФИКС (Чтобы календарь не пропадал в экспандере) ---
+    st.markdown("""
+        <style>
+            iframe[title="streamlit_calendar.calendar"] { min-height: 650px !important; }
+            .stExpander { border: 1px solid #e6e9ef !important; }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # --- 5. ДЕТАЛЬНЫЙ СПИСОК (AGENDA) ---
+    st.subheader("📋 Детальный список ближайших событий")
+    if not agenda_data:
+        st.info("Нет активных событий.")
+    else:
+        agenda_df = pd.DataFrame(agenda_data).sort_values('date')
+        # Показываем события на ближайшие 14 дней
+        today = datetime.now().date()
+        future_limit = today + timedelta(days=14)
+        filtered_agenda = agenda_df[(agenda_df['date'] >= today) & (agenda_df['date'] <= future_limit)]
+        
+        if filtered_agenda.empty:
+            st.write("На ближайшие 2 недели задач не запланировано.")
+        else:
+            for ev_date, group in filtered_agenda.groupby('date'):
+                with st.expander(f"📅 {ev_date.strftime('%d.%m.%Y (%a)')} — событий: {len(group)}"):
+                    for _, item in group.iterrows():
+                        st.write(f"**{item['type']}**: {item['title']}")
+
+    st.write("") 
+
+    if not calendar_events:
+        st.info("Нет данных для отображения в сетке.")
 
 def render_gantt_view():
     st.info("В разработке: Каскадный Гант-план")
