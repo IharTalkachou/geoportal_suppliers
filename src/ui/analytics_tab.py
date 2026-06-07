@@ -5,6 +5,7 @@ from config.cache import query_db, clear_cache
 import plotly.express as px
 import plotly.graph_objects as go
 import io
+from ui.shared_components import render_survey_viewer
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_analytics_data():
@@ -353,7 +354,9 @@ def render_analytics_tab(user_role="user"):
             "Выберите тип отчёта для формирования:",
             [
                 "1. Реестр подписанных соглашений",
-                "2. Сводный отчёт о ходе выполнения (Бюрократия)"
+                "2. Сводный отчёт о ходе выполнения (Бюрократия)",
+                "3. Реестр предоставляемых сведений",
+                "4. Просмотр технических опросников"
             ],
             index=0
         )
@@ -361,8 +364,12 @@ def render_analytics_tab(user_role="user"):
 
         if report_type == "1. Реестр подписанных соглашений":
             render_agreement_registry_report(sel_supplier, sel_period)
-        else:
+        elif report_type == "2. Сводный отчёт о ходе выполнения (Бюрократия)":
             render_progress_bureaucracy_report(sel_supplier, sel_period)
+        elif report_type == "3. Реестр предоставляемых сведений":
+            render_provided_data_registry() # 👈 Новый вызов
+        else:
+            render_survey_explorer_report() # 👈 Новый вызов
 
     # 📥 Сохраняем блок экспорта отчета в Excel (в самом низу вкладки)
     st.markdown("---")
@@ -735,3 +742,157 @@ def export_bureaucracy_to_excel(grouped_df):
         worksheet.set_column('D:D', 22) # Дата (шире для интервалов ДД.ММ-ДД.ММ)
 
     return buffer.getvalue()
+
+def render_provided_data_registry():
+    """Отчёт 3: Реестр предоставляемых сведений (по завершенным проектам)"""
+    st.markdown("#### ⚙️ Настройки отчёта")
+    
+    # 1. Загружаем данные: только те виды сведений, по которым проект завершен
+    query = """
+        SELECT DISTINCT
+            s.supplier_name,
+            it.info_name,
+            pi.provision_right
+        FROM project_items pi
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN info_types it ON pi.info_id = it.info_id
+        -- Проверка на наличие завершенного этапа подписания в Бюрократии
+        JOIN project_stages ps ON p.project_id = ps.project_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE stg.stage_name = 'Документ подписан'
+          AND ms.micro_status_name = 'Выполнено'
+          AND ps.actual_end IS NOT NULL
+    """
+    df_raw = query_db(query)
+
+    if df_raw.empty:
+        st.info("📭 Не найдено сведений по проектам с завершенным этапом 'Документ подписан'.")
+        return
+
+    # 2. Фильтры (мультибоксы)
+    c1, c2 = st.columns(2)
+    with c1:
+        all_sups = sorted(df_raw["supplier_name"].unique())
+        sel_sups = st.multiselect("🏢 Фильтр по поставщикам:", all_sups, placeholder="Все доступные")
+    
+    with c2:
+        # Берем только те значения прав, которые реально есть в текущем наборе (п. 2 твоего запроса)
+        all_rights = sorted(df_raw["provision_right"].unique())
+        sel_rights = st.multiselect("⚖️ Фильтр по правам предоставления:", all_rights, placeholder="Все доступные")
+
+    # Применение фильтрации
+    df_final = df_raw.copy()
+    if sel_sups:
+        df_final = df_final[df_final["supplier_name"].isin(sel_sups)]
+    if sel_rights:
+        df_final = df_final[df_final["provision_right"].isin(sel_rights)]
+
+    if df_final.empty:
+        st.warning("По выбранным фильтрам данных нет.")
+        return
+
+    # 3. Отображение
+    st.markdown(f"**Найдено записей:** {len(df_final)}")
+    
+    # Динамическая высота
+    h = min(600, (len(df_final) + 1) * 35 + 5)
+    
+    st.dataframe(
+        df_final.rename(columns={
+            "supplier_name": "Наименование поставщика",
+            "info_name": "Вид сведений",
+            "provision_right": "Право предоставления"
+        }),
+        width='stretch',
+        hide_index=True,
+        height=h
+    )
+
+    # 4. Простой экспорт в Excel
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        df_final.to_excel(writer, sheet_name='Реестр сведений', index=False)
+        # Настройка ширины
+        worksheet = writer.sheets['Реестр сведений']
+        worksheet.set_column('A:B', 40)
+        worksheet.set_column('C:C', 30)
+
+    st.download_button(
+        label="📥 Скачать реестр (Excel)",
+        data=buffer.getvalue(),
+        file_name=f"provided_data_{pd.Timestamp.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    
+def render_survey_explorer_report():
+    """Отчёт 4: Просмотр технических опросников (Проводник)"""
+    st.markdown("#### 🔍 Проводник по техническим опросникам")
+
+    # 1. Загружаем список поставщиков, у которых в принципе есть опросники
+    suppliers_with_surveys = query_db("""
+        SELECT DISTINCT s.supplier_id, sup.supplier_name 
+        FROM surveys s 
+        JOIN suppliers sup ON s.supplier_id = sup.supplier_id 
+        ORDER BY sup.supplier_name
+    """)
+
+    if suppliers_with_surveys.empty:
+        st.info("📭 В базе данных пока нет ни одного заполненного опросника.")
+        return
+
+    # Создаем маппинг для селектбокса
+    sup_map = dict(zip(suppliers_with_surveys["supplier_name"], suppliers_with_surveys["supplier_id"]))
+    
+    # 2. Выбор поставщика
+    sel_sup_name = st.selectbox(
+        "🏢 Выберите поставщика:", 
+        [""] + list(sup_map.keys()), 
+        index=0,
+        placeholder="Начните вводить название...",
+        key="an_survey_sup_sel"
+    )
+
+    if not sel_sup_name:
+        st.info("💡 Выберите поставщика для просмотра его опросников...")
+        return
+
+    selected_sup_id = sup_map[sel_sup_name]
+
+    # 3. Загружаем опросники выбранного поставщика
+    surveys = query_db("""
+        SELECT 
+            s.survey_id, 
+            s.received_date, 
+            COALESCE(STRING_AGG(it.info_name, ', '), 'Виды не выбраны') as info_list
+        FROM surveys s
+        LEFT JOIN survey_info_types sit ON s.survey_id = sit.survey_id
+        LEFT JOIN info_types it ON sit.info_id = it.info_id
+        WHERE s.supplier_id = :sid
+        GROUP BY s.survey_id, s.received_date
+        ORDER BY s.received_date DESC
+    """, {"sid": int(selected_sup_id)})
+
+    # Формируем список для выбора опросника
+    survey_options = {
+        f"📅 {r['received_date'].strftime('%d.%m.%Y')} | {r['info_list'][:60]}... (ID: {r['survey_id']})": r['survey_id'] 
+        for _, r in surveys.iterrows()
+    }
+
+    sel_survey_label = st.selectbox(
+        "📝 Выберите опросник:", 
+        [""] + list(survey_options.keys()), 
+        key="an_survey_item_sel"
+    )
+
+    if not sel_survey_label:
+        st.info("💡 Выберите опросник из списка для детального просмотра...")
+        return
+
+    # 4. Отображение через общий компонент
+    selected_sid = survey_options[sel_survey_label]
+    
+    st.divider()
+    # Вызываем общую функцию (session передаем None, так как в аналитике только чтение)
+    render_survey_viewer(None, selected_sid, is_readonly=True)
