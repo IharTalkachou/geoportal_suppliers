@@ -10,75 +10,77 @@ def render_project_dashboard(session, user_role="user"):
     st.subheader("📂 Управление проектами")
     is_readonly = (user_role == "user")
 
-    # 🔹 1. Инициализация состояний
+    # 1. 🛡️ ПЕРВИЧНАЯ ИНИЦИАЛИЗАЦИЯ И ОЧИСТКА
     if "proj_list_ver" not in st.session_state:
         st.session_state["proj_list_ver"] = 0
-    if "dash_edit_mode" not in st.session_state:
-        st.session_state.dash_edit_mode = False
-    if "selected_project_id" not in st.session_state:
-        st.session_state.selected_project_id = None
+    
+    # Санитарная проверка: если в ID попал текст - сносим его немедленно
+    cur_id = st.session_state.get("selected_project_id")
+    if cur_id is not None and not isinstance(cur_id, int):
+        if isinstance(cur_id, str) and cur_id.isdigit():
+            st.session_state["selected_project_id"] = int(cur_id)
+        else:
+            st.session_state["selected_project_id"] = None
 
-    # 🔍 2. Глобальные фильтры
+    # 2. 🔄 КОЛЛБЭК СМЕНЫ ПОСТАВЩИКА
+    def _on_supplier_change():
+        # Сбрасываем выбранный проект
+        st.session_state["selected_project_id"] = None
+        # Увеличиваем версию — это заставит Streamlit ПЕРЕСОЗДАТЬ selectbox проекта
+        st.session_state["proj_list_ver"] += 1
+        st.session_state.dash_edit_mode = False
+
+    # 🔍 3. ГЛОБАЛЬНЫЕ ФИЛЬТРЫ
     suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
     sup_map = dict(zip(suppliers["supplier_name"], suppliers["supplier_id"]))
     
-    def _on_supplier_change():
-        st.session_state["selected_project_id"] = None
-        st.session_state.dash_edit_mode = False
-        ver = st.session_state.get("proj_list_ver", 0)
-        if f"dash_proj_filter_v{ver}" in st.session_state:
-            del st.session_state[f"dash_proj_filter_v{ver}"]
-
     selected_sup = st.selectbox(
         "🏢 Поставщик", 
         ["Все"] + list(sup_map.keys()), 
         key="dash_sup_filter",
-        on_change=_on_supplier_change
+        on_change=_on_supplier_change # 👈 Триггер сброса
     )
     
-    cache_buster = st.session_state.get("proj_list_ver", 0)
+    # Загружаем проекты для текущего поставщика
+    current_ver = st.session_state["proj_list_ver"]
     if selected_sup == "Все":
-        projects = query_db(f"SELECT project_id, project_name FROM projects ORDER BY project_name /* v{cache_buster} */")
+        projects = query_db(f"SELECT project_id, project_name FROM projects ORDER BY project_name /* v{current_ver} */")
     else:
-        projects = query_db(f"SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name /* v{cache_buster} */", {"sid": sup_map[selected_sup]})
+        projects = query_db(f"SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name /* v{current_ver} */", 
+                            {"sid": sup_map[selected_sup]})
 
-    # Формируем словарь: {ID: Название}
-    # Принудительно приводим ключи к int, чтобы избежать ошибок типов
-    proj_map = {int(row["project_id"]): row["project_name"] for _, row in projects.iterrows()}
-    
-    # Список опций состоит из None и числовых ID
+    # Формируем карту ID -> Название (строго int для ключей)
+    proj_map = {int(r["project_id"]): r["project_name"] for _, r in projects.iterrows()}
     proj_options = [None] + list(proj_map.keys())
 
-    # Вычисляем индекс для возврата к выбранному проекту
-    current_proj = st.session_state.get("selected_project_id")
-    
-    # 🛡️ ЗАЩИТА: проверяем, что в сессии лежит именно число, а не текст от старой версии кода
-    if isinstance(current_proj, (int, float)) and int(current_proj) in proj_options:
-        default_idx = proj_options.index(int(current_proj))
-    else:
-        default_idx = 0
+    # Проверяем, валиден ли текущий ID для этого списка
+    current_proj_id = st.session_state.get("selected_project_id")
+    if current_proj_id not in proj_options:
+        current_proj_id = None
+        st.session_state["selected_project_id"] = None
 
+    # 4. 🎯 ВИДЖЕТ ВЫБОРА ПРОЕКТА С ВЕРСИОНИРОВАНИЕМ
+    # Мы меняем key каждый раз при смене поставщика (v0, v1, v2...)
+    # Это гарантирует, что в поле не останется "призрака" старого проекта
     selected_proj_id = st.selectbox(
         "🔍 Проект", 
         proj_options, 
-        index=default_idx,
+        index=0 if current_proj_id is None else proj_options.index(current_proj_id),
         format_func=lambda x: proj_map.get(x, "Выберите проект..."), 
-        key=f"dash_proj_filter_v{cache_buster}" 
+        key=f"dash_project_selector_v{current_ver}" 
     )
     
-    # 🛡️ БЕЗОПАСНОЕ СОХРАНЕНИЕ
-    if selected_proj_id is not None:
-        try:
-            # Если вдруг пришел текст (как в ошибке), int() вызовет исключение, 
-            # и мы просто сбросим выбор вместо краша приложения
-            st.session_state["selected_project_id"] = int(selected_proj_id)
-        except (ValueError, TypeError):
-            st.session_state["selected_project_id"] = None
-    else:
-        st.session_state["selected_project_id"] = None
-        st.info("👆 Выберите поставщика и проект для начала работы.")
-        return
+    # Синхронизируем выбор в основное состояние
+    if selected_proj_id != st.session_state.get("selected_project_id"):
+        st.session_state["selected_project_id"] = selected_proj_id
+        st.rerun()
 
+    # 5. 🛑 ПРЕДОХРАНИТЕЛЬ
+    if st.session_state.get("selected_project_id") is None:
+        st.info("👆 Выберите поставщика и проект для начала работы.")
+        return 
+
+    # ТЕПЕРЬ ТУТ ГАРАНТИРОВАННО ЧИСЛО
     proj_id_int = int(st.session_state["selected_project_id"])
 
     # ==========================================

@@ -5,180 +5,184 @@ from config.cache import query_db, clear_cache
 from config.auth import log_action
 
 def render_datasets_tab(session, user_role="user"):
-    st.subheader("📚 Справочники: Наборы и Виды сведений")
+    st.subheader("📚 Справочники данных")
     is_readonly = (user_role == "user")
 
+    tab_ds, tab_info = st.tabs(["🗃️ Наборы данных", "📄 Виды сведений"])
+
     # ==========================================
-    # ЧАСТЬ 1: НАБОРЫ ДАННЫХ (Datasets)
+    # ПОДВКЛАДКА 1: НАБОРЫ ДАННЫХ
     # ==========================================
-    st.markdown("### 📦 Наборы данных")
-    ds_df = query_db("SELECT dataset_id, dataset_name, is_mandatory, is_basic FROM datasets ORDER BY is_mandatory DESC, dataset_name")
+    with tab_ds:
+        ds_df = query_db("SELECT dataset_id, dataset_name, is_mandatory, is_basic FROM datasets ORDER BY is_mandatory DESC, dataset_name")
 
-    # 🔍 1. Фильтрация по is_mandatory
-    show_mandatory_only = st.checkbox("Показывать только обязательные наборы", key="ds_mandatory_filter")
-    display_ds = ds_df[ds_df["is_mandatory"]] if show_mandatory_only else ds_df
+        # 1. Фильтры таблицы
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            show_mandatory = st.checkbox("Показывать только обязательные наборы", key="ds_filter_mand")
+        with col_f2:
+            show_optional = st.checkbox("Показывать только необязательные наборы", key="ds_filter_opt")
+        
+        # Применяем фильтрацию
+        display_ds = ds_df.copy()
+        if show_mandatory:
+            display_ds = display_ds[display_ds["is_mandatory"] == True]
+        if show_optional:
+            display_ds = display_ds[display_ds["is_mandatory"] == False]
 
-    st.dataframe(display_ds[["dataset_name", "is_mandatory", "is_basic"]], width="stretch", hide_index=True,
-                 column_config={"dataset_name": "Название", "is_mandatory": "Обязательный", "is_basic": "Базовый"})
+        # Отображение таблицы
+        st.dataframe(display_ds[["dataset_name", "is_mandatory", "is_basic"]], 
+                     width="stretch", hide_index=True,
+                     column_config={
+                         "dataset_name": "Название набора", 
+                         "is_mandatory": "Обязательный", 
+                         "is_basic": "Базовый"
+                     })
 
-    # 🔽 2. Форма создания/редактирования (скрыта для user)
-    if not is_readonly:
-        with st.expander("➕ Добавить / ✏️ Редактировать набор"):
-            with st.form("ds_form"):
-                edit_options = ["(Создать новый)"] + display_ds["dataset_name"].tolist()
-                sel_ds = st.selectbox("Выберите набор для редактирования:", edit_options)
-
+        if not is_readonly:
+            with st.expander("➕ Добавить / ✏️ Редактировать набор"):
+                # 1. ВЫБОР (Вне формы для реактивности)
+                edit_options = ["(Создать новый)"] + ds_df["dataset_name"].tolist()
+                sel_ds = st.selectbox("Выберите набор для редактирования:", edit_options, key="ds_edit_selector")
                 is_editing = sel_ds != "(Создать новый)"
-                current_row = display_ds[display_ds["dataset_name"] == sel_ds].iloc[0] if is_editing else None
 
-                ds_name = st.text_input("Название набора *", value=sel_ds if is_editing else "")
-                ds_mandatory = st.checkbox("Обязательный набор (is_mandatory)", value=bool(current_row["is_mandatory"]) if is_editing else False)
-                ds_basic = st.checkbox("Базовый набор (is_basic)", value=bool(current_row["is_basic"]) if is_editing else False)
-
-                col_btn, col_del = st.columns([3, 1])
-                with col_btn:
-                    submit = st.form_submit_button("💾 Сохранить", type="primary")
-                with col_del:
-                    delete_btn = st.form_submit_button("🗑 Удалить", type="secondary") if is_editing else None
-
-                if submit:
-                    if not ds_name.strip():
-                        st.error("❌ Название обязательно")
+                # Логика подтягивания данных в session_state
+                if st.session_state.get("ds_prev_sel") != sel_ds:
+                    if is_editing:
+                        curr = ds_df[ds_df["dataset_name"] == sel_ds].iloc[0]
+                        st.session_state["ds_name_in"] = curr["dataset_name"]
+                        st.session_state["ds_mand_in"] = bool(curr["is_mandatory"])
+                        st.session_state["ds_basic_in"] = bool(curr["is_basic"])
                     else:
-                        try:
-                            if not is_editing and ds_name.strip() in list(ds_df["dataset_name"]):
-                                st.error("❌ Такой набор уже существует")
-                            else:
+                        st.session_state["ds_name_in"] = ""
+                        st.session_state["ds_mand_in"] = False
+                        st.session_state["ds_basic_in"] = False
+                    st.session_state["ds_prev_sel"] = sel_ds
+
+                # 2. ФОРМА СОХРАНЕНИЯ
+                with st.form("ds_save_form"):
+                    st.text_input("Название набора *", key="ds_name_in")
+                    c1, c2 = st.columns(2)
+                    with c1: st.checkbox("Обязательный (is_mandatory)", key="ds_mand_in")
+                    with c2: st.checkbox("Базовый (is_basic)", key="ds_basic_in")
+                    
+                    if st.form_submit_button("💾 Сохранить изменения", width="stretch"):
+                        new_name = st.session_state["ds_name_in"].strip()
+                        if not new_name:
+                            st.error("❌ Название обязательно")
+                        else:
+                            try:
                                 if is_editing:
+                                    target_id = int(ds_df[ds_df["dataset_name"] == sel_ds].iloc[0]["dataset_id"])
                                     session.execute(text("UPDATE datasets SET dataset_name=:n, is_mandatory=:m, is_basic=:b WHERE dataset_id=:id"),
-                                                    {"n": ds_name.strip(), "m": ds_mandatory, "b": ds_basic, "id": int(current_row["dataset_id"])})
-                                    log_action(st.session_state["auth"]["user_id"], "UPDATE_DATASET", "datasets", int(current_row["dataset_id"]),
-                                            old={"name": current_row["dataset_name"], "mandatory": bool(current_row["is_mandatory"])},
-                                            new={"name": ds_name.strip(), "mandatory": ds_mandatory})
+                                                    {"n": new_name, "m": st.session_state["ds_mand_in"], "b": st.session_state["ds_basic_in"], "id": target_id})
                                 else:
-                                    res = session.execute(text("INSERT INTO datasets (dataset_name, is_mandatory, is_basic) VALUES (:n, :m, :b)"),
-                                                        {"n": ds_name.strip(), "m": ds_mandatory, "b": ds_basic})
-                                    log_action(st.session_state["auth"]["user_id"], "CREATE_DATASET", "datasets",
-                                            new={"name": ds_name.strip(), "mandatory": ds_mandatory})
+                                    session.execute(text("INSERT INTO datasets (dataset_name, is_mandatory, is_basic) VALUES (:n, :m, :b)"),
+                                                    {"n": new_name, "m": st.session_state["ds_mand_in"], "b": st.session_state["ds_basic_in"]})
+                                session.commit(); clear_cache(); st.success("✅ Сохранено!"); st.rerun()
+                            except Exception as e:
+                                st.error(f"Ошибка: {e}"); session.rollback()
+
+                # 3. КНОПКА УДАЛЕНИЯ (Вне формы)
+                if is_editing:
+                    if st.button("🗑 Удалить набор", type="secondary", width="stretch", key="ds_del_btn"):
+                        target_id = int(ds_df[ds_df["dataset_name"] == sel_ds].iloc[0]["dataset_id"])
+                        
+                        # 🛡️ ПРОВЕРКА 1: Есть ли в этом наборе виды сведений?
+                        has_info_types = session.execute(text("SELECT 1 FROM info_types WHERE dataset_id = :id LIMIT 1"), {"id": target_id}).scalar()
+                        
+                        # 🛡️ ПРОВЕРКА 2: Используется ли набор в проектах?
+                        in_use = session.execute(text("SELECT 1 FROM project_items WHERE dataset_id = :id LIMIT 1"), {"id": target_id}).scalar()
+                        
+                        if has_info_types:
+                            st.error("❌ Нельзя удалить набор: в нем созданы виды сведений. Сначала удалите их на вкладке «Виды сведений».")
+                        elif in_use:
+                            st.error("❌ Нельзя удалить: набор используется в проектах!")
+                        else:
+                            try:
+                                session.execute(text("DELETE FROM datasets WHERE dataset_id = :id"), {"id": target_id})
                                 session.commit()
                                 clear_cache()
-                                st.success("✅ Набор сохранён!")
+                                st.success("🗑 Набор удалён")
                                 st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Ошибка БД: {e}")
-                            session.rollback()
-
-                if delete_btn:
-                    cnt = session.execute(text("SELECT COUNT(*) FROM project_items WHERE dataset_id = :id"), {"id": int(current_row["dataset_id"])}).scalar()
-                    if cnt > 0:
-                        st.warning("⚠️ Набор уже используется в проектах. Удаление невозможно.")
-                    else:
-                        try:
-                            log_action(st.session_state["auth"]["user_id"], "DELETE_DATASET", "datasets", int(current_row["dataset_id"]),
-                                    old={"name": current_row["dataset_name"]})
-                            session.execute(text("DELETE FROM datasets WHERE dataset_id = :id"), {"id": int(current_row["dataset_id"])})                            
-                            session.commit()
-                            clear_cache()
-                            st.success("🗑 Набор удалён!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Ошибка БД: {e}")
-                            session.rollback()
-
-    st.divider()
+                            except Exception as e:
+                                st.error(f"Ошибка при удалении: {e}")
+                                session.rollback()
 
     # ==========================================
-    # ЧАСТЬ 2: ВИДЫ СВЕДЕНИЙ (Info Types)
+    # ПОДВКЛАДКА 2: ВИДЫ СВЕДЕНИЙ
     # ==========================================
-    st.markdown("### 📄 Виды сведений")
-    datasets_list = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
-    if datasets_list.empty:
-        st.info("📭 Сначала создайте хотя бы один набор данных.")
-        return
+    with tab_info:
+        datasets_list = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
+        if not datasets_list.empty:
+            ds_map = dict(zip(datasets_list["dataset_name"], datasets_list["dataset_id"]))
+            sel_ds_name = st.selectbox("📦 Набор данных:", list(ds_map.keys()), key="info_tab_ds_sel")
+            sel_ds_id = ds_map[sel_ds_name]
 
-    ds_map = dict(zip(datasets_list["dataset_name"], datasets_list["dataset_id"]))
-    sel_ds_name = st.selectbox("📦 Набор данных для просмотра видов:", list(ds_map.keys()), key="info_ds_filter")
-    sel_ds_id = ds_map[sel_ds_name]
+            formats = query_db("SELECT format_name FROM ref_file_formats ORDER BY format_name")["format_name"].tolist()
+            periods = query_db("SELECT period_name FROM ref_update_periods ORDER BY period_name")["period_name"].tolist()
 
-    # Справочники
-    formats = query_db("SELECT format_name FROM ref_file_formats ORDER BY format_name")["format_name"].tolist()
-    periods = query_db("SELECT period_name FROM ref_update_periods ORDER BY period_name")["period_name"].tolist()
+            info_df = query_db("""
+                SELECT it.info_id, it.info_name, it.type, it.format, it."update",
+                       COALESCE(STRING_AGG(DISTINCT s.supplier_name, ', ' ORDER BY s.supplier_name), '—') AS suppliers
+                FROM info_types it
+                LEFT JOIN project_items pi ON it.info_id = pi.info_id
+                LEFT JOIN projects p ON pi.project_id = p.project_id
+                LEFT JOIN suppliers s ON p.supplier_id = s.supplier_id
+                WHERE it.dataset_id = :did
+                GROUP BY it.info_id, it.info_name, it.type, it.format, it."update"
+                ORDER BY it.info_name
+            """, {"did": sel_ds_id})
 
-    # 🔽 3. Запрос с агрегацией поставщиков через STRING_AGG
-    info_query = """
-        SELECT it.info_id, it.info_name, it.type, it.format, it."update",
-               COALESCE(STRING_AGG(DISTINCT s.supplier_name, ', ' ORDER BY s.supplier_name), '') AS suppliers
-        FROM info_types it
-        LEFT JOIN project_items pi ON it.info_id = pi.info_id
-        LEFT JOIN projects p ON pi.project_id = p.project_id
-        LEFT JOIN suppliers s ON p.supplier_id = s.supplier_id
-        WHERE it.dataset_id = :did
-        GROUP BY it.info_id, it.info_name, it.type, it.format, it."update"
-        ORDER BY it.info_name
-    """
-    info_df = query_db(info_query, {"did": sel_ds_id})
+            st.dataframe(info_df[["info_name", "type", "format", "update", "suppliers"]], width="stretch", hide_index=True)
 
-    st.dataframe(info_df[["info_name", "type", "format", "update", "suppliers"]], width="stretch", hide_index=True,
-                 column_config={"info_name": "Название", "type": "Тип", "format": "Формат", 
-                                "update": "Срок обновления", "suppliers": "Поставщики"})
+            if not is_readonly:
+                with st.expander("➕ Добавить / ✏️ Редактировать вид"):
+                    # 1. ВЫБОР (Вне формы)
+                    edit_opts_i = ["(Создать новый)"] + info_df["info_name"].tolist()
+                    sel_i = st.selectbox("Выберите вид:", edit_opts_i, key="info_edit_selector")
+                    is_editing_i = sel_i != "(Создать новый)"
 
-    # 🔽 Форма создания/редактирования видов (скрыта для user)
-    if not is_readonly:
-        with st.expander("➕ Добавить / ✏️ Редактировать вид сведений"):
-            with st.form("info_form"):
-                edit_options = ["(Создать новый)"] + info_df["info_name"].tolist()
-                sel_info = st.selectbox("Выберите вид для редактирования:", edit_options)
+                    if st.session_state.get("info_prev_sel") != sel_i:
+                        if is_editing_i:
+                            curr = info_df[info_df["info_name"] == sel_i].iloc[0]
+                            st.session_state["i_name_in"] = curr["info_name"]
+                            st.session_state["i_type_in"] = curr["type"] if curr["type"] in ["Данные", "Сервис"] else "Данные"
+                            st.session_state["i_format_in"] = curr["format"] if curr["format"] in formats else formats[0]
+                            st.session_state["i_upd_in"] = curr["update"] if curr["update"] in periods else periods[0]
+                        else:
+                            st.session_state["i_name_in"] = ""
+                            st.session_state["i_type_in"] = "Данные"
+                        st.session_state["info_prev_sel"] = sel_i
 
-                is_editing = sel_info != "(Создать новый)"
-                current_info = info_df[info_df["info_name"] == sel_info].iloc[0] if is_editing else None
+                    # 2. ФОРМА
+                    with st.form("info_save_form"):
+                        st.text_input("Название вида *", key="i_name_in")
+                        c1, c2, c3 = st.columns(3)
+                        with c1: st.selectbox("Тип", ["Данные", "Сервис"], key="i_type_in")
+                        with c2: st.selectbox("Формат", formats, key="i_format_in")
+                        with c3: st.selectbox("Срок обновления", periods, key="i_upd_in")
+                        
+                        if st.form_submit_button("💾 Сохранить вид", width="stretch"):
+                            name = st.session_state["i_name_in"].strip()
+                            if name:
+                                try:
+                                    if is_editing_i:
+                                        t_id = int(info_df[info_df["info_name"] == sel_i].iloc[0]["info_id"])
+                                        session.execute(text("UPDATE info_types SET info_name=:n, type=:t, format=:f, \"update\"=:u WHERE info_id=:id"),
+                                                        {"n": name, "t": st.session_state["i_type_in"], "f": st.session_state["i_format_in"], "u": st.session_state["i_upd_in"], "id": t_id})
+                                    else:
+                                        session.execute(text("INSERT INTO info_types (dataset_id, info_name, type, format, \"update\") VALUES (:did, :n, :t, :f, :u)"),
+                                                        {"did": sel_ds_id, "n": name, "t": st.session_state["i_type_in"], "f": st.session_state["i_format_in"], "u": st.session_state["i_upd_in"]})
+                                    session.commit(); clear_cache(); st.rerun()
+                                except Exception as e: st.error(f"Ошибка: {e}"); session.rollback()
 
-                info_name = st.text_input("Название вида *", value=sel_info if is_editing else "")
-                info_type = st.selectbox("Тип", ["Данные", "Сервис"],
-                                         index=(["Данные", "Сервис"].index(current_info["type"]) if current_info["type"] in ["Данные", "Сервис"] else 0) if is_editing else 0)
-                info_format = st.selectbox("Формат", formats,
-                                           index=(formats.index(current_info["format"]) if current_info["format"] in formats else 0) if is_editing else 0)
-                info_update = st.selectbox("Срок обновления", periods,
-                                           index=(periods.index(current_info["update"]) if current_info["update"] in periods else 0) if is_editing else 0)
-
-                col_btn, col_del = st.columns([3, 1])
-                with col_btn:
-                    submit_info = st.form_submit_button("💾 Сохранить", type="primary")
-                with col_del:
-                    delete_info_btn = st.form_submit_button("🗑 Удалить", type="secondary") if is_editing else None
-
-                if submit_info:
-                    if not info_name.strip():
-                        st.error("❌ Название обязательно")
-                    else:
-                        try:
-                            if is_editing:
-                                session.execute(text("UPDATE info_types SET info_name=:n, type=:t, format=:f, \"update\"=:u WHERE info_id=:id"),
-                                                {"n": info_name.strip(), "t": info_type, "f": info_format, "u": info_update, "id": int(current_info["info_id"])})
-                                log_action(st.session_state["auth"]["user_id"], "UPDATE_INFO_TYPE", "info_types", int(current_info["info_id"]),
-                                        old={"name": current_info["info_name"], "type": current_info["type"]},
-                                        new={"name": info_name.strip(), "type": info_type})
+                    # 3. УДАЛЕНИЕ
+                    if is_editing_i:
+                        if st.button("🗑 Удалить вид сведений", type="secondary", width="stretch", key="info_del_btn"):
+                            t_id = int(info_df[info_df["info_name"] == sel_i].iloc[0]["info_id"])
+                            in_use = session.execute(text("SELECT 1 FROM project_items WHERE info_id = :id LIMIT 1"), {"id": t_id}).scalar()
+                            if in_use: st.error("❌ Используется в проектах!")
                             else:
-                                session.execute(text("INSERT INTO info_types (dataset_id, info_name, type, format, \"update\") VALUES (:did, :n, :t, :f, :u)"),
-                                                {"did": sel_ds_id, "n": info_name.strip(), "t": info_type, "f": info_format, "u": info_update})
-                                log_action(st.session_state["auth"]["user_id"], "CREATE_INFO_TYPE", "info_types",
-                                        new={"name": info_name.strip(), "dataset_id": sel_ds_id})
-                            session.commit()
-                            clear_cache()
-                            st.success("✅ Вид сведений сохранён!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Ошибка БД: {e}")
-                            session.rollback()
-
-                if delete_info_btn:
-                    try:
-                        log_action(st.session_state["auth"]["user_id"], "DELETE_INFO_TYPE", "info_types", int(current_info["info_id"]),
-                               old={"name": current_info["info_name"]})
-                        session.execute(text("DELETE FROM info_types WHERE info_id = :id"), {"id": int(current_info["info_id"])})
-                        session.commit()
-                        clear_cache()
-                        st.success("🗑 Вид сведений удалён!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Ошибка БД: {e}")
-                        session.rollback()
+                                session.execute(text("DELETE FROM info_types WHERE info_id = :id"), {"id": t_id})
+                                session.commit(); clear_cache(); st.rerun()
