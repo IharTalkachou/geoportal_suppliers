@@ -72,7 +72,7 @@ def render_analytics_tab(user_role="user"):
     # Синхронизируем просрочки
     sync_overdue_log()
 
-    tabs = st.tabs(["🎯 KPI", "📅 Календарь", "📊 Диаграмма Ганта", "🌡️ Тепловая карта трения", "📄 Отчёты"])
+    tabs = st.tabs(["🎯 KPI", "📅 Календарь", "👥 Работа сотрудников", "🌡️ Тепловая карта трения", "📄 Отчёты"])
 
     with tabs[0]:
         render_kpi_dashboard_v3(user_role)
@@ -81,7 +81,7 @@ def render_analytics_tab(user_role="user"):
         render_calendar_view()
 
     with tabs[2]:
-        st.info("📊 Диаграмма Ганта: в разработке")
+        render_team_performance_view()
 
     with tabs[3]:
         st.info("🌡️ Тепловая карта трения: в разработке")
@@ -228,113 +228,6 @@ def render_kpi_dashboard_v3(user_role):
     with st.expander("Просмотр истории просрочек", expanded=False):
         if not overdue_data.empty:
             st.dataframe(overdue_data, width="stretch", hide_index=True)
-    st.markdown("---")
-
-    # ==========================================
-    # 5. ✅ Статистика выполненных задач
-    # ==========================================
-    st.markdown("#### ✅ Статистика выполненных задач")
-    done_p_choice = st.selectbox("Период фактического завершения:", ["Все время", "Текущая неделя", "Текущий месяц", "Квартал", "Год"], key="done_period_sel")
-    
-    q_done_base = """
-        SELECT p.project_name, stg.stage_name, ps.comments, ps.planned_start, ps.planned_end, ps.actual_start, ps.actual_end, u.display_name as responsible_name
-        FROM project_stages ps 
-        JOIN projects p ON ps.project_id = p.project_id 
-        JOIN stages stg ON ps.stage_id = stg.stage_id 
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
-        JOIN users u ON ps.responsible_id = u.user_id
-        WHERE ms.micro_status_name = 'Выполнено'
-        UNION ALL
-        SELECT p.project_name, stg.stage_name, ist.comments, ist.planned_start, ist.planned_end, ist.actual_start, ist.actual_end, u.display_name as responsible_name
-        FROM item_stages ist 
-        JOIN project_items pi ON ist.item_id = pi.item_id 
-        JOIN projects p ON pi.project_id = p.project_id 
-        JOIN stages stg ON ist.stage_id = stg.stage_id 
-        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
-        JOIN users u ON ist.responsible_id = u.user_id
-        WHERE ms.micro_status_name = 'Выполнено'
-    """
-    
-    # Обработка фильтров периода и сотрудников для Выполненных задач
-    df_done_all = query_db(q_done_base)
-    df_done_filtered = pd.DataFrame()
-
-    if not df_done_all.empty:
-        df_done_all['actual_end'] = pd.to_datetime(df_done_all['actual_end'])
-        df_done_filtered = df_done_all.copy()
-        
-        if done_p_choice != "Все время":
-            if done_p_choice == "Текущая неделя":
-                start_date = TODAY - pd.Timedelta(days=TODAY.weekday())
-            elif done_p_choice == "Текущий месяц":
-                start_date = TODAY.replace(day=1)
-            elif done_p_choice == "Квартал":
-                start_date = TODAY - pd.offsets.QuarterBegin(startingMonth=1)
-            else: # Год
-                start_date = TODAY.replace(month=1, day=1)
-            df_done_filtered = df_done_filtered[df_done_filtered['actual_end'] >= start_date]
-
-        # Фильтр сотрудников для выполненных
-        done_staff_stats = df_done_filtered.groupby("responsible_name").size().reset_index(name="cnt")
-        done_staff_opts = [f"{r['responsible_name']} | {r['cnt']} вып." for _, r in done_staff_stats.iterrows()]
-        sel_done_staff = st.multiselect("Фильтр по исполнителям (выполненные):", options=done_staff_opts, placeholder="Все сотрудники", key="done_staff_sel")
-        
-        if sel_done_staff:
-            names = [s.split(" | ")[0] for s in sel_done_staff]
-            df_done_filtered = df_done_filtered[df_done_filtered["responsible_name"].isin(names)]
-
-    with st.expander("Список выполненных задач", expanded=False):
-        if not df_done_filtered.empty:
-            df_done_filtered.insert(0, '№ п/п', range(1, len(df_done_filtered)+1))
-            st.dataframe(df_done_filtered, width="stretch", hide_index=True)
-        else: st.info("Нет выполненных задач за выбранный период.")
-    st.markdown("---")
-
-    # ==========================================
-    # 6. 👤 Загрузка ответственных сотрудников
-    # ==========================================
-    with st.expander("👤 Загрузка ответственных сотрудников", expanded=True):
-        staff_stats = query_db("""
-            SELECT u.display_name, COUNT(*) as task_count
-            FROM (
-                SELECT responsible_id, micro_status FROM project_stages 
-                UNION ALL 
-                SELECT responsible_id, micro_status FROM item_stages
-            ) as tasks
-            JOIN users u ON tasks.responsible_id = u.user_id
-            JOIN ref_micro_statuses ms ON tasks.micro_status = ms.micro_status_id
-            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
-            GROUP BY u.display_name
-        """)
-        total_active_tasks = staff_stats['task_count'].sum()
-        staff_options = [f"{r['display_name']} | {r['task_count']} задач" for _, r in staff_stats.iterrows()]
-        
-        # Динамический плейсхолдер
-        sel_staff = st.multiselect(
-            "Выберите сотрудников для детализации загрузки:", 
-            options=staff_options, 
-            placeholder=f"Все сотрудники | {total_active_tasks} задач в работе",
-            key="staff_load_multi"
-        )
-
-        load_query = """
-            SELECT p.project_name, stg.stage_name, ps.comments, ps.planned_start, ps.planned_end, ps.actual_start, u.display_name as responsible_name
-            FROM project_stages ps JOIN projects p ON ps.project_id = p.project_id JOIN stages stg ON ps.stage_id = stg.stage_id JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id JOIN users u ON ps.responsible_id = u.user_id
-            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
-            UNION ALL
-            SELECT p.project_name, stg.stage_name, ist.comments, ist.planned_start, ist.planned_end, ist.actual_start, u.display_name as responsible_name
-            FROM item_stages ist JOIN project_items pi ON ist.item_id = pi.item_id JOIN projects p ON pi.project_id = p.project_id JOIN stages stg ON ist.stage_id = stg.stage_id JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id JOIN users u ON ist.responsible_id = u.user_id
-            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
-        """
-        load_df = query_db(load_query)
-        if sel_staff:
-            selected_names = [s.split(" | ")[0] for s in sel_staff]
-            load_df = load_df[load_df["responsible_name"].isin(selected_names)]
-        
-        if not load_df.empty:
-            st.dataframe(load_df, width="stretch", hide_index=True)
-        else:
-            st.info("Нет активных задач.")
 
 # ==========================================
 # 📄 ФУНКЦИИ ОТЧЕТОВ (ВКЛАДКА 5)
@@ -1017,7 +910,7 @@ def render_calendar_view():
     # --- 4. ВЕРСТКА: КАЛЕНДАРЬ + ДЕТАЛИ ---
     st.markdown("<style>iframe[title='streamlit_calendar.calendar'] { min-height: 600px !important; }</style>", unsafe_allow_html=True)
 
-    with st.expander("📅 Календарное планирование", expanded=True):
+    with st.expander("📅 Календарное планирование", expanded=False):
         col_cal, col_info = st.columns([0.7, 0.3])
         
         with col_cal:
@@ -1116,8 +1009,189 @@ def render_calendar_view():
     if not calendar_events:
         st.info("Нет данных для отображения в сетке.")
 
-def render_gantt_view():
-    st.info("В разработке: Каскадный Гант-план")
+def render_team_performance_view():
+    st.markdown("### 👥 Оперативный контроль и загрузка сотрудников")
+    TODAY = pd.Timestamp.today().normalize()
+
+        # ==========================================
+    # 6. 👤 Загрузка ответственных сотрудников
+    # ==========================================
+    with st.expander("👤 Загрузка ответственных сотрудников", expanded=True):
+        # 1. Сбор статистики для мультиселекта (фильтра)
+        staff_stats = query_db("""
+            SELECT u.display_name, COUNT(*) as task_count
+            FROM (
+                SELECT responsible_id, micro_status FROM project_stages 
+                UNION ALL 
+                SELECT responsible_id, micro_status FROM item_stages
+            ) as tasks
+            JOIN users u ON tasks.responsible_id = u.user_id
+            JOIN ref_micro_statuses ms ON tasks.micro_status = ms.micro_status_id
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            GROUP BY u.display_name
+        """)
+        total_active_tasks = staff_stats['task_count'].sum()
+        staff_options = [f"{r['display_name']} | {r['task_count']} задач" for _, r in staff_stats.iterrows()]
+        
+        sel_staff = st.multiselect(
+            "Выберите сотрудников для детализации нагрузки:", 
+            options=staff_options, 
+            placeholder=f"Все сотрудники | {total_active_tasks} задач в работе",
+            key="staff_load_multi"
+        )
+
+        # 2. Загрузка полных данных для таблицы и карточки
+        load_query = """
+            SELECT 
+                p.project_name as "Проект", 
+                u.display_name as "Ответственный",
+                stg.stage_name as "Этап", 
+                ps.comments as "Комментарий", 
+                ps.planned_start as "План. начало", 
+                ps.planned_end as "План. завершение", 
+                ps.actual_start as "Факт. начало",
+                ms.micro_status_name as "Статус"
+            FROM project_stages ps 
+            JOIN projects p ON ps.project_id = p.project_id 
+            JOIN stages stg ON ps.stage_id = stg.stage_id 
+            JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+            JOIN users u ON ps.responsible_id = u.user_id
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            
+            UNION ALL
+            
+            SELECT 
+                p.project_name, 
+                u.display_name,
+                stg.stage_name, 
+                ist.comments, 
+                ist.planned_start, 
+                ist.planned_end, 
+                ist.actual_start,
+                ms.micro_status_name
+            FROM item_stages ist 
+            JOIN project_items pi ON ist.item_id = pi.item_id 
+            JOIN projects p ON pi.project_id = p.project_id 
+            JOIN stages stg ON ist.stage_id = stg.stage_id 
+            JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
+            JOIN users u ON ist.responsible_id = u.user_id
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+        """
+        load_df = query_db(load_query)
+
+        # Фильтрация по выбранным в мультиселекте сотрудникам
+        if sel_staff:
+            selected_names = [s.split(" | ")[0] for s in sel_staff]
+            load_df = load_df[load_df["Ответственный"].isin(selected_names)]
+
+        if load_df.empty:
+            st.info("Нет активных задач.")
+        else:
+            # --- РЕАЛИЗАЦИЯ ВЫБОРА (Native Selection) ---
+            col_table, col_card = st.columns([0.35, 0.65])
+
+            with col_table:
+                # Настройка отображения: скрываем лишнее, оставляем Проект и Ответственного
+                # Используем on_select="rerun" для мгновенной реакции
+                selection = st.dataframe(
+                    load_df,
+                    width="stretch",
+                    hide_index=True,
+                    on_select="rerun", # 👈 Включаем режим выбора
+                    selection_mode="single-row", # 👈 Только одна строка за раз
+                    column_config={
+                        "Проект": st.column_config.TextColumn(width="medium"),
+                        "Ответственный": st.column_config.TextColumn(width="medium"),
+                        # Скрываем остальные колонки в таблице, но они остаются в данных
+                        "Этап": None, "Комментарий": None, "План. начало": None, 
+                        "План. завершение": None, "Факт. начало": None, "Статус": None
+                    }
+                )
+
+            with col_card:
+                # Проверяем, выбрана ли строка
+                selected_rows = selection.get("selection", {}).get("rows", [])
+                
+                if selected_rows:
+                    # Достаем данные выбранной строки по её индексу
+                    selected_idx = selected_rows[0]
+                    row_data = load_df.iloc[selected_idx]
+
+                    with st.container(border=True):
+                        st.markdown(f"#### 🎯 Детали задачи")
+                        #st.info(f"**{row_data['Проект']}**")
+                        #st.write(f"👤 **Исполнитель:** {row_data['Ответственный']}")
+                        st.write(f"**Этап:** {row_data['Этап']}")
+                        st.write(f"🚦 **Статус:** `{row_data['Статус']}`")
+                        st.divider()
+                        st.write(f"📅 **План:** {row_data['План. начало'].strftime('%d.%m.%Y')} — {row_data['План. завершение'].strftime('%d.%m.%Y')}")
+                        f_start = row_data['Факт. начало']
+                        st.write(f"⏳ **Факт. начало:** {f_start.strftime('%d.%m.%Y') if pd.notna(f_start) else 'Не начато'}")
+                        st.write(f"**Комментарий:** {row_data['Комментарий'] or 'Нет'}")
+                else:
+                    st.info("💡 Выберите строку в таблице слева, чтобы увидеть подробности здесь.")
+
+    st.markdown("---")
+    
+    # ==========================================
+    # 5. ✅ Статистика выполненных задач
+    # ==========================================
+    st.markdown("#### ✅ Статистика выполненных задач")
+    done_p_choice = st.selectbox("Период фактического завершения:", ["Все время", "Текущая неделя", "Текущий месяц", "Квартал", "Год"], key="done_period_sel")
+    
+    q_done_base = """
+        SELECT p.project_name, stg.stage_name, ps.comments, ps.planned_start, ps.planned_end, ps.actual_start, ps.actual_end, u.display_name as responsible_name
+        FROM project_stages ps 
+        JOIN projects p ON ps.project_id = p.project_id 
+        JOIN stages stg ON ps.stage_id = stg.stage_id 
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+        JOIN users u ON ps.responsible_id = u.user_id
+        WHERE ms.micro_status_name = 'Выполнено'
+        UNION ALL
+        SELECT p.project_name, stg.stage_name, ist.comments, ist.planned_start, ist.planned_end, ist.actual_start, ist.actual_end, u.display_name as responsible_name
+        FROM item_stages ist 
+        JOIN project_items pi ON ist.item_id = pi.item_id 
+        JOIN projects p ON pi.project_id = p.project_id 
+        JOIN stages stg ON ist.stage_id = stg.stage_id 
+        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
+        JOIN users u ON ist.responsible_id = u.user_id
+        WHERE ms.micro_status_name = 'Выполнено'
+    """
+    
+    # Обработка фильтров периода и сотрудников для Выполненных задач
+    df_done_all = query_db(q_done_base)
+    df_done_filtered = pd.DataFrame()
+
+    if not df_done_all.empty:
+        df_done_all['actual_end'] = pd.to_datetime(df_done_all['actual_end'])
+        df_done_filtered = df_done_all.copy()
+        
+        if done_p_choice != "Все время":
+            if done_p_choice == "Текущая неделя":
+                start_date = TODAY - pd.Timedelta(days=TODAY.weekday())
+            elif done_p_choice == "Текущий месяц":
+                start_date = TODAY.replace(day=1)
+            elif done_p_choice == "Квартал":
+                start_date = TODAY - pd.offsets.QuarterBegin(startingMonth=1)
+            else: # Год
+                start_date = TODAY.replace(month=1, day=1)
+            df_done_filtered = df_done_filtered[df_done_filtered['actual_end'] >= start_date]
+
+        # Фильтр сотрудников для выполненных
+        done_staff_stats = df_done_filtered.groupby("responsible_name").size().reset_index(name="cnt")
+        done_staff_opts = [f"{r['responsible_name']} | {r['cnt']} вып." for _, r in done_staff_stats.iterrows()]
+        sel_done_staff = st.multiselect("Фильтр по исполнителям (выполненные):", options=done_staff_opts, placeholder="Все сотрудники", key="done_staff_sel")
+        
+        if sel_done_staff:
+            names = [s.split(" | ")[0] for s in sel_done_staff]
+            df_done_filtered = df_done_filtered[df_done_filtered["responsible_name"].isin(names)]
+
+    with st.expander("Список выполненных задач", expanded=False):
+        if not df_done_filtered.empty:
+            df_done_filtered.insert(0, '№ п/п', range(1, len(df_done_filtered)+1))
+            st.dataframe(df_done_filtered, width="stretch", hide_index=True)
+        else: st.info("Нет выполненных задач за выбранный период.")
+    st.markdown("---")
 
 def render_heatmap_view():
     st.info("В разработке: Матрицы рисков")
