@@ -1284,7 +1284,7 @@ def render_heatmap_view():
     mode = st.radio("Выберите срез анализа:", modes, horizontal=True, key="hm_mode_sel")
 
     if mode == modes[0]:
-        st.info("🚧 Режим 'Светофор' в разработке. Ожидаю ваши указания по логике.")
+        render_traffic_light_view()
     elif mode == modes[1]:
         draw_heatmap_by_track(df, '1. Документарный', "Reds")
     elif mode == modes[2]:
@@ -1386,5 +1386,233 @@ def draw_heatmap_by_track(df, track_name, color_scale_name):
         margin=dict(l=20, r=20, t=20, b=20),
     )
     fig.update_yaxes(tickfont=dict(size=11))
+
+    st.plotly_chart(fig, width='stretch')
+
+def load_progress_raw_data():
+    """
+    Загружает все данные для расчета % прогресса.
+    Гарантирует наличие всех колонок для Бюрократии и Технологии.
+    """
+    query = """
+        -- 1. Срез Бюрократии
+        SELECT 
+            p.project_id,
+            p.project_name,
+            s.supplier_name,
+            p.is_agreement_project,
+            stg.stage_id,
+            stg.stage_name,
+            stg.stage_order,
+            stg.stage_type,
+            COALESCE(stg.duration_days, 0) as norm_days,
+            ps.iteration_count,
+            ms.micro_status_name as status,
+            ps.planned_start, -- 👈 Добавлено
+            ps.planned_end,   -- 👈 Добавлено
+            ps.actual_start,
+            ps.actual_end,
+            'bureaucracy' as track,
+            '—' as info_name
+        FROM projects p
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN project_stages ps ON p.project_id = ps.project_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE ms.micro_status_name != 'Отменено'
+
+        UNION ALL
+
+        -- 2. Срез Технологии
+        SELECT 
+            p.project_id,
+            p.project_name,
+            s.supplier_name,
+            p.is_agreement_project,
+            stg.stage_id,
+            stg.stage_name,
+            stg.stage_order,
+            stg.stage_type,
+            COALESCE(stg.duration_days, 0) as norm_days,
+            ist.iteration_count,
+            ms.micro_status_name as status,
+            ist.planned_start, -- 👈 Добавлено
+            ist.planned_end,   -- 👈 Добавлено
+            ist.actual_start,
+            ist.actual_end,
+            'tech' as track,
+            it.info_name
+        FROM projects p
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN project_items pi ON p.project_id = pi.project_id
+        JOIN item_stages ist ON pi.item_id = ist.item_id
+        JOIN info_types it ON pi.info_id = it.info_id
+        JOIN stages stg ON ist.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
+        WHERE ms.micro_status_name != 'Отменено'
+    """
+    return query_db(query)
+    
+def calculate_project_progress(df_project):
+    """
+    Математический расчет прогресса проекта по двум стекам (50/50).
+    """
+    TODAY = pd.Timestamp.today().normalize()
+    
+    def get_track_stats(df_track, track_type):
+        pct = 0.0
+        current_stage_name = "Не начато"
+        in_progress_val = 0.0 
+        
+        if df_track.empty:
+            return pct, current_stage_name, in_progress_val
+
+        # 1. Проверка завершенности (Финишная черта)
+        if track_type == 'bureaucracy':
+            is_finished = any((df_track['stage_order'] == 8) & (df_track['status'] == 'Выполнено'))
+        else:
+            is_finished = any((df_track['stage_name'] == 'Публикация набора') & (df_track['status'] == 'Выполнено'))
+
+        if is_finished:
+            return 100.0, "Завершено", 0.0
+
+        # 2. Определение сценария Бюрократии
+        if track_type == 'bureaucracy':
+            # Проверяем, была ли Заявка самым первым этапом (stage_order=1)
+            first_stage = df_track.sort_values('stage_order').iloc[0]
+            is_placement_scenario = (first_stage['stage_name'] == 'Заявка на размещение НПД')
+            
+            num_model_stages = 7 if is_placement_scenario else 5
+            # Исключаем 'Документ подписан' (8) всегда, а 'Опросный лист' только в сценарии Заявки
+            excluded = ['Документ подписан']
+            if is_placement_scenario:
+                excluded.append('Опросный лист') 
+        else:
+            # Для технологии всегда 5 этапов
+            num_model_stages = 5
+            excluded = []
+
+        # Оставляем только те этапы, которые входят в расчетную модель
+        active_path = df_track[~df_track['stage_name'].isin(excluded)].copy()
+        if active_path.empty: 
+            return 0.0, "Инициация", 0.0
+
+        stage_weight = 100.0 / num_model_stages
+        unique_orders = sorted(active_path['stage_order'].unique())
+        max_order = max(unique_orders)
+        
+        # 3. Считаем % полностью пройденных этапов (включая пропущенные)
+        passed_count = len([o for o in unique_orders if o < max_order])
+        pct = passed_count * stage_weight
+
+        # 4. Расчет вклада ТЕКУЩЕГО этапа
+        curr_stage_rows = active_path[active_path['stage_order'] == max_order]
+        last_iter = curr_stage_rows.sort_values('iteration_count', ascending=False).iloc[0]
+        current_stage_name = last_iter['stage_name']
+        
+        # Считаем вклад только если стадия активна и это "Задача" (не веха)
+        if last_iter['status'] in ['В работе', 'Ожидание', 'Планируется']:
+            if last_iter['stage_type'] == 'Задача' and pd.notna(last_iter['actual_start']):
+                # Сумма дней прошлых итераций этого этапа + текущая
+                days_past = (curr_stage_rows['actual_end'] - curr_stage_rows['actual_start']).dt.days.sum()
+                days_curr = (TODAY - last_iter['actual_start']).days
+                total_days = max(1, (0 if pd.isna(days_past) else days_past) + days_curr)
+                
+                # Норматив из базы (или 14 дней по умолчанию)
+                norm = last_iter['norm_days'] if last_iter['norm_days'] > 0 else 14
+                
+                # Метод затухающего вклада (насыщение на 90%)
+                saturation = 1 - (0.9 / (1 + (total_days / norm)))
+                in_progress_val = stage_weight * saturation
+                pct += in_progress_val
+        
+        return pct, current_stage_name, in_progress_val
+
+    # --- СБОРКА ИТОГОВ ---
+    # Бюрократия
+    b_total, b_name, b_active = get_track_stats(df_project[df_project['track'] == 'bureaucracy'], 'bureaucracy')
+
+    # Технология (среднее по всем видам сведений в проекте)
+    tech_data = df_project[df_project['track'] == 'tech']
+    t_total, t_active, t_name = 0.0, 0.0, "Не начато"
+    
+    if not tech_data.empty:
+        item_results = [get_track_stats(idf, 'tech') for _, idf in tech_data.groupby('info_name')]
+        t_total = sum(r[0] for r in item_results) / len(item_results)
+        t_active = sum(r[2] for r in item_results) / len(item_results)
+        # Для названия берем первый активный или просто первый
+        t_name = next((r[1] for r in item_results if r[1] != "Завершено"), item_results[0][1])
+
+    final_pct = (b_total * 0.5) + (t_total * 0.5)
+    final_active = (b_active * 0.5) + (t_active * 0.5)
+    
+    return {
+        "project_name": df_project['project_name'].iloc[0],
+        "supplier": df_project['supplier_name'].iloc[0],
+        "total": round(final_pct, 2),
+        "passed": round(final_pct - final_active, 2),
+        "active": round(final_active, 2),
+        "details": f"📜 {b_name} | ⚙️ {t_name}"
+    }
+
+def render_traffic_light_view():
+    st.markdown("### 🚦 Светофор: Прогресс проработки проектов")
+    
+    df_raw = load_progress_raw_data()
+    if df_raw.empty:
+        st.info("Нет данных по этапам для расчета прогресса.")
+        return
+
+    # Проверка и принудительная конвертация в datetime
+    cols_to_fix = ['actual_start', 'actual_end', 'planned_end', 'planned_start']
+    for col in cols_to_fix:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_datetime(df_raw[col], errors='coerce')
+        
+    # 1. Расчеты для всех проектов
+    results = []
+    for pid in df_raw['project_id'].unique():
+        proj_results = calculate_project_progress(df_raw[df_raw['project_id'] == pid])
+        results.append(proj_results)
+    
+    res_df = pd.DataFrame(results).sort_values('total', ascending=False)
+
+    # 2. Настройка Plotly
+    fig = go.Figure()
+
+    # Сегмент 1: Пройденные этапы (глухой цвет)
+    fig.add_trace(go.Bar(
+        y=res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>",
+        x=res_df['passed'],
+        name='Завершено',
+        orientation='h',
+        marker=dict(color='#BDC3C7'), # Спокойный серый
+        hoverinfo='skip' # Не кликабельно
+    ))
+
+    # Сегмент 2: Текущие этапы (яркий цвет + штриховка)
+    fig.add_trace(go.Bar(
+        y=res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>",
+        x=res_df['active'],
+        name='В работе',
+        orientation='h',
+        marker=dict(
+            color='#3498DB', # Яркий синий
+            pattern_shape="/" # Штриховка
+        ),
+        customdata=res_df['details'],
+        hovertemplate="<b>Текущий статус:</b><br>%{customdata}<br>Общий прогресс: %{x}%<extra></extra>"
+    ))
+
+    # Настройка осей и внешнего вида
+    fig.update_layout(
+        barmode='stack',
+        height=max(400, len(res_df) * 60),
+        xaxis=dict(title="Процент готовности (%)", range=[0, 100], gridcolor='#eee'),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
+        plot_bgcolor='rgba(0,0,0,0)',
+        showlegend=False,
+        margin=dict(l=20, r=20, t=20, b=20)
+    )
 
     st.plotly_chart(fig, width='stretch')
