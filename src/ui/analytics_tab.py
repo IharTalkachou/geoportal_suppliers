@@ -1,11 +1,13 @@
 import streamlit as st
 from streamlit_calendar import calendar
+import numpy as np
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from config.cache import query_db, clear_cache
 from config.database import engine  # 👈 Импортируем существующий движок
 import plotly.express as px
+import plotly.graph_objects as go
 import io
 from datetime import datetime, timedelta
 from ui.shared_components import render_survey_viewer
@@ -84,7 +86,7 @@ def render_analytics_tab(user_role="user"):
         render_team_performance_view()
 
     with tabs[3]:
-        st.info("🌡️ Тепловая карта трения: в разработке")
+        render_heatmap_view()
 
     with tabs[4]:
         render_reports_view()
@@ -1101,10 +1103,11 @@ def render_team_performance_view():
                     selection_mode="single-row", # 👈 Только одна строка за раз
                     column_config={
                         "Проект": st.column_config.TextColumn(width="medium"),
-                        "Ответственный": st.column_config.TextColumn(width="medium"),
+                        "Ответственный": st.column_config.TextColumn(width="medium"), 
+                        "Статус": st.column_config.TextColumn(width="medium"),
                         # Скрываем остальные колонки в таблице, но они остаются в данных
                         "Этап": None, "Комментарий": None, "План. начало": None, 
-                        "План. завершение": None, "Факт. начало": None, "Статус": None
+                        "План. завершение": None, "Факт. начало": None
                     }
                 )
 
@@ -1122,7 +1125,7 @@ def render_team_performance_view():
                         #st.info(f"**{row_data['Проект']}**")
                         #st.write(f"👤 **Исполнитель:** {row_data['Ответственный']}")
                         st.write(f"**Этап:** {row_data['Этап']}")
-                        st.write(f"🚦 **Статус:** `{row_data['Статус']}`")
+                        #st.write(f"🚦 **Статус:** `{row_data['Статус']}`")
                         st.divider()
                         st.write(f"📅 **План:** {row_data['План. начало'].strftime('%d.%m.%Y')} — {row_data['План. завершение'].strftime('%d.%m.%Y')}")
                         f_start = row_data['Факт. начало']
@@ -1193,5 +1196,195 @@ def render_team_performance_view():
         else: st.info("Нет выполненных задач за выбранный период.")
     st.markdown("---")
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_heatmap_raw_data():
+    """Загружает данные напрямую из таблиц этапов, включая итерации"""
+    query = """
+        -- 1. Срез Бюрократии
+        SELECT 
+            s.supplier_name,
+            p.project_name, 
+            stg.stage_name,
+            stg.stage_order,
+            stg.track_category,
+            ps.planned_end,
+            ps.actual_end,
+            ps.iteration_count -- 👈 Добавили
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        WHERE ps.planned_end IS NOT NULL
+
+        UNION ALL
+
+        -- 2. Срез Технологии
+        SELECT 
+            s.supplier_name,
+            p.project_name, 
+            stg.stage_name,
+            stg.stage_order,
+            stg.track_category,
+            ist.planned_end,
+            ist.actual_end,
+            ist.iteration_count -- 👈 Добавили
+        FROM item_stages ist
+        JOIN stages stg ON ist.stage_id = stg.stage_id
+        JOIN project_items pi ON ist.item_id = pi.item_id
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        WHERE ist.planned_end IS NOT NULL
+    """
+    return query_db(query)
+
 def render_heatmap_view():
-    st.info("В разработке: Матрицы рисков")
+    st.markdown("### 🌡️ Матрицы рисков (Дни отклонения от плана)")
+    
+    # 1. Инструкция (п. 1)
+    with st.expander("❓ Как читать эти карты и глоссарий", expanded=False):
+        st.write("""
+            - **🚦 Светофор**: Сводная панель критических состояний по каждому поставщику.
+            - **⚖️ Юридический трек**: Красная шкала задержек. Показывает риски на этапе оформления документов.
+            - **⚙️ Технический трек**: Зеленая шкала задержек. Показывает заминки при интеграции данных.
+            - **Дни отклонения**: Для активных этапов — просрочка (сегодня минус план). Для завершенных — задержка (факт минус план).
+            - **Пустые ячейки**: Отклонений нет (идут в графике или завершены вовремя).
+        """)
+
+    df = load_heatmap_raw_data()
+    if df.empty:
+        st.error("⚠️ Данные по этапам не найдены.")
+        return
+
+    df['planned_end'] = pd.to_datetime(df['planned_end'], errors='coerce')
+    df['actual_end'] = pd.to_datetime(df['actual_end'], errors='coerce')
+
+    # 2. Фильтрация (п. 2)
+    c_filt1, c_filt2 = st.columns([2, 1])
+    
+    with c_filt2:
+        st.write("") # Выравнивание
+        only_mandatory = st.checkbox("⭐ Только ОНПД поставщики", value=False, key="hm_mand_filter")
+    
+    # Сначала фильтруем по ОНПД, если нужно
+    if only_mandatory:
+        mand_sups = query_db("SELECT supplier_name FROM suppliers WHERE is_mandatory = TRUE")["supplier_name"].tolist()
+        df = df[df["supplier_name"].isin(mand_sups)]
+    
+    with c_filt1:
+        all_sups = sorted(df["supplier_name"].unique())
+        sel_sups = st.multiselect("🔍 Фильтр по конкретным поставщикам:", all_sups, placeholder="Все доступные", key="hm_sup_filter")
+
+    if sel_sups:
+        df = df[df["supplier_name"].isin(sel_sups)]
+
+    st.divider()
+
+    # Переключатель режимов
+    modes = ["🚦 Светофор", "⚖️ Юридический трек (Бюрократия)", "⚙️ Технический трек (Технология)"]
+    mode = st.radio("Выберите срез анализа:", modes, horizontal=True, key="hm_mode_sel")
+
+    if mode == modes[0]:
+        st.info("🚧 Режим 'Светофор' в разработке. Ожидаю ваши указания по логике.")
+    elif mode == modes[1]:
+        draw_heatmap_by_track(df, '1. Документарный', "Reds")
+    elif mode == modes[2]:
+        # 3. Зеленая гамма для Технологии (п. 3)
+        draw_heatmap_by_track(df, '2. Технологический', "Greens")
+
+def draw_heatmap_by_track(df, track_name, color_scale_name):
+    # 1. Фильтруем трек
+    track_data = df[df["track_category"] == track_name].copy()
+    if track_data.empty:
+        st.warning(f"Нет данных по треку: {track_name}")
+        return
+
+    TODAY = pd.Timestamp.today().normalize()
+    
+    # --- ЛОГИКА ДЛЯ ФИКСИРОВАННОЙ ШКАЛЫ ---
+    # Считаем максимальное отклонение ПО ВСЕМУ ТРЕКУ (до фильтрации мультибоксом),
+    # чтобы цвета были стабильными. Если в базе пусто, ставим минимум 10.
+    def get_raw_dev(row):
+        target = row["actual_end"] if pd.notna(row["actual_end"]) else TODAY
+        if pd.isna(row["planned_end"]): return 0
+        return max(0, (target - row["planned_end"]).days)
+    
+    temp_dev = track_data.apply(get_raw_dev, axis=1)
+    # Группируем по ячейкам, чтобы найти реальный максимум суммы
+    global_max = track_data.assign(d=temp_dev).groupby(['supplier_name', 'project_name', 'stage_name'])['d'].sum().max()
+    z_max = max(10, global_max) if pd.notna(global_max) else 10
+
+    # 2. Форматирование подписи Поставщик + Проект
+    def format_y_label(row):
+        sup = str(row['supplier_name'])
+        short_sup = (sup[:32] + '...') if len(sup) > 35 else sup
+        return f"<b>{short_sup}</b><br><i>{row['project_name']}</i>"
+
+    track_data['y_label'] = track_data.apply(format_y_label, axis=1)
+    track_data["deviation"] = temp_dev
+    track_data["is_active"] = track_data["actual_end"].isna()
+
+    # 3. АГРЕГАЦИЯ ИТЕРАЦИЙ ( Islands Logic )
+    # Группируем по Проекту и Этапу
+    grouped = track_data.groupby(['y_label', 'stage_name', 'stage_order']).agg({
+        'deviation': 'sum',           # Суммарное отклонение
+        'iteration_count': 'count',   # Количество итераций
+        'is_active': 'any'            # Если хоть одна итерация активна - ставим молнию
+    }).reset_index()
+
+    # 4. Формируем текст и данные для подсказок
+    def get_cell_content(row):
+        val = int(row['deviation'])
+        # Если этап в работе и есть просрочка
+        suffix = "⚡" if row['is_active'] and val > 0 else ""
+        return f"{val}{suffix}"
+
+    grouped['cell_text'] = grouped.apply(get_cell_content, axis=1)
+    
+    # Подготовка осей
+    order_info = grouped[['stage_name', 'stage_order']].drop_duplicates().sort_values('stage_order')
+    sorted_stages = order_info['stage_name'].tolist()
+
+    # Матрицы
+    pivot_val = grouped.pivot(index="y_label", columns="stage_name", values="deviation")
+    pivot_txt = grouped.pivot(index="y_label", columns="stage_name", values="cell_text")
+    pivot_iter = grouped.pivot(index="y_label", columns="stage_name", values="iteration_count")
+
+    # Синхронизация колонок
+    cols = [c for c in sorted_stages if c in pivot_val.columns]
+    pivot_val = pivot_val.reindex(columns=cols)
+    pivot_txt = pivot_txt.reindex(columns=cols).fillna("")
+    pivot_iter = pivot_iter.reindex(columns=cols).fillna(0)
+
+    # 5. ОТРИСОВКА
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot_val.values,
+        x=pivot_val.columns,
+        y=pivot_val.index,
+        text=pivot_txt.values,
+        texttemplate="%{text}",
+        colorscale=color_scale_name,
+        zmin=0,     # Минимум всегда 0 (белый/светлый)
+        zmax=z_max, # Максимум зафиксирован по всей базе данных
+        xgap=2, ygap=2,
+        # Настраиваем кастомные данные для подсказки (передаем итерации)
+        customdata=pivot_iter.values,
+        hovertemplate=(
+            "<b>%{y}</b><br>" +
+            "Этап: %{x}<br>" +
+            "Суммарное отклонение: <b>%{z} дн.</b><br>" +
+            "Количество итераций: %{customdata}<extra></extra>"
+        )
+    ))
+
+    chart_height = max(500, len(pivot_val.index) * 55 + 150)
+    fig.update_layout(
+        height=chart_height,
+        xaxis_showgrid=False,
+        yaxis_autorange='reversed',
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=20, b=20),
+    )
+    fig.update_yaxes(tickfont=dict(size=11))
+
+    st.plotly_chart(fig, width='stretch')

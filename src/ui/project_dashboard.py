@@ -14,6 +14,10 @@ def render_project_dashboard(session, user_role="user"):
     if "proj_list_ver" not in st.session_state:
         st.session_state["proj_list_ver"] = 0
     
+    # первичная инициализация dash_edit_mode
+    if "dash_edit_mode" not in st.session_state:
+        st.session_state["dash_edit_mode"] = False
+
     # Санитарная проверка: если в ID попал текст - сносим его немедленно
     cur_id = st.session_state.get("selected_project_id")
     if cur_id is not None and not isinstance(cur_id, int):
