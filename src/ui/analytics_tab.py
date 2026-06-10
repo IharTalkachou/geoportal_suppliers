@@ -1029,7 +1029,7 @@ def render_team_performance_view():
             ) as tasks
             JOIN users u ON tasks.responsible_id = u.user_id
             JOIN ref_micro_statuses ms ON tasks.micro_status = ms.micro_status_id
-            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание', 'Планируется')
             GROUP BY u.display_name
         """)
         total_active_tasks = staff_stats['task_count'].sum()
@@ -1058,7 +1058,7 @@ def render_team_performance_view():
             JOIN stages stg ON ps.stage_id = stg.stage_id 
             JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
             JOIN users u ON ps.responsible_id = u.user_id
-            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание', 'Планируется')
             
             UNION ALL
             
@@ -1077,7 +1077,7 @@ def render_team_performance_view():
             JOIN stages stg ON ist.stage_id = stg.stage_id 
             JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
             JOIN users u ON ist.responsible_id = u.user_id
-            WHERE ms.micro_status_name IN ('В работе', 'Ожидание')
+            WHERE ms.micro_status_name IN ('В работе', 'Ожидание', 'Планируется')
         """
         load_df = query_db(load_query)
 

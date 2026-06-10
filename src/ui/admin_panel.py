@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from config.cache import query_db
+from config.cache import query_db, clear_cache 
 from config.auth import hash_password, ROLE_NAMES, require_role, log_action
 from datetime import datetime, timedelta
+
 
 def render_admin_panel(session):
     require_role("admin")
@@ -151,7 +152,6 @@ def render_admin_panel(session):
         
         # 🔹 Кнопка принудительного сброса кэша
         if st.button("🔄 Обновить журнал", type="secondary", width="stretch", key="btn_refresh_audit"):
-            from config.cache import clear_cache
             clear_cache()
             st.rerun()
 
@@ -191,15 +191,78 @@ def render_admin_panel(session):
                                file_name=f"audit_log_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
 
     # ==========================================
-    # 3. НАСТРОЙКИ СИСТЕМЫ (без изменений)
+    # 3. НАСТРОЙКИ СИСТЕМЫ И НОРМАТИВОВ
     # ==========================================
     with tab_settings:
-        st.subheader("Параметры приложения")
-        st.info("💡 Настройки сохраняются в сессии. Для персистентности подключите таблицу `app_settings`.")
+        st.subheader("⚙️ Параметры приложения и нормативы")
         
-        st.number_input("⏱ Таймаут сессии (мин)", value=30, step=5, key="adm_timeout")
-        st.toggle("🚧 Режим обслуживания (только для админов)", value=False, key="adm_maint")
+        # --- Блок А: Системные параметры (Session State) ---
+        st.markdown("#### 🖥️ Системные параметры")
+        col_sys1, col_sys2 = st.columns(2)
+        with col_sys1:
+            st.number_input("⏱ Таймаут сессии (мин)", value=st.session_state.get("admin_timeout", 30), step=5, key="adm_timeout")
+        with col_sys2:
+            st.write("<br>", unsafe_allow_html=True)
+            st.toggle("🚧 Режим обслуживания (только для админов)", value=st.session_state.get("adm_maint", False), key="adm_maint")
         
-        if st.button("💾 Применить настройки", type="primary"):
-            st.session_state["admin_timeout"] = st.session_state["adm_timeout"]
-            st.success("✅ Настройки применены (актуальны до перезапуска сервера)")
+        st.markdown("---")
+        
+        # --- Блок Б: Нормативы длительности (База данных) ---
+        st.markdown("#### ⏳ Нормативы длительности этапов")
+        st.caption("Данные используются для авторасчета плановых дат завершения при старте задачи.")
+
+        # Загружаем текущие значения из БД
+        stages_norm_df = query_db("""
+            SELECT stage_id, stage_name, track_category, duration_days 
+            FROM stages 
+            ORDER BY track_category, stage_order
+        """)
+
+        # Редактируемая таблица
+        edited_df = st.data_editor(
+            stages_norm_df,
+            column_config={
+                "stage_id": None, # Скрываем ID
+                "stage_name": st.column_config.TextColumn("Наименование этапа", disabled=True),
+                "track_category": st.column_config.TextColumn("Трек", disabled=True),
+                "duration_days": st.column_config.NumberColumn(
+                    "Норматив (дней)",
+                    min_value=0, max_value=365, step=1, format="%d дн."
+                ),
+            },
+            hide_index=True,
+            width="stretch",
+            key="stages_editor"
+        )
+
+        st.write("<br>", unsafe_allow_html=True)
+        
+        # --- ЕДИНАЯ КНОПКА СОХРАНЕНИЯ ---
+        if st.button("💾 Сохранить все настройки", type="primary", width="stretch"):
+            try:
+                from sqlalchemy.orm import Session
+                from config.database import engine
+                
+                # 1. Сохраняем системные настройки в Session State
+                st.session_state["admin_timeout"] = st.session_state["adm_timeout"]
+                # (Примечание: adm_maint уже лежит в session_state по ключу)
+
+                # 2. Сохраняем нормативы в Базу Данных
+                with Session(engine) as sess:
+                    for index, row in edited_df.iterrows():
+                        # Проверяем, изменилось ли значение по сравнению с исходным
+                        original_val = stages_norm_df.iloc[index]['duration_days']
+                        if row['duration_days'] != original_val:
+                            sess.execute(
+                                text("UPDATE stages SET duration_days = :d WHERE stage_id = :id"),
+                                {"d": int(row['duration_days']), "id": int(row['stage_id'])}
+                            )
+                    sess.commit()
+                
+                # 3. Очищаем кэш и уведомляем пользователя
+                clear_cache()
+                st.success("✅ Все изменения (системные и нормативы) успешно применены!")
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"❌ Ошибка при сохранении: {e}")

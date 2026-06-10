@@ -27,3 +27,6 @@ Thumbs.db
 *.sql.bak
 credentials.json
 csv_export/
+
+# Text
+.docx
