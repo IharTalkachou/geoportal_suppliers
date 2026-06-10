@@ -1408,8 +1408,8 @@ def load_progress_raw_data():
             COALESCE(stg.duration_days, 0) as norm_days,
             ps.iteration_count,
             ms.micro_status_name as status,
-            ps.planned_start, -- 👈 Добавлено
-            ps.planned_end,   -- 👈 Добавлено
+            ps.planned_start,
+            ps.planned_end, 
             ps.actual_start,
             ps.actual_end,
             'bureaucracy' as track,
@@ -1419,7 +1419,6 @@ def load_progress_raw_data():
         JOIN project_stages ps ON p.project_id = ps.project_id
         JOIN stages stg ON ps.stage_id = stg.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE ms.micro_status_name != 'Отменено'
 
         UNION ALL
 
@@ -1436,8 +1435,8 @@ def load_progress_raw_data():
             COALESCE(stg.duration_days, 0) as norm_days,
             ist.iteration_count,
             ms.micro_status_name as status,
-            ist.planned_start, -- 👈 Добавлено
-            ist.planned_end,   -- 👈 Добавлено
+            ist.planned_start,
+            ist.planned_end, 
             ist.actual_start,
             ist.actual_end,
             'tech' as track,
@@ -1449,7 +1448,6 @@ def load_progress_raw_data():
         JOIN info_types it ON pi.info_id = it.info_id
         JOIN stages stg ON ist.stage_id = stg.stage_id
         JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
-        WHERE ms.micro_status_name != 'Отменено'
     """
     return query_db(query)
     
