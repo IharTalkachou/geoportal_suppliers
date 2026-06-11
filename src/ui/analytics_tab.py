@@ -103,37 +103,91 @@ def render_kpi_dashboard_v3(user_role):
         if not df.empty:
             df.insert(0, '№ п/п', range(1, len(df) + 1))
         return df
-
     # ==========================================
     # 1. 📜 Соглашения в работе
     # ==========================================
-    q_ag_details = """
-        SELECT s.supplier_name as "Поставщик", p.project_name as "Проект", 
-               stg.stage_name as "Стадия", ms.micro_status_name as "Статус", 
-               ps.comments as "Комментарий", ps.actual_start as "Старт", 
-               u.display_name as "Ответственный"
-        FROM project_stages ps 
-        JOIN projects p ON ps.project_id = p.project_id
-        JOIN suppliers s ON p.supplier_id = s.supplier_id 
-        JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
-        LEFT JOIN users u ON ps.responsible_id = u.user_id
-        WHERE p.is_agreement_project = TRUE 
-          AND ms.micro_status_name IN ('В работе', 'Ожидание')
-          AND NOT EXISTS (
-              SELECT 1 FROM project_stages ps3 JOIN stages s3 ON ps3.stage_id = s3.stage_id 
-              JOIN ref_micro_statuses ms3 ON ps3.micro_status = ms3.micro_status_id
-              WHERE ps3.project_id = p.project_id AND s3.stage_name = 'Документ подписан' AND ms3.micro_status_name = 'Выполнено'
-          )
-        ORDER BY ps.actual_start ASC NULLS LAST
-    """
-    ag_df = get_kpi_with_details(q_ag_details)
-    st.metric("📜 Соглашений в работе", len(ag_df))
-    with st.expander("Детализация соглашений в работе", expanded=False):
-        if not ag_df.empty:
-            st.dataframe(ag_df, width="stretch", hide_index=True)
-        else: st.info("Нет активных стадий по соглашениям.")
-    st.markdown("---")
+    '''# Кнопка сброса кэша для отладки
+    if st.button("🔄 Обновить данные", width='stretch'):
+        st.cache_data.clear()
+        st.rerun()'''
+
+    data = get_kpi_groups_data()
+    if data is None:
+        st.info("Нет данных для анализа.")
+        return
+
+    groups = {
+        "work": data[data['status'] == 'В работе'].sort_values('has_alert', ascending=False),
+        "wait": data[data['status'] == 'Ожидание'].sort_values('has_alert', ascending=False),
+        "hold": data[data['status'].isin(['Отложено', 'Планируется'])]
+    }
+
+    # Верхний ряд метрик
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric(f"{'⚡ ' if groups['work']['has_alert'].any() else ''}В работе", len(groups['work']))
+    with c2:
+        st.metric(f"{'⚡ ' if groups['wait']['has_alert'].any() else ''}Ожидание", len(groups['wait']))
+    with c3:
+        st.metric("Отложено / План", len(groups['hold']))
+
+    # Вспомогательная функция отрисовки (внутри экспандера)
+    def draw_group_details(df_group, key_prefix):
+        if df_group.empty:
+            st.caption("Проектов нет")
+            return
+
+        # Пропорции: Список 0.35, Карточка 0.65
+        sub_c1, sub_c2 = st.columns([0.45, 0.55])
+        
+        with sub_c1:
+            selection = st.dataframe(
+                df_group[['display_name']], 
+                width="stretch", hide_index=True, on_select="rerun",
+                selection_mode="single-row",
+                key=f"{key_prefix}_table",
+                column_config={"display_name": "Проект"}
+            )
+        
+        with sub_c2:
+            sel_rows = selection.get("selection", {}).get("rows", [])
+            if sel_rows:
+                row = df_group.iloc[sel_rows[0]]
+                with st.container(border=True):
+                    st.markdown(f"#### {row['project_name']}")
+                    st.write(f"🏢 **Поставщик:** {row['supplier_name']}")
+                    
+                    # Три строки, которые вы просили:
+                    p_start = row['planned_start'].strftime('%d.%m.%Y') if pd.notna(row['planned_start']) else '—'
+                    p_end = row['planned_end'].strftime('%d.%m.%Y') if pd.notna(row['planned_end']) else '—'
+                    st.write(f"📅 **Плановые даты:** {p_start} — {p_end}")
+                    
+                    st.write(f"🚦 **Микростатус:** `{row['status']}`")
+                    
+                    f_start = row['actual_start']
+                    st.write(f"⏳ **Факт. начало:** {f_start.strftime('%d.%m.%Y') if pd.notna(f_start) else 'Ещё не начато'}")
+                    
+                    st.divider()
+                    st.write(f"**Этап:** {row['stage_name']}")
+                    if row['info_name'] != '—':
+                        st.write(f"**Вид сведений:** {row['info_name']}")
+                    st.write(f"👤 **Ответственный:** {row['responsible_name'] or 'Не назначен'}")
+                    st.write(f"**Комментарий:**")
+                    st.write(row['comments'] or "Нет")
+            else:
+                st.info("Выберите проект из списка")
+
+    # Нижний ряд экспандеров (в колонках)
+    e1, e2, e3 = st.columns(3)
+    with e1:
+        with st.expander("Список (Работа)", expanded=False):
+            draw_group_details(groups['work'], "kpi_work")
+    with e2:
+        with st.expander("Список (Ожидание)", expanded=False):
+            draw_group_details(groups['wait'], "kpi_wait")
+    with e3:
+        with st.expander("Список (План)", expanded=False):
+            draw_group_details(groups['hold'], "kpi_hold")
 
     # ==========================================
     # 2. ⚙️ Текущая техническая работа
@@ -1391,65 +1445,55 @@ def draw_heatmap_by_track(df, track_name, color_scale_name):
 
 def load_progress_raw_data():
     """
-    Загружает все данные для расчета % прогресса.
-    Гарантирует наличие всех колонок для Бюрократии и Технологии.
+    Загружает данные для прогресса и KPI. 
+    Включает итерации и типы стадий для корректного расчета 'Светофора'.
     """
     query = """
-        -- 1. Срез Бюрократии
+        -- 1. Бюрократия
         SELECT 
-            p.project_id,
-            p.project_name,
-            s.supplier_name,
-            p.is_agreement_project,
-            stg.stage_id,
-            stg.stage_name,
-            stg.stage_order,
-            stg.stage_type,
-            COALESCE(stg.duration_days, 0) as norm_days,
-            ps.iteration_count,
+            p.project_id, p.project_name, s.supplier_name,
+            stg.stage_name, stg.stage_order, stg.stage_type, -- 👈 Добавили stage_type
+            COALESCE(stg.duration_days, 0) as norm_days,    -- 👈 Добавили norm_days
+            ps.iteration_count,                            -- 👈 Добавили iteration_count
             ms.micro_status_name as status,
-            ps.planned_start,
-            ps.planned_end, 
-            ps.actual_start,
-            ps.actual_end,
-            'bureaucracy' as track,
-            '—' as info_name
-        FROM projects p
-        JOIN suppliers s ON p.supplier_id = s.supplier_id
-        JOIN project_stages ps ON p.project_id = ps.project_id
+            ps.planned_start, ps.planned_end, ps.actual_start, ps.actual_end,
+            ps.comments, u.display_name as responsible_name, 'bureaucracy' as track,
+            '—' as info_name,
+            p.is_agreement_project
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id 
         JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+        LEFT JOIN users u ON ps.responsible_id = u.user_id
+        
         UNION ALL
-
-        -- 2. Срез Технологии
+        
+        -- 2. Технология
         SELECT 
-            p.project_id,
-            p.project_name,
-            s.supplier_name,
-            p.is_agreement_project,
-            stg.stage_id,
-            stg.stage_name,
-            stg.stage_order,
-            stg.stage_type,
-            COALESCE(stg.duration_days, 0) as norm_days,
-            ist.iteration_count,
+            p.project_id, p.project_name, s.supplier_name,
+            stg.stage_name, stg.stage_order, stg.stage_type, -- 👈 Добавили stage_type
+            COALESCE(stg.duration_days, 0) as norm_days,    -- 👈 Добавили norm_days
+            ist.iteration_count,                           -- 👈 Добавили iteration_count
             ms.micro_status_name as status,
-            ist.planned_start,
-            ist.planned_end, 
-            ist.actual_start,
-            ist.actual_end,
-            'tech' as track,
-            it.info_name
-        FROM projects p
+            ist.planned_start, ist.planned_end, ist.actual_start, ist.actual_end,
+            ist.comments, u.display_name as responsible_name, 'tech' as track,
+            it.info_name,
+            p.is_agreement_project
+        FROM item_stages ist
+        JOIN project_items pi ON ist.item_id = pi.item_id
+        JOIN projects p ON pi.project_id = p.project_id 
         JOIN suppliers s ON p.supplier_id = s.supplier_id
-        JOIN project_items pi ON p.project_id = pi.project_id
-        JOIN item_stages ist ON pi.item_id = ist.item_id
-        JOIN info_types it ON pi.info_id = it.info_id
+        JOIN info_types it ON pi.info_id = it.info_id 
         JOIN stages stg ON ist.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
+        JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id 
+        LEFT JOIN users u ON ist.responsible_id = u.user_id
     """
-    return query_db(query)
+    df = query_db(query)
+    # Гарантируем типы дат для Pandas
+    for col in ['actual_start', 'actual_end', 'planned_end', 'planned_start']:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
+    return df
     
 def calculate_project_progress(df_project):
     """
@@ -1614,3 +1658,33 @@ def render_traffic_light_view():
     )
 
     st.plotly_chart(fig, width='stretch')
+
+def get_kpi_groups_data():
+    df = load_progress_raw_data()
+    if df.empty: return None
+    TODAY = datetime.now().date()
+
+    # 1. Поиск последней стадии (та, что позже всех началась)
+    df = df.sort_values(['project_id', 'actual_start', 'stage_order'], 
+                        ascending=[True, False, False])
+    latest_stages = df.drop_duplicates(subset=['project_id'], keep='first').copy()
+
+    def to_date_safe(val):
+        if pd.isna(val) or val is None: return None
+        return val.date() if hasattr(val, 'date') else val
+
+    # 2. Логика алертов ⚡
+    def calc_alert(row):
+        p_end = to_date_safe(row['planned_end'])
+        a_start = to_date_safe(row['actual_start'])
+        if row['status'] == 'В работе':
+            return bool(p_end and TODAY >= p_end)
+        if row['status'] == 'Ожидание':
+            return bool(a_start and (TODAY - a_start).days >= 7)
+        return False
+
+    latest_stages['has_alert'] = latest_stages.apply(calc_alert, axis=1)
+    latest_stages['display_name'] = latest_stages.apply(
+        lambda x: f"⚡ {x['project_name']}" if x['has_alert'] else x['project_name'], axis=1
+    )
+    return latest_stages
