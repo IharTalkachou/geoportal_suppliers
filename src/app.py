@@ -129,26 +129,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-'''# ВРЕМЕННЫЙ БЛОК ДЛЯ ТЕСТА
-with st.sidebar:
-    st.divider()
-    st.subheader("🛠 Тест сессии")
-    if "auth" in st.session_state:
-        last_act = st.session_state["auth"]["last_active"]
-        st.write(f"Активность в памяти: {last_act.strftime('%H:%M:%S')}")
-        
-        # Попробуем прочитать файл с диска, чтобы увидеть время там
-        token = st.query_params.get("session")
-        if token:
-            from config.session_store import SESSION_DIR
-            import json
-            fp = SESSION_DIR / f"{token}.json"
-            if fp.exists():
-                with open(fp, "r") as f:
-                    data = json.load(f)
-                saved_at = data.get("_saved_at", "нет данных")
-                st.write(f"Синхронизация на диске: {saved_at[11:19]}")
-# --------------------------------------------------------------------'''
 # Ряд заголовка
 h_col1, h_col2 = st.columns([0.6, 0.4])
 
