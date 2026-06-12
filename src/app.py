@@ -201,18 +201,27 @@ if st.session_state.get("show_admin", False):
     with Session(engine) as session:
         render_admin_panel(session)
 else:
-    # 🔹 Вкладки рендерятся ВСЕГДА — без условий по active_tab!
-    tabs = st.tabs(["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"])
+    # Используем segmented_control для навигации (он вызывает rerun и обновляет сессию)
+    
+    choice = st.segmented_control(
+        "Навигация",
+        options=["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"],
+        default="📁 Поставщики",
+        label_visibility="collapsed" # Скрываем заголовок для красоты
+    )
+    
+    st.markdown("<br>", unsafe_allow_html=True) # Немного отступа
+
     user_role = st.session_state["auth"]["role"]
     
-    with tabs[0]:
+    if choice == "📁 Поставщики":
         with Session(engine) as session: 
             render_suppliers_tab(session, user_role=user_role)
-    with tabs[1]: 
+    elif choice == "🗄️ Наборы":
         with Session(engine) as session: 
-            render_datasets_tab(session, user_role=user_role)  
-    with tabs[2]:
+            render_datasets_tab(session, user_role=user_role)
+    elif choice == "📋 Проекты":
         with Session(engine) as session: 
-            render_project_dashboard(session, user_role=user_role)      
-    with tabs[3]:
+            render_project_dashboard(session, user_role=user_role)
+    elif choice == "📊 Аналитика":
         render_analytics_tab(user_role=user_role)
