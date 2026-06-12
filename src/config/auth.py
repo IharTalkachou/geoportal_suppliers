@@ -9,7 +9,7 @@ ROLE_NAMES = {
     "editor": "Редактор",
     "user": "Пользователь"
 }
-SESSION_TIMEOUT_MINUTES = 30
+SESSION_TIMEOUT_MINUTES = 2
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(12)).decode('utf-8')
@@ -86,19 +86,29 @@ def init_session(user_data: dict):
         "last_active": datetime.now()
     }
 
-def check_session_timeout():
+def check_session_timeout(token: str = None):
     if "auth" in st.session_state:
         last = st.session_state["auth"]["last_active"]
         # Если время вышло - выходим
         if datetime.now() - last > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-            logout_user()
+            '''logout_user()
             # st.warning здесь не сработает, так как logout_user делает st.rerun(),
             # лучше передать флаг в session_state, если нужно показать сообщение
+            st.rerun()'''
+            from config.session_store import destroy_session
+            if token:
+                destroy_session(token)
+            logout_user()
             st.rerun()
         else:
-            # ✅ ПРОДЛЕНИЕ СЕССИИ: При любом действии пользователя в интерфейсе
+            # При любом действии пользователя в интерфейсе
             # обновляем таймер, чтобы 30 минут отсчитывались заново
             st.session_state["auth"]["last_active"] = datetime.now()
+
+            # ✅ Синхронизируем с диском, чтобы F5 не вылогинил пользователя
+            if token:
+                from config.session_store import sync_session_to_disk
+                sync_session_to_disk(token, st.session_state["auth"])
 
 def logout_user():
     st.session_state.pop("auth", None)
