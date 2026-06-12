@@ -20,3 +20,5 @@ csv_export/
 *.db
 *.sqlite
 .env
+
+# Документы

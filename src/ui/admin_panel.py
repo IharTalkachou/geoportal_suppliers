@@ -194,16 +194,31 @@ def render_admin_panel(session):
     # 3. НАСТРОЙКИ СИСТЕМЫ И НОРМАТИВОВ
     # ==========================================
     with tab_settings:
+        from config.settings_handler import load_settings, save_settings
+        
         st.subheader("⚙️ Параметры приложения и нормативы")
         
-        # --- Блок А: Системные параметры (Session State) ---
+        # --- Блок А: Системные параметры ---
+        # Загружаем текущие настройки из файла
+        current_cfg = load_settings()
+
         st.markdown("#### 🖥️ Системные параметры")
         col_sys1, col_sys2 = st.columns(2)
         with col_sys1:
-            st.number_input("⏱ Таймаут сессии (мин)", value=st.session_state.get("admin_timeout", 30), step=5, key="adm_timeout")
+            new_timeout = st.number_input("⏱ Таймаут сессии (мин)", value=current_cfg["session_timeout_minutes"], step=5)
         with col_sys2:
             st.write("<br>", unsafe_allow_html=True)
-            st.toggle("🚧 Режим обслуживания (только для админов)", value=st.session_state.get("adm_maint", False), key="adm_maint")
+            new_warn = st.toggle("📢 Показать плашку предупреждения", value=current_cfg["maintenance_warning"])
+        
+        # Поля для текстов сообщений
+        new_warn_msg = st.text_area("Текст предупреждения (плашка)", value=current_cfg["maintenance_message"], height=68)
+        
+        st.markdown("---")
+        col_m1, col_m2 = st.columns([0.5, 0.5])
+        with col_m1:
+            new_maint = st.toggle("🚨 ВКЛЮЧИТЬ РЕЖИМ ОБСЛУЖИВАНИЯ", value=current_cfg["maintenance_mode"], help="Только админы смогут войти")
+        with col_m2:
+            new_lock_msg = st.text_input("Текст при блокировке", value=current_cfg["lockout_message"])
         
         st.markdown("---")
         
@@ -240,17 +255,27 @@ def render_admin_panel(session):
         # --- ЕДИНАЯ КНОПКА СОХРАНЕНИЯ ---
         if st.button("💾 Сохранить все настройки", type="primary", width="stretch"):
             try:
+                # 1. Формируем новый словарь для JSON-конфига
+                updated_cfg = {
+                    "session_timeout_minutes": new_timeout,
+                    "maintenance_mode": new_maint,
+                    "maintenance_warning": new_warn,
+                    "maintenance_message": new_warn_msg,
+                    "lockout_message": new_lock_msg
+                }
+                
+                # 2. Сохраняем системные настройки в файл
+                # (Это заменяет твою старую строку st.session_state["admin_timeout"] = ...)
+                from config.settings_handler import save_settings
+                save_settings(updated_cfg)
+
+                # 3. Сохраняем нормативы этапов в Базу Данных
                 from sqlalchemy.orm import Session
                 from config.database import engine
                 
-                # 1. Сохраняем системные настройки в Session State
-                st.session_state["admin_timeout"] = st.session_state["adm_timeout"]
-                # (Примечание: adm_maint уже лежит в session_state по ключу)
-
-                # 2. Сохраняем нормативы в Базу Данных
                 with Session(engine) as sess:
                     for index, row in edited_df.iterrows():
-                        # Проверяем, изменилось ли значение по сравнению с исходным
+                        # Берем исходное значение из загруженного ранее stages_norm_df
                         original_val = stages_norm_df.iloc[index]['duration_days']
                         if row['duration_days'] != original_val:
                             sess.execute(
@@ -259,8 +284,10 @@ def render_admin_panel(session):
                             )
                     sess.commit()
                 
-                # 3. Очищаем кэш и уведомляем пользователя
+                # 4. Очищаем кэш запросов, чтобы новые нормативы подтянулись везде
+                from config.cache import clear_cache
                 clear_cache()
+                
                 st.success("✅ Все изменения (системные и нормативы) успешно применены!")
                 st.rerun()
                 

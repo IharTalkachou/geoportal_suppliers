@@ -3,13 +3,15 @@ import json
 import streamlit as st
 from datetime import datetime, timedelta
 from sqlalchemy import text
+from config.settings_handler import load_settings
+
 
 ROLE_NAMES = {
     "admin": "Администратор",
     "editor": "Редактор",
     "user": "Пользователь"
 }
-SESSION_TIMEOUT_MINUTES = 2
+SESSION_TIMEOUT_MINUTES = load_settings().get("session_timeout_minutes", 30)
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(12)).decode('utf-8')

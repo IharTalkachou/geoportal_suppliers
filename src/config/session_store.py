@@ -5,10 +5,11 @@ import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from config.settings_handler import load_settings
 
 SESSION_DIR = Path(os.getenv("SESSION_DIR", "./sessions"))
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-SESSION_TIMEOUT_MINUTES = 2
+SESSION_TIMEOUT_MINUTES = load_settings().get("session_timeout_minutes", 30)
 
 def _debug(msg: str):
     sys.stderr.write(f"[FP] {msg}\n")

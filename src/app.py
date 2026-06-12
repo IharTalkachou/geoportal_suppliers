@@ -1,3 +1,4 @@
+# ОБЩИЕ ИМПОРТЫ
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -7,7 +8,20 @@ import os
 import time
 from datetime import datetime, timedelta
 
-# 🔐 Импорты авторизации и кэша
+# ==========================================
+# БЛОК СВЯЗИ С НАСТРОЙКАМИ
+# ==========================================
+# 1. Импортируем обработчик настроек
+from config.settings_handler import load_settings
+
+# 2. Загружаем текущие глобальные настройки
+app_settings = load_settings()
+
+# ПРЕДУПРЕЖДЕНИЕ (желтая плашка) - Показываем ВСЕМ, даже на экране логина
+if app_settings.get("maintenance_warning", False):
+    st.warning(f"⚠️ {app_settings.get('maintenance_message')}")
+
+# ИМПОРТЫ АВТОРИЗАЦИИ И КЭША
 from config.auth import (
     authenticate_user, init_session, check_session_timeout, logout_user, log_action
 )
@@ -18,7 +32,6 @@ from ui.project_dashboard import render_project_dashboard
 from ui.admin_panel import render_admin_panel
 
 from config.session_store import create_token, restore_session, destroy_session
-
 
 # ==========================================
 # 🌍 1. КОНФИГ СТРАНИЦЫ
@@ -70,18 +83,32 @@ if "auth" not in st.session_state:
                             with Session(engine) as session:
                                 user = authenticate_user(username, password, session)
                             if user:
-                                init_session(user)
-                                # 🔹 Генерируем токен и кладём его в URL
-                                new_token = create_token(st.session_state["auth"])
-                                st.query_params["session"] = new_token
-                                st.success("✅ Вход выполнен!")
-                                st.rerun()
+                                # КРИТИЧЕСКАЯ ПРОВЕРКА ПРИ ВХОДЕ
+                                if app_settings.get("maintenance_mode", False) and user["role"] != "admin":
+                                    st.error(f"🏗️ {app_settings.get('lockout_message')}")
+                                else:
+                                    init_session(user)
+                                    # 🔹 Генерируем токен и кладём его в URL
+                                    new_token = create_token(st.session_state["auth"])
+                                    st.query_params["session"] = new_token
+                                    st.success("✅ Вход выполнен!")
+                                    st.rerun()
                             else:
                                 st.error("❌ Неверное имя или пароль")
                         except ValueError as e:
                             st.error(str(e))
                         except Exception as e:
                             st.error(f"❌ Ошибка подключения: {e}")
+        st.stop()
+
+# 3. ПРОВЕРКА ДЛЯ УЖЕ ЗАЛОГИНЕННЫХ ПОЛЬЗОВАТЕЛЕЙ
+# Если режим обслуживания включили, пока пользователь был внутри
+if app_settings.get("maintenance_mode", False):
+    if st.session_state["auth"]["role"] != "admin":
+        st.error(f"🏗️ {app_settings.get('lockout_message')}")
+        # Можно добавить кнопку логаута, чтобы пользователь не "завис"
+        if st.button("Выйти"):
+            logout_user()
         st.stop()
 
 # ==========================================
