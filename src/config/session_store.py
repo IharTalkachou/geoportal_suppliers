@@ -8,7 +8,7 @@ from pathlib import Path
 
 SESSION_DIR = Path(os.getenv("SESSION_DIR", "./sessions"))
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-SESSION_TIMEOUT_MINUTES = 30
+SESSION_TIMEOUT_MINUTES = 2
 
 def _debug(msg: str):
     sys.stderr.write(f"[FP] {msg}\n")
@@ -191,3 +191,35 @@ def cleanup_expired_sessions() -> int:
             p.unlink(missing_ok=True)
             removed += 1
     return removed
+
+def sync_session_to_disk(token: str, auth_data: dict):
+    """
+    Синхронизирует текущее состояние авторизации из памяти на диск.
+    Это критично для поддержания 'скользящего' таймаута.
+    """
+    if not token:
+        return
+    
+    fp = SESSION_DIR / f"{token}.json"
+    try:
+        # 1. Сначала подгружаем текущие данные с диска, чтобы не затереть Fingerprint и UI State
+        if fp.exists():
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = auth_data.copy()
+
+        # 2. Обновляем метку времени и данные пользователя
+        data["_saved_at"] = datetime.now().isoformat()
+        
+        # Переносим важные изменения из памяти (например, если сменилось имя или роль)
+        for key in ["user_id", "username", "display_name", "role", "role_name"]:
+            if key in auth_data:
+                data[key] = auth_data[key]
+
+        # 3. Сохраняем обратно
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            
+    except Exception as e:
+        _debug(f"❌ Sync Error: {e}")
