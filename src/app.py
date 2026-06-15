@@ -207,12 +207,21 @@ if st.session_state.get("show_admin", False):
     with Session(engine) as session:
         render_admin_panel(session)
 else:
+    # дебаг - проверка раздела в сессии
+    st.write(f"DEBUG: Текущий раздел в сессии: '{st.session_state.get('main_nav')}'")
+    
     # Используем segmented_control для навигации (он вызывает rerun и обновляет сессию)
+    # Список опций выносим в переменную, чтобы использовать одни и те же строки везде
+    nav_options = ["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"]
+    
+    # Если мы только зашли и ключа нет — создаем его со значением по умолчанию
+    if "main_nav" not in st.session_state:
+        st.session_state["main_nav"] = nav_options[0]
     
     choice = st.segmented_control(
         "Навигация",
-        options=["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"],
-        default="📁 Поставщики",
+        options=nav_options,
+        key="main_nav",
         label_visibility="collapsed" # Скрываем заголовок для красоты
     )
     

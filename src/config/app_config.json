@@ -1,7 +1,7 @@
 {
     "session_timeout_minutes": 30,
     "maintenance_mode": false,
-    "maintenance_warning": true,
-    "maintenance_message": "Внимание! С 18-00 12.06.2026 по 08-00 15.06.2026 ведутся технические работы. Вход в систему будет недоступен.",
+    "maintenance_warning": false,
+    "maintenance_message": "Внимание! С 12-00 по 12-45 ведутся технические работы. Вход в систему будет недоступен.",
     "lockout_message": "Система находится на техническом обслуживании. Пожалуйста, вернитесь позже."
 }

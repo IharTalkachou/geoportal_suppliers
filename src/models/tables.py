@@ -102,3 +102,10 @@ class ProjectStage(Base):
     comments = Column(Text)
     document_url = Column(Text)
     responsible_id = Column(Integer, ForeignKey('users.user_id'))
+
+class AppSettings(Base):
+    __tablename__ = 'app_settings'
+
+    setting_key = Column(String(50), primary_key=True)
+    setting_value = Column(JSONB, nullable=False)
+    description = Column(Text)

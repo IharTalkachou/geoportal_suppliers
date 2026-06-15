@@ -16,286 +16,390 @@ RU_LABELS = {
 }
 
 def render_suppliers_tab(session, user_role="user"):
-    st.subheader("📁 Реестр поставщиков и опросные листы")
+    st.subheader("📁 Реестр поставщиков")
     is_readonly = (user_role == "user")
     
     # ==========================================
-    # 🏢 ГЛОБАЛЬНЫЙ ВЫБОР ПОСТАВЩИКА
+    # 🧠 1. УПРАВЛЕНИЕ СОСТОЯНИЕМ (STATE)
     # ==========================================
+    
+    # Проверяем, не пришли ли мы сюда по ссылке из другого раздела (Deep Link)
+    # Если в session_state лежит 'filter_supplier_id', приоритет отдаем ему
+    incoming_sup_id = st.session_state.get("filter_supplier_id")
+    
     all_suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
     sup_map = dict(zip(all_suppliers["supplier_name"], all_suppliers["supplier_id"]))
-    
-    # Функция сброса режима редактирования при смене поставщика
-    def reset_edit_mode():
-        st.session_state["sup_edit_mode"] = False
+    inv_sup_map = {v: k for k, v in sup_map.items()} # Обратный маппинг ID -> Name
 
-    # Привязываем коллбэк к селектору
+    # Инициализация выбора в session_state, если его там нет
+    if "selected_sup_id" not in st.session_state:
+        st.session_state["selected_sup_id"] = None
+
+    # Если есть входящий ID, принудительно устанавливаем его как выбранный
+    if incoming_sup_id:
+        st.session_state["selected_sup_id"] = incoming_sup_id
+        # Очищаем входящий фильтр, чтобы он не срабатывал при следующем реране
+        st.session_state["filter_supplier_id"] = None
+
+    # Определяем индекс для selectbox на основе ID из сессии
+    current_sup_name = inv_sup_map.get(st.session_state["selected_sup_id"], "")
+    try:
+        current_index = ([""] + list(sup_map.keys())).index(current_sup_name)
+    except ValueError:
+        current_index = 0
+
+    # ==========================================
+    # 🏢 2. ГЛОБАЛЬНЫЙ ВЫБОР ПОСТАВЩИКА
+    # ==========================================
+    
+    def on_sup_change():
+        # Сохраняем выбор в session_state при изменении
+        new_name = st.session_state["sup_selector_widget"]
+        st.session_state["selected_sup_id"] = sup_map.get(new_name)
+        st.session_state["sup_edit_mode"] = False
+        # Логируем выбор поставщика
+        if st.session_state["selected_sup_id"]:
+            log_action(st.session_state["auth"]["user_id"], "VIEW_SUPPLIER", 
+                       "suppliers", st.session_state["selected_sup_id"])
+
     col_sel, col_add = st.columns([3, 1])
     with col_sel:
         selected_sup_name = st.selectbox(
             "🏢 Выберите поставщика", 
             [""] + list(sup_map.keys()), 
-            key="sup_main_selector",
-            on_change=reset_edit_mode  # <-- Сброс при смене
+            index=current_index,
+            key="sup_selector_widget",
+            on_change=on_sup_change
         )
     
-    selected_sup_id = sup_map.get(selected_sup_name)
+    selected_sup_id = st.session_state["selected_sup_id"]
 
     if not selected_sup_id:
-        st.info("👈 Выберите поставщика в списке или добавьте нового в блоке ниже.")
-        # Блок добавления нового (только если никто не выбран)
+        st.info("👈 Выберите поставщика в списке или добавьте нового.")
         if not is_readonly:
             with st.expander("➕ Добавить нового поставщика в базу"):
                 render_supplier_form(session)
         return
 
     # ==========================================
-    # 📑 ТАБЫ ДЛЯ ВЫБРАННОГО ПОСТАВЩИКА
+    # 📑 3. ПОД-НАВИГАЦИЯ (SEGMENTED CONTROL)
     # ==========================================
     st.markdown(f"## {selected_sup_name}")
-    tab_card, tab_cont, tab_ds, tab_survey = st.tabs([
-        "🏠 Карточка", "👤 Контакты", "📦 Наборы данных", "📝 Опросники"
-    ])
+    
+    # Используем segmented_control вместо tabs для сохранения состояния
+    sub_nav = st.segmented_control(
+        "Разделы",
+        options=["🏠 Карточка", "👤 Контакты", "📦 Наборы", "📝 Опросники", "📋 Проекты"],
+        default="🏠 Карточка",
+        key="sup_sub_nav",
+        label_visibility="collapsed"
+    )
+    st.markdown("---")
 
-    # --- ТАБ 1: КАРТОЧКА ---
-    with tab_card:
-        sup_data = query_db("SELECT * FROM suppliers WHERE supplier_id = :sid", {"sid": selected_sup_id}).iloc[0]
-        
-        # индикатор обязательности
-        if sup_data.get('is_mandatory'):
-            st.warning("⭐ **Поставщик ОНПД**")
-        
-        col_info, col_edit = st.columns([2, 1])
-        
-        # Управление режимом редактирования через единый ключ
-        if "sup_edit_mode" not in st.session_state:
-            st.session_state["sup_edit_mode"] = False
-                
-        with col_info:
-            for col, label in RU_LABELS.items():
-                if col in ["supplier_id", "supplier_name", "is_mandatory"]: 
-                    continue
-                
-                if pd.notna(sup_data.get(col)) and str(sup_data[col]).strip() != "":
-                    st.write(f"**{label}:** {sup_data[col]}")
-        
-        with col_edit:
-            if not is_readonly:
-                if st.button("✏️ Редактировать реквизиты", width="stretch"):
-                    st.session_state["sup_edit_mode"] = not st.session_state["sup_edit_mode"]
-        
-        # Показываем форму только если флаг True
-        if st.session_state["sup_edit_mode"]:
-            with st.expander("📝 Форма редактирования", expanded=True):
-                render_supplier_form(session, sup_data)
-                # Кнопка отмены внутри формы (опционально)
-                if st.button("❌ Отменить редактирование"):
-                    st.session_state["sup_edit_mode"] = False
-                    st.rerun()
+    if sub_nav == "🏠 Карточка":
+        render_supplier_card(session, selected_sup_id, is_readonly)
 
-    # --- ТАБ 2: КОНТАКТЫ ---
-    with tab_cont:
+    elif sub_nav == "👤 Контакты":
         render_contacts_manager(session, selected_sup_id, is_readonly)
 
-    # --- ТАБ 3: НАБОРЫ ДАННЫХ (Из проектов) ---
-    with tab_ds:
-        st.markdown("#### 📚 Наборы и виды сведений в проектах поставщика")
-        
-        # 1. Получаем текущие данные для таблицы и проверки связей
-        items_df = query_db("""
-            SELECT 
-                pi.item_id, p.project_name, p.project_id,
-                d.dataset_name, d.dataset_id,
-                i.info_name, i.info_id,
-                c.full_name as tech_contact,
-                pi.provision_right
-            FROM project_items pi
-            JOIN projects p ON pi.project_id = p.project_id
-            JOIN datasets d ON pi.dataset_id = d.dataset_id
-            JOIN info_types i ON pi.info_id = i.info_id
-            LEFT JOIN contacts c ON pi.tech_contact_id = c.contact_id
-            WHERE p.supplier_id = :sid
-            ORDER BY p.project_name, d.dataset_name
-        """, {"sid": selected_sup_id})
-        
-        if not items_df.empty:
-            st.dataframe(items_df[["project_name", "dataset_name", "info_name", "tech_contact", "provision_right"]], 
-                         width="stretch", hide_index=True,
-                         column_config={"project_name": "Проект", "dataset_name": "Набор", "info_name": "Вид сведений", 
-                                        "tech_contact": "Тех. контакт", "provision_right": "Право предоставления"})
-        else:
-            st.info("📭 Пока нет привязанных наборов.")
+    elif sub_nav == "📦 Наборы":
+        render_datasets_subtab(session, selected_sup_id, is_readonly)
 
-        if not is_readonly:
-            with st.expander("➕ Добавить / 🗑 Удалить связь с набором"):
-                # --- УДАЛЕНИЕ ---
-                if not items_df.empty:
-                    st.markdown("##### 🗑 Удаление связи")
-                    to_delete = st.selectbox("Выберите связь для удаления", [""] + [f"{r['project_name']} | {r['dataset_name']} | {r['info_name']}" for _, r in items_df.iterrows()], key="ds_del_sel")
-                    if to_delete:
-                        # Ищем ID выбранной строки
-                        idx = [f"{r['project_name']} | {r['dataset_name']} | {r['info_name']}" for _, r in items_df.iterrows()].index(to_delete)
-                        item_to_del = items_df.iloc[idx]
-                        
-                        if st.button("❌ Удалить связь", type="secondary"):
-                            # Проверка на наличие этапов технологии
-                            has_stages = query_db("SELECT 1 FROM item_stages WHERE item_id = :id", {"id": int(item_to_del['item_id'])})
-                            # Проверка на наличие опросников
-                            has_surveys = query_db("SELECT 1 FROM surveys WHERE supplier_id = :sid AND info_type_id = :iid", 
-                                                 {"sid": selected_sup_id, "iid": int(item_to_del['info_id'])})
-                            
-                            if not has_stages.empty or not has_surveys.empty:
-                                st.error("❌ Нельзя удалить: по этому набору уже заведены этапы технологии или опросники!")
-                            else:
-                                try:
-                                    session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(item_to_del['item_id'])})
-                                    session.commit(); clear_cache(); st.success("Связь удалена"); st.rerun()
-                                except Exception as e:
-                                    st.error(f"Ошибка: {e}"); session.rollback()
-                    st.divider()
-
-                # --- ДОБАВЛЕНИЕ (Новая логика) ---
-                st.markdown("##### ➕ Новая связь")
-                
-                # 1. ВЫБОР ПРОЕКТА
-                projs = query_db("SELECT project_id, project_name FROM projects WHERE supplier_id = :sid", {"sid": selected_sup_id})
-                proj_opt = ["(Новый проект)"] + projs["project_name"].tolist()
-                sel_p = st.selectbox("Проект поставщика", proj_opt, key="ds_proj_sel")
-                
-                new_p_name = ""
-                if sel_p == "(Новый проект)":
-                    new_p_name = st.text_input("Название нового проекта *", key="ds_new_p_name")
-                    new_p_is_agr = st.checkbox("Проект первичного подключения (Соглашение)", key="new_p_agr_check")
-                
-                # 2. ВЫБОР НАБОРА (Глобальный)
-                dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
-                ds_opt = ["(Новый набор)"] + dss["dataset_name"].tolist()
-                sel_d = st.selectbox("Набор данных", ds_opt, key="ds_ds_sel")
-                
-                new_d_name = ""
-                if sel_d == "(Новый набор)":
-                    new_d_name = st.text_input("Название нового глобального набора *", key="ds_new_d_name")
-
-                # 3. ВЫБОР ВИДА (Зависимый)
-                sel_i_id = None
-                new_i_name = ""
-                if sel_d != "(Новый набор)":
-                    ds_id = dss[dss["dataset_name"] == sel_d]["dataset_id"].iloc[0]
-                    infos = query_db("SELECT info_id, info_name FROM info_types WHERE dataset_id = :did", {"did": int(ds_id)})
-                    info_opt = ["(Новый вид)"] + infos["info_name"].tolist()
-                    sel_i = st.selectbox("Вид сведений", info_opt, key="ds_info_sel")
-                    if sel_i == "(Новый вид)":
-                        new_i_name = st.text_input("Название нового вида сведений *")
-                    else:
-                        sel_i_id = int(infos[infos["info_name"] == sel_i]["info_id"].iloc[0])
-                else:
-                    new_i_name = st.text_input("Название нового вида сведений *")
-
-                # 4. ТЕХ. КОНТАКТ
-                conts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": selected_sup_id})
-                cont_opt = ["Не выбран"] + conts["full_name"].tolist()
-                sel_c = st.selectbox("Технический контакт", cont_opt, key="ds_cont_sel")
-                prov_options = [
-                    'Оператор и Поставщик',
-                    'Только Поставщик',
-                    'Не предоставляется',
-                    'Протокол не заключён'
-                ]
-                sel_prov_new = st.selectbox("Право предоставления *", prov_options, key="ds_prov_new")
-
-                if st.button("🚀 Создать связь", type="primary"):
-                    try:
-                        # 1. Получаем/Создаем ПРОЕКТ
-                        p_id = None # Инициализируем
-                        if sel_p == "(Новый проект)":
-                            if not new_p_name:
-                                st.error("❌ Укажите название нового проекта")
-                                st.stop()
-                            p_id = session.execute(text("""
-                                INSERT INTO projects (supplier_id, project_name, status, is_agreement_project) 
-                                VALUES (:sid, :pn, 1, :is_agr) RETURNING project_id
-                            """), {
-                                "sid": int(selected_sup_id), 
-                                "pn": new_p_name.strip(), 
-                                "is_agr": new_p_is_agr
-                            }).scalar()
-                        else:
-                            # Безопасный поиск ID существующего проекта
-                            proj_row = projs[projs["project_name"] == sel_p]
-                            if not proj_row.empty:
-                                p_id = int(proj_row.iloc[0]["project_id"])
-                            else:
-                                st.error("❌ Проект не найден в базе")
-                                st.stop()
-
-                        # 2. Получаем/Создаем НАБОР
-                        d_id = None
-                        if sel_d == "(Новый набор)":
-                            if not new_d_name:
-                                st.error("❌ Укажите название нового набора")
-                                st.stop()
-                            d_id = session.execute(text("INSERT INTO datasets (dataset_name) VALUES (:n) RETURNING dataset_id"), 
-                                                 {"n": new_d_name.strip()}).scalar()
-                        else:
-                            ds_row = dss[dss["dataset_name"] == sel_d]
-                            if not ds_row.empty:
-                                d_id = int(ds_row.iloc[0]["dataset_id"])
-                            else:
-                                st.error("❌ Набор данных не найден")
-                                st.stop()
-
-                        # 3. Получаем/Создаем ВИД СВЕДЕНИЙ
-                        i_id = None
-                        # Проверяем, выбрали ли мы существующий вид (sel_i_id был определен выше в коде при отрисовке)
-                        if sel_d != "(Новый набор)" and sel_i != "(Новый вид)":
-                            i_id = int(sel_i_id)
-                        else:
-                            if not new_i_name:
-                                st.error("❌ Укажите название нового вида сведений")
-                                st.stop()
-                            i_id = session.execute(text("INSERT INTO info_types (dataset_id, info_name) VALUES (:did, :n) RETURNING info_id"), 
-                                                 {"did": int(d_id), "n": new_i_name.strip()}).scalar()
-
-                        # 4. Контакт (уже определен как sel_c)
-                        c_id = None
-                        if sel_c != "Не выбран":
-                            c_id = int(conts[conts["full_name"] == sel_c]["contact_id"].iloc[0])
-
-                        # 5. ФИНАЛЬНАЯ ПРОВЕРКА И ВСТАВКА
-                        if p_id and d_id and i_id:
-                            # Проверка на дубликат связи
-                            dup_check = session.execute(text("""
-                                SELECT 1 FROM project_items WHERE project_id = :pid AND info_id = :iid
-                            """), {"pid": p_id, "iid": i_id}).scalar()
-                            
-                            if dup_check:
-                                st.warning("⚠️ Такая связь (Проект + Вид сведений) уже существует!")
-                            else:
-                                session.execute(text("""
-                                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right) 
-                                    VALUES (:pid, :did, :iid, :cid, CAST(:prov AS data_provision_type)) -- ⬅️ CAST ТУТ
-                                """), {
-                                    "pid": int(p_id), 
-                                    "did": int(d_id), 
-                                    "iid": int(i_id), 
-                                    "cid": c_id, 
-                                    "prov": sel_prov_new 
-                                })
-                                
-                                session.commit()
-                                st.cache_data.clear()
-                                st.success("✅ Связь успешно создана!")
-                                st.rerun()
-                        else:
-                            st.error("❌ Не удалось определить все необходимые ID для создания связи.")
-
-                    except Exception as e:
-                        st.error(f"❌ Ошибка БД: {e}")
-                        session.rollback()    
-
-    # --- ТАБ 4: ОПРОСНИКИ (SURVEYS) ---
-    with tab_survey:
+    elif sub_nav == "📝 Опросники":
         render_surveys_manager(session, selected_sup_id, is_readonly)
+
+    elif sub_nav == "📋 Проекты":
+        render_supplier_projects_grid(selected_sup_id)
+
+# ==========================================
+# 🛠️ НОВЫЕ И ОБНОВЛЕННЫЕ КОМПОНЕНТЫ
+# ==========================================
+
+def render_supplier_card(session, selected_sup_id, is_readonly):
+    """Вынесено в отдельную функцию для чистоты основного рендера"""
+    sup_data = query_db("SELECT * FROM suppliers WHERE supplier_id = :sid", {"sid": selected_sup_id}).iloc[0]
+    
+    if sup_data.get('is_mandatory'):
+        st.warning("⭐ **Поставщик ОНПД**")
+    
+    col_info, col_edit = st.columns([2, 1])
+    
+    if "sup_edit_mode" not in st.session_state:
+        st.session_state["sup_edit_mode"] = False
+            
+    with col_info:
+        for col, label in RU_LABELS.items():
+            if col in ["supplier_id", "supplier_name", "is_mandatory"]: continue
+            if pd.notna(sup_data.get(col)) and str(sup_data[col]).strip() != "":
+                st.write(f"**{label}:** {sup_data[col]}")
+    
+    with col_edit:
+        if not is_readonly:
+            if st.button("✏️ Редактировать реквизиты", width="stretch"):
+                st.session_state["sup_edit_mode"] = not st.session_state["sup_edit_mode"]
+                st.rerun()
+    
+    if st.session_state["sup_edit_mode"]:
+        with st.expander("📝 Форма редактирования", expanded=True):
+            render_supplier_form(session, sup_data)
+            if st.button("❌ Отменить редактирование"):
+                st.session_state["sup_edit_mode"] = False
+                st.rerun()
+
+def render_supplier_projects_grid(supplier_id):
+    """
+    Генерация сетки карточек проектов с механизмом перехода (Deep Link).
+    Это решение нашего Side-Quest по UI.
+    """
+    st.markdown("#### 📋 Проекты поставщика")
+    
+    projects = query_db("""
+        SELECT p.project_id, p.project_name, rs.status_name,
+               (SELECT COUNT(*) FROM project_items WHERE project_id = p.project_id) as items_count
+        FROM projects p
+        LEFT JOIN ref_statuses rs ON p.status = rs.status_id
+        WHERE p.supplier_id = :sid
+        ORDER BY p.project_id DESC
+    """, {"sid": supplier_id})
+    
+    if projects.empty:
+        st.info("У этого поставщика пока нет созданных проектов.")
+        return
+    
+    # дебаг: функция-коллбэк 
+    def go_to_project_callback(sup_id, prj_id):
+        st.session_state["main_nav"] = "📋 Проекты"
+        st.session_state["filter_supplier_id"] = sup_id
+        st.session_state["filter_project_id"] = prj_id
+        # Логирование внутри коллбэка
+        log_action(st.session_state["auth"]["user_id"], "NAVIGATE_TO_PROJECT", 
+                   "projects", prj_id)
+
+    # Рисуем карточки в 3 колонки
+    cols = st.columns(3)
+    for idx, row in projects.iterrows():
+        with cols[idx % 3]:
+            # Создаем стилизованный контейнер-карточку
+            with st.container(border=True):
+                st.markdown(f"**{row['project_name']}**")
+                st.caption(f"Статус: {row['status_name'] or 'Не указан'}")
+                st.write(f"📦 Объектов: {row['items_count']}")
+                
+                # Кнопка перехода
+                if st.button(
+                    "🔎 Перейти к проекту", 
+                    key=f"goto_prj_{row['project_id']}", 
+                    width=200,
+                    on_click=go_to_project_callback,
+                    args=(supplier_id, row['project_id'])
+                ):
+                    # 🚀 МЕХАНИЗМ ПЕРЕХОДА (Deep Link)
+                    st.session_state["main_nav"] = "📋 Проекты" # Переключаем глобальный таб
+                    st.session_state["filter_supplier_id"] = supplier_id
+                    st.session_state["filter_project_id"] = row['project_id']
+                    
+                    # Логируем переход
+                    log_action(st.session_state["auth"]["user_id"], "NAVIGATE_TO_PROJECT", 
+                               "projects", row['project_id'])
+                    st.rerun()
+
+
+def render_datasets_subtab(session, selected_sup_id, is_readonly):
+    """Наборы данных и сведения в проектах поставщика"""
+    st.markdown("#### 📚 Наборы и виды сведений в проектах поставщика")
+    
+    # 1. Получаем текущие данные для таблицы и проверки связей
+    items_df = query_db("""
+        SELECT 
+            pi.item_id, p.project_name, p.project_id,
+            d.dataset_name, d.dataset_id,
+            i.info_name, i.info_id,
+            c.full_name as tech_contact,
+            pi.provision_right
+        FROM project_items pi
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        LEFT JOIN contacts c ON pi.tech_contact_id = c.contact_id
+        WHERE p.supplier_id = :sid
+        ORDER BY p.project_name, d.dataset_name
+    """, {"sid": selected_sup_id})
+    
+    if not items_df.empty:
+        st.dataframe(items_df[["project_name", "dataset_name", "info_name", "tech_contact", "provision_right"]], 
+                        width="stretch", hide_index=True,
+                        column_config={"project_name": "Проект", "dataset_name": "Набор", "info_name": "Вид сведений", 
+                                    "tech_contact": "Тех. контакт", "provision_right": "Право предоставления"})
+    else:
+        st.info("📭 Пока нет привязанных наборов.")
+
+    if not is_readonly:
+        with st.expander("➕ Добавить / 🗑 Удалить связь с набором"):
+            # --- УДАЛЕНИЕ ---
+            if not items_df.empty:
+                st.markdown("##### 🗑 Удаление связи")
+                to_delete = st.selectbox("Выберите связь для удаления", [""] + [f"{r['project_name']} | {r['dataset_name']} | {r['info_name']}" for _, r in items_df.iterrows()], key="ds_del_sel")
+                if to_delete:
+                    # Ищем ID выбранной строки
+                    idx = [f"{r['project_name']} | {r['dataset_name']} | {r['info_name']}" for _, r in items_df.iterrows()].index(to_delete)
+                    item_to_del = items_df.iloc[idx]
+                    
+                    if st.button("❌ Удалить связь", type="secondary"):
+                        # Проверка на наличие этапов технологии
+                        has_stages = query_db("SELECT 1 FROM item_stages WHERE item_id = :id", {"id": int(item_to_del['item_id'])})
+                        # Проверка на наличие опросников
+                        has_surveys = query_db("SELECT 1 FROM surveys WHERE supplier_id = :sid AND info_type_id = :iid", 
+                                                {"sid": selected_sup_id, "iid": int(item_to_del['info_id'])})
+                        
+                        if not has_stages.empty or not has_surveys.empty:
+                            st.error("❌ Нельзя удалить: по этому набору уже заведены этапы технологии или опросники!")
+                        else:
+                            try:
+                                session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(item_to_del['item_id'])})
+                                session.commit(); clear_cache(); st.success("Связь удалена"); st.rerun()
+                            except Exception as e:
+                                st.error(f"Ошибка: {e}"); session.rollback()
+                st.divider()
+
+            # --- ДОБАВЛЕНИЕ (Новая логика) ---
+            st.markdown("##### ➕ Новая связь")
+            
+            # 1. ВЫБОР ПРОЕКТА
+            projs = query_db("SELECT project_id, project_name FROM projects WHERE supplier_id = :sid", {"sid": selected_sup_id})
+            proj_opt = ["(Новый проект)"] + projs["project_name"].tolist()
+            sel_p = st.selectbox("Проект поставщика", proj_opt, key="ds_proj_sel")
+            
+            new_p_name = ""
+            if sel_p == "(Новый проект)":
+                new_p_name = st.text_input("Название нового проекта *", key="ds_new_p_name")
+                new_p_is_agr = st.checkbox("Проект первичного подключения (Соглашение)", key="new_p_agr_check")
+            
+            # 2. ВЫБОР НАБОРА (Глобальный)
+            dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
+            ds_opt = ["(Новый набор)"] + dss["dataset_name"].tolist()
+            sel_d = st.selectbox("Набор данных", ds_opt, key="ds_ds_sel")
+            
+            new_d_name = ""
+            if sel_d == "(Новый набор)":
+                new_d_name = st.text_input("Название нового глобального набора *", key="ds_new_d_name")
+
+            # 3. ВЫБОР ВИДА (Зависимый)
+            sel_i_id = None
+            new_i_name = ""
+            if sel_d != "(Новый набор)":
+                ds_id = dss[dss["dataset_name"] == sel_d]["dataset_id"].iloc[0]
+                infos = query_db("SELECT info_id, info_name FROM info_types WHERE dataset_id = :did", {"did": int(ds_id)})
+                info_opt = ["(Новый вид)"] + infos["info_name"].tolist()
+                sel_i = st.selectbox("Вид сведений", info_opt, key="ds_info_sel")
+                if sel_i == "(Новый вид)":
+                    new_i_name = st.text_input("Название нового вида сведений *")
+                else:
+                    sel_i_id = int(infos[infos["info_name"] == sel_i]["info_id"].iloc[0])
+            else:
+                new_i_name = st.text_input("Название нового вида сведений *")
+
+            # 4. ТЕХ. КОНТАКТ
+            conts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": selected_sup_id})
+            cont_opt = ["Не выбран"] + conts["full_name"].tolist()
+            sel_c = st.selectbox("Технический контакт", cont_opt, key="ds_cont_sel")
+            prov_options = [
+                'Оператор и Поставщик',
+                'Только Поставщик',
+                'Не предоставляется',
+                'Протокол не заключён'
+            ]
+            sel_prov_new = st.selectbox("Право предоставления *", prov_options, key="ds_prov_new")
+
+            if st.button("🚀 Создать связь", type="primary"):
+                try:
+                    # 1. Получаем/Создаем ПРОЕКТ
+                    p_id = None # Инициализируем
+                    if sel_p == "(Новый проект)":
+                        if not new_p_name:
+                            st.error("❌ Укажите название нового проекта")
+                            st.stop()
+                        p_id = session.execute(text("""
+                            INSERT INTO projects (supplier_id, project_name, status, is_agreement_project) 
+                            VALUES (:sid, :pn, 1, :is_agr) RETURNING project_id
+                        """), {
+                            "sid": int(selected_sup_id), 
+                            "pn": new_p_name.strip(), 
+                            "is_agr": new_p_is_agr
+                        }).scalar()
+                    else:
+                        # Безопасный поиск ID существующего проекта
+                        proj_row = projs[projs["project_name"] == sel_p]
+                        if not proj_row.empty:
+                            p_id = int(proj_row.iloc[0]["project_id"])
+                        else:
+                            st.error("❌ Проект не найден в базе")
+                            st.stop()
+
+                    # 2. Получаем/Создаем НАБОР
+                    d_id = None
+                    if sel_d == "(Новый набор)":
+                        if not new_d_name:
+                            st.error("❌ Укажите название нового набора")
+                            st.stop()
+                        d_id = session.execute(text("INSERT INTO datasets (dataset_name) VALUES (:n) RETURNING dataset_id"), 
+                                                {"n": new_d_name.strip()}).scalar()
+                    else:
+                        ds_row = dss[dss["dataset_name"] == sel_d]
+                        if not ds_row.empty:
+                            d_id = int(ds_row.iloc[0]["dataset_id"])
+                        else:
+                            st.error("❌ Набор данных не найден")
+                            st.stop()
+
+                    # 3. Получаем/Создаем ВИД СВЕДЕНИЙ
+                    i_id = None
+                    # Проверяем, выбрали ли мы существующий вид (sel_i_id был определен выше в коде при отрисовке)
+                    if sel_d != "(Новый набор)" and sel_i != "(Новый вид)":
+                        i_id = int(sel_i_id)
+                    else:
+                        if not new_i_name:
+                            st.error("❌ Укажите название нового вида сведений")
+                            st.stop()
+                        i_id = session.execute(text("INSERT INTO info_types (dataset_id, info_name) VALUES (:did, :n) RETURNING info_id"), 
+                                                {"did": int(d_id), "n": new_i_name.strip()}).scalar()
+
+                    # 4. Контакт (уже определен как sel_c)
+                    c_id = None
+                    if sel_c != "Не выбран":
+                        c_id = int(conts[conts["full_name"] == sel_c]["contact_id"].iloc[0])
+
+                    # 5. ФИНАЛЬНАЯ ПРОВЕРКА И ВСТАВКА
+                    if p_id and d_id and i_id:
+                        # Проверка на дубликат связи
+                        dup_check = session.execute(text("""
+                            SELECT 1 FROM project_items WHERE project_id = :pid AND info_id = :iid
+                        """), {"pid": p_id, "iid": i_id}).scalar()
+                        
+                        if dup_check:
+                            st.warning("⚠️ Такая связь (Проект + Вид сведений) уже существует!")
+                        else:
+                            session.execute(text("""
+                                INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right) 
+                                VALUES (:pid, :did, :iid, :cid, CAST(:prov AS data_provision_type)) -- ⬅️ CAST ТУТ
+                            """), {
+                                "pid": int(p_id), 
+                                "did": int(d_id), 
+                                "iid": int(i_id), 
+                                "cid": c_id, 
+                                "prov": sel_prov_new 
+                            })
+                            
+                            session.commit()
+                            st.cache_data.clear()
+                            st.success("✅ Связь успешно создана!")
+                            st.rerun()
+                    else:
+                        st.error("❌ Не удалось определить все необходимые ID для создания связи.")
+
+                except Exception as e:
+                    st.error(f"❌ Ошибка БД: {e}")
+                    session.rollback()    
+
 
 # ==========================================
 # 🛠️ ПОД-ФУНКЦИИ (КОМПОНЕНТЫ)
