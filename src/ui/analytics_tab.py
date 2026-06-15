@@ -9,6 +9,9 @@ from ui.analytics.data_provider import get_analytics_snapshot, clear_analytics_c
 from ui.analytics.kpi_logic import render_kpi_tab
 from ui.analytics.calendar import render_calendar_tab
 from ui.analytics.progress_math import render_traffic_light_chart
+from ui.analytics.staff import render_staff_tab
+from ui.analytics.heatmap import render_heatmap_tab
+from ui.analytics.reports import render_reports_tab
 
 def render_analytics_tab(user_role="user"):
     """Главная точка входа вкладки Аналитика"""
@@ -43,15 +46,13 @@ def render_analytics_tab(user_role="user"):
         render_calendar_tab()
 
     elif choice == "👥 Сотрудники":
-        # Пока оставляем старую функцию здесь, позже вынесем в staff.py
-        _render_team_performance_legacy()
+        render_staff_tab()
 
     elif choice == "🌡️ Матрицы рисков":
         _render_heatmap_router()
 
     elif choice == "📄 Отчёты":
-        # Пока оставляем старую функцию здесь, позже вынесем в reports.py
-        _render_reports_legacy()
+        render_reports_tab()
 
 # ==========================================
 # ВНУТРЕННИЕ ФУНКЦИИ (ВРЕМЕННОЕ ЖИЛЬЕ)
@@ -107,8 +108,23 @@ def _sync_overdue_log_internal():
             session.commit()
     except: pass
 
-def _render_team_performance_legacy():
-    st.info("Раздел 'Работа сотрудников' находится на рефакторинге. Используйте Календарь для контроля дедлайнов.")
+def _render_heatmap_router():
+    """Обновленный роутер: Светофор + Тепловые карты"""
+    
+    # Теперь мы используем Segmented Control для переключения ВНУТРИ раздела
+    hm_choice = st.segmented_control(
+        "Вид матрицы",
+        options=["🚦 Светофор (Прогресс)", "🌡️ Детальные карты задержек"],
+        default="🚦 Светофор (Прогресс)",
+        key="hm_internal_nav",
+        label_visibility="collapsed"
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
 
-def _render_reports_legacy():
-    st.info("Раздел 'Отчёты' находится на рефакторинге.")
+    df = get_analytics_snapshot()
+
+    if hm_choice == "🚦 Светофор (Прогресс)":
+        render_traffic_light_chart(df)
+    else:
+        # Вызов нашего нового файла
+        render_heatmap_tab()
