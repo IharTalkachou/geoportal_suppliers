@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, JSON, CheckConstraint, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
-from src.config.database import Base
+from config.database import Base
 
 class User(Base):
     __tablename__ = 'users'
@@ -103,7 +103,7 @@ class ProjectStage(Base):
     document_url = Column(Text)
     responsible_id = Column(Integer, ForeignKey('users.user_id'))
 
-class AppSettings(Base):
+class AppSetting(Base):
     __tablename__ = 'app_settings'
 
     setting_key = Column(String(50), primary_key=True)

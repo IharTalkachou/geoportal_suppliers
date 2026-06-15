@@ -208,7 +208,7 @@ if st.session_state.get("show_admin", False):
         render_admin_panel(session)
 else:
     # дебаг - проверка раздела в сессии
-    st.write(f"DEBUG: Текущий раздел в сессии: '{st.session_state.get('main_nav')}'")
+    #st.write(f"DEBUG: Текущий раздел в сессии: '{st.session_state.get('main_nav')}'")
     
     # Используем segmented_control для навигации (он вызывает rerun и обновляет сессию)
     # Список опций выносим в переменную, чтобы использовать одни и те же строки везде
