@@ -74,7 +74,8 @@ def render_kpi_tab():
                 column_config={
                     "project_name": "Проект", "info_name": "Вид сведений",
                     "stage_name": "Стадия", "status": "Статус",
-                    "actual_start": "Старт", "comments": "Комментарий"
+                    "actual_start": st.column_config.DateColumn("Старт", format="DD.MM.YYYY"), # 👈 Явный формат
+                    "comments": "Комментарий"
                 }
             )
         else: st.info("Нет активных технических задач.")
@@ -94,7 +95,8 @@ def render_kpi_tab():
                 width="stretch", hide_index=True,
                 column_config={
                     "project_name": "Проект", "stage_name": "Этап",
-                    "planned_end": "Дедлайн", "responsible_name": "Ответственный",
+                    "planned_end": st.column_config.DateColumn("Дедлайн", format="DD.MM.YYYY"), # 👈 Явный формат
+                    "responsible_name": "Ответственный",
                     "comments": "Комментарий"
                 }
             )

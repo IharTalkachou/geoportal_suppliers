@@ -5,13 +5,20 @@ from config.database import engine
 from config.cache import query_db
 
 # Импортируем наши новые модули
-from ui.analytics.data_provider import get_analytics_snapshot
+from ui.analytics.data_provider import get_analytics_snapshot, clear_analytics_cache
 from ui.analytics.kpi_logic import render_kpi_tab
 from ui.analytics.calendar import render_calendar_tab
 from ui.analytics.progress_math import render_traffic_light_chart
 
 def render_analytics_tab(user_role="user"):
     """Главная точка входа вкладки Аналитика"""
+    
+    # 1. ШАПКА И ОБНОВЛЕНИЕ
+    col_h, col_ref = st.columns([0.8, 0.2])
+    with col_ref:
+        if st.button("🔄 Обновить данные", width='stretch'):
+            clear_analytics_cache()
+            st.rerun()
     
     # 1. СИНХРОНИЗАЦИЯ (Один раз при загрузке вкладки)
     with st.spinner("Синхронизация данных..."):

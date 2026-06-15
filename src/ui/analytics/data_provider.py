@@ -2,11 +2,10 @@ import streamlit as st
 import pandas as pd
 from config.cache import query_db
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60) # Уменьшили до 60 секунд
 def get_analytics_snapshot():
     """
     Централизованный сбор данных для всей аналитики.
-    Выполняется один раз в 5 минут или при принудительном сбросе.
     """
     query = """
         SELECT 
@@ -50,8 +49,12 @@ def get_analytics_snapshot():
         LEFT JOIN users u ON ist.responsible_id = u.user_id
     """
     df = query_db(query)
-    # Приведение типов данных
+    # Приведение типов
     for col in ['actual_start', 'actual_end', 'planned_end', 'planned_start']:
         df[col] = pd.to_datetime(df[col], errors='coerce')
     
     return df
+
+def clear_analytics_cache():
+    """Служебная функция для очистки кэша аналитики"""
+    st.cache_data.clear()

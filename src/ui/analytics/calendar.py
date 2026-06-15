@@ -6,73 +6,87 @@ from ui.analytics.data_provider import get_analytics_snapshot
 
 def render_calendar_tab():
     st.subheader("📅 Планировщик событий")
+    
+    # 1. Загрузка данных
     df = get_analytics_snapshot()
     if df.empty:
-        st.info("Нет данных.")
+        st.info("Нет данных для отображения.")
         return
 
+    # 2. Фильтрация
     cal_df = df[df['planned_start'].notna() & df['planned_end'].notna()].copy()
-    show_all = st.checkbox("🔄 Показать завершенные задачи", value=False)
+    
+    c1, _ = st.columns([2,1])
+    with c1:
+        show_all = st.checkbox("🔄 Показать завершенные задачи", value=False, key="cal_filter_done")
+    
     if not show_all:
         cal_df = cal_df[cal_df['status'] != 'Выполнено']
 
-    # 1. КАЛЕНДАРЬ
-    with st.expander("🗓️ Просмотр календаря", expanded=False):
+    # 3. CSS-ФИКС для корректной отрисовки внутри экспандера
+    st.markdown("""
+        <style>
+            /* Устанавливаем минимальную высоту для iframe календаря */
+            iframe[title="streamlit_calendar.calendar"] { 
+                min-height: 650px !important; 
+            }
+            /* Убираем лишние отступы внутри экспандера для календаря */
+            .stExpander > div:first-child > div:nth-child(2) {
+                padding: 0.5rem 1rem 1rem 1rem !important;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # 4. КАЛЕНДАРЬ В ЭКСПАНДЕРЕ
+    with st.expander("🗓️ Открыть календарную сетку", expanded=False):
         _render_calendar_fragment(cal_df)
 
-    # 2. АГЕНДА (Список ближайших событий)
+    # 5. АГЕНДА (Список на 7 дней)
     st.markdown("---")
     st.subheader("📋 Ближайшие события (7 дней)")
     
     today = datetime.now().date()
     future_limit = today + timedelta(days=7)
     
-    # Собираем все точки: и старты, и дедлайны
     agenda_items = []
     for _, r in cal_df.iterrows():
+        # Берем только дату без времени
         p_start = r['planned_start'].date()
         p_end = r['planned_end'].date()
         
         detail = r['info_name'] if r['info_name'] != '—' else r['stage_name']
         title = f"{r['project_name']} | {detail}"
         
+        # Добавляем в список, если попадает в окно 7 дней
         if today <= p_start <= future_limit:
             agenda_items.append({"date": p_start, "type": "🚀 Старт", "title": title})
         if today <= p_end <= future_limit:
             agenda_items.append({"date": p_end, "type": "🎯 Дедлайн", "title": title})
     
     if not agenda_items:
-        st.info("На ближайшую неделю задач не запланировано.")
+        st.info("На ближайшие 7 дней задач не запланировано.")
     else:
+        # Сортируем и выводим по дням
         agenda_res = pd.DataFrame(agenda_items).sort_values('date')
         for ev_date, group in agenda_res.groupby('date'):
-            with st.expander(f"📅 {ev_date.strftime('%d.%m.%Y')} — событий: {len(group)}"):
+            with st.expander(f"📅 {ev_date.strftime('%d.%m.%Y')} — событий: {len(group)}", expanded=False):
                 for _, item in group.iterrows():
                     st.write(f"**{item['type']}**: {item['title']}")
 
 @st.fragment
 def _render_calendar_fragment(df):
-    """
-    Фрагмент кода, который обновляется независимо от всей страницы.
-    """
-    # Подготовка событий для FullCalendar
+    """Фрагмент для управления календарем без перезагрузки всей страницы"""
     calendar_events = []
     for _, row in df.iterrows():
-        # Формируем заголовок
         detail = row['info_name'] if row['info_name'] != '—' else row['stage_name']
         title = f"{row['project_name']} | {detail}"
         
-        # Определяем цвет
         is_done = row['status'] == 'Выполнено'
-        if is_done:
-            color = "#BDC3C7" # Серый для завершенных
-        else:
-            color = "#1E88E5" if row['track_type'] == 'bureaucracy' else "#43A047"
+        color = "#BDC3C7" if is_done else ("#1E88E5" if row['track_type'] == 'bureaucracy' else "#43A047")
 
         calendar_events.append({
             "title": title,
             "start": row['planned_start'].strftime("%Y-%m-%d"),
-            # FullCalendar считает дату окончания эксклюзивной, добавляем 1 день
             "end": (row['planned_end'] + timedelta(days=1)).strftime("%Y-%m-%d"),
             "color": color,
             "extendedProps": {
@@ -97,35 +111,23 @@ def _render_calendar_fragment(df):
             "headerToolbar": {"left": "prev,next", "center": "title", "right": "today"},
             "locale": "ru",
             "firstDay": 1,
-            "height": 650,
-            "selectable": True,
+            "height": 600
         }
-        
-        # Запускаем календарь
-        state = calendar(events=calendar_events, options=calendar_options, key="st_calendar_widget")
+        state = calendar(events=calendar_events, options=calendar_options, key="st_calendar_widget_v2")
 
     with col_info:
-        # Если кликнули по событию
         if state and "eventClick" in state:
             props = state["eventClick"]["event"].get("extendedProps", {})
-            
             with st.container(border=True):
-                st.markdown(f"#### 🎯 Детали задачи")
+                st.markdown(f"#### 🎯 Детали")
                 st.info(f"**{props.get('project')}**")
-                st.caption(f"🏢 {props.get('supplier')}")
-                
                 st.write(f"📅 **План:** {props.get('p_start')} — {props.get('p_end')}")
                 st.write(f"🚦 **Статус:** `{props.get('status')}`")
-                st.write(f"⏳ **Факт. начало:** {props.get('a_start')}")
-                
                 st.divider()
                 st.write(f"**Этап:** {props.get('stage')}")
                 if props.get('info') != '—':
                     st.write(f"**Вид:** {props.get('info')}")
-                
-                st.write(f"👤 **Ответственный:** {props.get('resp')}")
-                
-                with st.expander("📝 Комментарий"):
-                    st.write(props.get('comm'))
+                st.write(f"👤 **Отв.:** {props.get('resp')}")
+                st.caption(f"💬 {props.get('comm')}")
         else:
-            st.info("💡 Выберите событие в календаре для просмотра деталей.")
+            st.info("💡 Кликните на событие")
