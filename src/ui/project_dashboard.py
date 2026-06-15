@@ -236,8 +236,11 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
 
     # 2. Загружаем текущий состав проекта
     items_df = query_db("""
-        SELECT pi.item_id, d.dataset_name, i.info_name, c.full_name as tech_contact,
-                pi.provision_right
+        SELECT 
+            pi.item_id, d.dataset_name, i.info_name, 
+            i.format, i.update,
+            c.full_name as tech_contact,
+            pi.provision_right
         FROM project_items pi
         JOIN datasets d ON pi.dataset_id = d.dataset_id
         JOIN info_types i ON pi.info_id = i.info_id
@@ -246,13 +249,15 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
         ORDER BY d.dataset_name, i.info_name
     """, {"pid": proj_id_int})
 
-    st.dataframe(items_df[["dataset_name", "info_name", "tech_contact", "provision_right"]], 
+    st.dataframe(items_df[["dataset_name", "info_name", "tech_contact", "provision_right", "format", "update"]], 
                     width='stretch', hide_index=True,
                     column_config={
                         "dataset_name": "Набор данных", 
                         "info_name": "Вид сведений", 
-                        "tech_contact": "Тех. контакт",
-                        "provision_right": "Право предоставления"
+                        "tech_contact": "Технический контакт",
+                        "provision_right": "Право предоставления набора",
+                        "format": "Формат предоставления набора",
+                        "update": "Срок обновления набора"
                     })
 
     if not is_readonly:
@@ -270,8 +275,10 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
             # Список опций (ВАЖНО: Должен СТРОГО совпадать с БД)
             prov_options = [
                 'Протокол не заключён',
+                'На безвозмездной основе',
                 'Оператор и Поставщик',
                 'Только Поставщик',
+                'Только метаданные',
                 'Не предоставляется'
             ]
 

@@ -303,10 +303,12 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
             cont_opt = ["Не выбран"] + conts["full_name"].tolist()
             sel_c = st.selectbox("Технический контакт", cont_opt, key="ds_cont_sel")
             prov_options = [
+                'Протокол не заключён',
+                'На безвозмездной основе',
                 'Оператор и Поставщик',
                 'Только Поставщик',
-                'Не предоставляется',
-                'Протокол не заключён'
+                'Только метаданные',
+                'Не предоставляется'
             ]
             sel_prov_new = st.selectbox("Право предоставления *", prov_options, key="ds_prov_new")
 
