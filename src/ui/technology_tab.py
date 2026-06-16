@@ -66,7 +66,8 @@ def render_technology_tab(session, project_id, user_role="user"):
         SELECT ist.stage_progress_id, s.stage_name, ms.micro_status_name,
                ist.iteration_count, ist.planned_start, ist.planned_end,
                ist.actual_start, ist.actual_end, ist.comments,
-               u.display_name as responsible_name, ist.responsible_id          
+               u.display_name as responsible_name, ist.responsible_id,
+               (SELECT COUNT(*) FROM stage_documents WHERE item_stage_id = ist.stage_progress_id) as doc_count          
         FROM item_stages ist
         JOIN stages s ON ist.stage_id = s.stage_id
         JOIN ref_micro_statuses ms ON ist.micro_status = ms.micro_status_id
@@ -75,12 +76,18 @@ def render_technology_tab(session, project_id, user_role="user"):
         ORDER BY COALESCE(ist.actual_start, ist.planned_start) ASC, s.stage_order ASC
     """, {"iid": selected_item_id})
 
+    # Добавим визуальный индикатор скрепки в DataFrame
+    stages_df['📎'] = stages_df['doc_count'].apply(lambda x: f"📎 {x}" if x > 0 else "")
+
     # Таблица просмотра
     st.dataframe(
-        stages_df[["stage_name", "micro_status_name", "responsible_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
+        stages_df[["📎", "stage_name", "micro_status_name", "responsible_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
         width='stretch', hide_index=True,
         column_config={
-            "stage_name": "Этап", "micro_status_name": "Статус",
+            "📎": st.column_config.TextColumn("Док.", width="small"),
+            "stage_name": "Этап", 
+            "micro_status_name": "Статус",
+            "responsible_name": "Ответственный",
             "iteration_count": st.column_config.NumberColumn("Ит.", format="%d"),
             "planned_start": st.column_config.DateColumn("План. начало", format="DD.MM.YYYY"),
             "planned_end": st.column_config.DateColumn("Дедлайн", format="DD.MM.YYYY"),
@@ -180,6 +187,49 @@ def render_technology_tab(session, project_id, user_role="user"):
             st.checkbox("🚀 Дублировать этот этап для всех наборов проекта, которые еще в работе", 
                         value=False, key="tech_bulk_copy", 
                         help="Этап будет создан для всех видов сведений проекта, где еще не выполнен этап 'Публикация набора'")
+        
+        # ==========================================
+        # 📂 БЛОК РАБОТЫ С ДОКУМЕНТАМИ (Только при редактировании)
+        # ==========================================
+        if is_editing:
+            st.markdown("---")
+            st.markdown("##### 📂 Документы и ссылки")
+            
+            curr_progress_id = int(item_ids_map[sel_item])
+            
+            # 1. Загружаем список документов
+            docs = query_db("SELECT * FROM stage_documents WHERE item_stage_id = :id", {"id": curr_progress_id})
+            
+            if not docs.empty:
+                # Рисуем список текущих доков
+                for _, d in docs.iterrows():
+                    d_col1, d_col2 = st.columns([0.8, 0.2])
+                    with d_col1:
+                        st.link_button(f"📄 {d['doc_name']}", d['doc_url'], use_container_width=True)
+                    with d_col2:
+                        if st.button("🗑", key=f"del_doc_tech_{d['doc_id']}", help="Удалить ссылку"):
+                            session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"), {"id": int(d['doc_id'])})
+                            session.commit(); clear_cache(); st.rerun()
+            else:
+                st.caption("К этому этапу еще не прикреплено ни одного документа.")
+
+            # 2. Форма добавления нового документа
+            with st.expander("➕ Прикрепить ссылку на документ"):
+                new_doc_name = st.text_input("Название", key="tech_doc_name_in", placeholder="Письмо № 25/1111 от 16.02.2026")
+                new_doc_url = st.text_input("URL-ссылка на файл", key="tech_doc_url_in", placeholder="http://repo.local/file.pdf")
+                if st.button("📎 Добавить документ", key="btn_tech_add_doc"):
+                    if new_doc_name and new_doc_url:
+                        try:
+                            session.execute(text("""
+                                INSERT INTO stage_documents (item_stage_id, doc_name, doc_url)
+                                VALUES (:iid, :name, :url)
+                            """), {"iid": curr_progress_id, "name": new_doc_name, "url": new_doc_url})
+                            session.commit(); clear_cache(); st.success("Документ добавлен!"); st.rerun()
+                        except Exception as e: st.error(f"Ошибка: {e}")
+                    else:
+                        st.error("Заполните название и ссылку")
+            st.markdown("---")
+        
         # --- КНОПКИ ДЕЙСТВИЙ ---
         cb1, cb2 = st.columns([3, 1])
 

@@ -33,7 +33,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         SELECT ps.stage_progress_id, s.stage_name, ms.micro_status_name,
                ps.iteration_count, ps.planned_start, ps.planned_end,
                ps.actual_start, ps.actual_end, ps.comments,
-               u.display_name as responsible_name, ps.responsible_id                   
+               u.display_name as responsible_name, ps.responsible_id,
+               (SELECT COUNT(*) FROM stage_documents WHERE project_stage_id = ps.stage_progress_id) as doc_count -- 👈 Счётчик
         FROM project_stages ps
         JOIN stages s ON ps.stage_id = s.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
@@ -42,11 +43,17 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         ORDER BY COALESCE(ps.actual_start, ps.planned_start) ASC, s.stage_order ASC
     """, {"pid": project_id})
 
+    # Добавим визуальный индикатор скрепки в DataFrame
+    ps_df['📎'] = ps_df['doc_count'].apply(lambda x: f"📎 {x}" if x > 0 else "")
+
     st.dataframe(
-        ps_df[["stage_name", "micro_status_name", "responsible_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
+        ps_df[["📎", "stage_name", "micro_status_name", "responsible_name", "iteration_count", "planned_start", "planned_end", "actual_start", "actual_end", "comments"]], 
         width='stretch', hide_index=True,
         column_config={
-            "stage_name": "Этап", "micro_status_name": "Статус",
+            "📎": st.column_config.TextColumn("Док.", width="small"),
+            "stage_name": "Этап", 
+            "micro_status_name": "Статус",
+            "responsible_name": "Ответственный",
             "iteration_count": st.column_config.NumberColumn("Ит.", format="%d"),
             "planned_start": st.column_config.DateColumn("План. начало", format="DD.MM.YYYY"),
             "planned_end": st.column_config.DateColumn("Дедлайн", format="DD.MM.YYYY"),
@@ -150,8 +157,47 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
             st.date_input("🏁 Фактическое окончание", key="buro_a_end_in", value=None)
 
         st.text_area("Комментарий", key="buro_comments_in")
+
         if not is_editing:
             st.checkbox("☑️ Автоматически закрыть предыдущий этап", value=True, key="buro_auto_close")
+
+        # ==========================================
+        # 📂 БЛОК РАБОТЫ С ДОКУМЕНТАМИ (Только при редактировании)
+        # ==========================================
+        if is_editing:
+            st.markdown("---")
+            st.markdown("##### 📂 Документы и ссылки")
+            curr_progress_id = int(item_ids_map[sel_item])
+            docs = query_db("SELECT * FROM stage_documents WHERE project_stage_id = :id", {"id": curr_progress_id})
+            
+            if not docs.empty:
+                for _, d in docs.iterrows():
+                    d_col1, d_col2 = st.columns([0.8, 0.2])
+                    with d_col1:
+                        st.link_button(f"📄 {d['doc_name']}", d['doc_url'], use_container_width=True)
+                    with d_col2:
+                        if st.button("🗑", key=f"del_doc_buro_{d['doc_id']}", help="Удалить ссылку"):
+                            session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"), {"id": int(d['doc_id'])})
+                            session.commit(); clear_cache(); st.rerun()
+            else:
+                st.caption("К этому этапу еще не прикреплено ни одного документа.")
+
+            # 2. Форма добавления нового документа
+            with st.expander("➕ Прикрепить ссылку на документ"):
+                new_doc_name = st.text_input("Название", key="new_doc_name_in", placeholder="Письмо № 25/1111 от 16.02.2026")
+                new_doc_url = st.text_input("URL-ссылка на файл", key="buro_doc_url_in", placeholder="http://repo.local/file.pdf")
+                if st.button("📎 Добавить документ", key="btn_buro_add_doc"):
+                    if new_doc_name and new_doc_url:
+                        try:
+                            session.execute(text("""
+                                INSERT INTO stage_documents (project_stage_id, doc_name, doc_url)
+                                VALUES (:psid, :name, :url)
+                            """), {"psid": curr_progress_id, "name": new_doc_name, "url": new_doc_url})
+                            session.commit(); clear_cache(); st.success("Документ добавлен!"); st.rerun()
+                        except Exception as e: st.error(f"Ошибка: {e}")
+                    else:
+                        st.error("Заполните название и ссылку")
+            st.markdown("---")
 
         # СОХРАНЕНИЕ
         if st.button("💾 Сохранить изменения", type="primary", use_container_width=True):
