@@ -30,33 +30,55 @@ def render_reports_tab():
 # ==========================================
 def _render_agreement_registry():
     df = get_analytics_snapshot()
-    # Фильтруем: Бюрократия, этап 8, статус Выполнено
-    mask = (df['track_type'] == 'bureaucracy') & (df['stage_order'] == 8) & (df['status'] == 'Выполнено')
+    
+    # 🟢 УСИЛЕННЫЙ ФИЛЬТР: 
+    # 1. Трек Бюрократия 
+    # 2. Название этапа "Документ подписан" (или системный код CONTRACT_SIGNED, если заполнил)
+    # 3. Статус "Выполнено"
+    # 4. ОБЯЗАТЕЛЬНО: Признак проекта первичного подключения (is_agreement_project)
+    mask = (
+        (df['track_type'] == 'bureaucracy') & 
+        ((df['stage_name'] == 'Документ подписан') | (df['stage_code'] == 'CONTRACT_SIGNED')) & 
+        (df['status'] == 'Выполнено') &
+        (df['is_agreement_project'] == True) # 👈 Тот самый фильтр
+    )
+    
     data = df[mask].copy()
 
     if data.empty:
-        st.info("Подписанные соглашения не найдены.")
+        st.info("Подписанные соглашения не найдены (убедитесь, что в паспорте проекта стоит флаг 'Проект первичного подключения').")
         return
 
+    # Сортируем по дате подписания (actual_end)
     data = data.sort_values('actual_end')
     data['Дата соглашения'] = data['actual_end'].dt.date
     
-    # Формируем номер 1/2026
+    # Формируем порядковый номер и формат 1/2026
     data = data.reset_index(drop=True)
     data['Номер'] = data.index + 1
     data['№ Соглашения'] = data.apply(lambda x: f"{x['Номер']}/{x['actual_end'].year}", axis=1)
 
-    display_df = data[['№ Соглашения', 'supplier_name', 'Дата соглашения']].rename(columns={'supplier_name': 'Поставщик'})
+    display_df = data[['№ Соглашения', 'supplier_name', 'Дата соглашения']].rename(
+        columns={'supplier_name': 'Наименование поставщика'}
+    )
     
-    st.dataframe(display_df, width="stretch", hide_index=True,
+    # Умный расчет высоты (35px на строку + заголовок)
+    calc_h = (len(display_df) * 35) + 40
+    
+    st.dataframe(display_df, width="stretch", hide_index=True, height=min(500, calc_h),
                  column_config={"Дата соглашения": st.column_config.DateColumn(format="DD.MM.YYYY")})
 
-    # Excel
+    # Экспорт в Excel (с тем же набором колонок)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         display_df.to_excel(writer, index=False, sheet_name='Реестр')
     
-    st.download_button("📥 Скачать Excel", buffer.getvalue(), "registry.xlsx", "application/vnd.ms-excel")
+    st.download_button(
+        label="📥 Скачать Реестр соглашений (Excel)", 
+        data=buffer.getvalue(), 
+        file_name=f"agreements_registry_{datetime.now().strftime('%d_%m_%Y')}.xlsx", 
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # ==========================================
 # 2. ХОД ВЫПОЛНЕНИЯ (БЮРОКРАТИЯ)

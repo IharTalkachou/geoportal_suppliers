@@ -2,15 +2,18 @@ import streamlit as st
 import pandas as pd
 from config.cache import query_db
 
-@st.cache_data(ttl=60) # Уменьшили до 60 секунд
+@st.cache_data(ttl=60)
 def get_analytics_snapshot():
     """
     Централизованный сбор данных для всей аналитики.
+    Обновлено: добавлено поле stage_code.
     """
     query = """
         SELECT 
             p.project_id, p.project_name, s.supplier_name, s.is_mandatory,
-            stg.stage_name, stg.stage_order, stg.stage_type, stg.track_category,
+            stg.stage_name, stg.stage_order, stg.stage_type, 
+            stg.stage_code,
+            stg.track_category,
             COALESCE(stg.duration_days, 14) as norm_days,
             ps.iteration_count,
             ms.micro_status_name as status,
@@ -30,7 +33,9 @@ def get_analytics_snapshot():
         
         SELECT 
             p.project_id, p.project_name, s.supplier_name, s.is_mandatory,
-            stg.stage_name, stg.stage_order, stg.stage_type, stg.track_category,
+            stg.stage_name, stg.stage_order, stg.stage_type, 
+            stg.stage_code,
+            stg.track_category,
             COALESCE(stg.duration_days, 14) as norm_days,
             ist.iteration_count,
             ms.micro_status_name as status,
@@ -56,5 +61,4 @@ def get_analytics_snapshot():
     return df
 
 def clear_analytics_cache():
-    """Служебная функция для очистки кэша аналитики"""
     st.cache_data.clear()
