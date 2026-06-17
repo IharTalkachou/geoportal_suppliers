@@ -2,6 +2,11 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from sqlalchemy import text
+import io
+from docx import Document
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+
 from config.cache import query_db, clear_cache
 from config.auth import log_action
 
@@ -20,7 +25,8 @@ def render_monthly_report_tab(session):
     col_y, col_m, col_btn = st.columns([1, 1, 1])
     
     with col_y:
-        selected_year = st.selectbox("Год", [2026, 2027, 2028, 2029, 2030], index=1)
+        years = [y for y in range(2026, 2026+50)]
+        selected_year = st.selectbox("Год", years, years.index(date.today().year))
     with col_m:
         months = {
             1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель", 
@@ -118,4 +124,77 @@ def render_monthly_report_tab(session):
                 st.error(f"Ошибка сохранения: {e}")
 
     with cb2:
-        st.button("📥 Сгенерировать .docx (Скоро)", use_container_width=True, disabled=True)
+        # Генерируем файл на лету из текущих (даже не сохраненных еще) данных в полях ввода
+        docx_buffer = generate_docx_file(report_date, updated_sections, months[selected_month_num])
+        
+        st.download_button(
+            label="📥 Скачать .docx",
+            data=docx_buffer,
+            file_name=f"Report_NIPD_{selected_year}_{selected_month_num}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+
+def generate_docx_file(report_date, sections, month_name):
+    """Создает DOCX документ в памяти"""
+    doc = Document()
+    
+    # Заголовок документа
+    #title = doc.add_heading(f"Отчёт по НИПД за {month_name} {report_date.year} г.", 0)
+    #title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # --- 1. ГЛОБАЛЬНЫЕ НАСТРОЙКИ СТИЛЯ ---
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Times New Roman'
+    font.size = Pt(14)
+
+    # Настройка полей страницы (Стандарт: Левое 3см, остальное по 1.5-2см)
+    for section in doc.sections:
+        section.top_margin = Cm(2)
+        section.bottom_margin = Cm(2)
+        section.left_margin = Cm(3)
+        section.right_margin = Cm(1.5)
+
+    # 2. Перебор разделов
+    for key in sorted(sections.keys()):
+        data = sections[key]
+        if not data.get('active'):
+            continue
+        
+        # Добавляем название раздела
+        #doc.add_heading(data['title'], level=1)
+        
+        # Добавляем содержимое
+        content = data.get('content', '')
+        if content:
+            paragraphs = content.split('\n')
+            for p_text in paragraphs:
+                if p_text.strip():
+                    p = doc.add_paragraph()
+                    fmt = p.paragraph_format
+                    
+                    # Стандартное форматирование абзаца
+                    fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE # Интервал одиночный
+                    fmt.space_after = Pt(0)                             # Убираем лишние отступы между абзацами
+                    fmt.space_before = Pt(0)
+                    
+                    if p_text.strip().startswith(('-', '*')):
+                        # Маркированный список
+                        p.style = 'List Bullet'
+                        p.text = p_text.strip()[1:].strip()
+                    else:
+                        # Обычный текст с "красной строкой"
+                        p.text = p_text.strip()
+                        fmt.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY # По ширине
+                        fmt.first_line_indent = Cm(1.25)            # Отступ 1.25 см
+        else:
+            # Если раздел активен, но пуст - можно либо ничего не писать, 
+            # либо оставить пустую строку
+            doc.add_paragraph("")
+
+    # Сохраняем в буфер
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
