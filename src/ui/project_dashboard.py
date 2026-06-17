@@ -10,31 +10,23 @@ def render_project_dashboard(session, user_role="user"):
     st.subheader("📂 Управление проектами")
     is_readonly = (user_role == "user")
 
-    # ==========================================
-    # 🧠 1. ОБРАБОТКА ВХОДЯЩИХ ФИЛЬТРОВ (DEEP LINKING)
-    # ==========================================
-    
-    # 1.1. Получаем справочник поставщиков для маппинга
+    # 1. ОБРАБОТКА ВХОДЯЩИХ ФИЛЬТРОВ
     suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
     sup_map = dict(zip(suppliers["supplier_name"], suppliers["supplier_id"]))
     inv_sup_map = {v: k for k, v in sup_map.items()}
 
-    # 1.2. Проверяем, не пришли ли мы из раздела Поставщиков
     inc_sup_id = st.session_state.get("filter_supplier_id")
     inc_prj_id = st.session_state.get("filter_project_id")
 
     if inc_sup_id:
         st.session_state["dash_sup_filter"] = inv_sup_map.get(inc_sup_id, "Все")
-        st.session_state["filter_supplier_id"] = None # Очищаем
+        st.session_state["filter_supplier_id"] = None
         
     if inc_prj_id:
         st.session_state["selected_project_id"] = int(inc_prj_id)
-        st.session_state["filter_project_id"] = None # Очищаем
+        st.session_state["filter_project_id"] = None
 
-    # ==========================================
-    # 🔍 2. ГЛОБАЛЬНЫЕ ФИЛЬТРЫ
-    # ==========================================
-    
+    # 2. ГЛОБАЛЬНЫЕ ФИЛЬТРЫ
     if "proj_list_ver" not in st.session_state:
         st.session_state["proj_list_ver"] = 0
 
@@ -74,18 +66,68 @@ def render_project_dashboard(session, user_role="user"):
     
     if selected_proj_id != st.session_state.get("selected_project_id"):
         st.session_state["selected_project_id"] = selected_proj_id
-        # Логируем просмотр проекта
         if selected_proj_id:
-            log_action(st.session_state["auth"]["user_id"], "VIEW_PROJECT", "projects", selected_proj_id)
+            log_action(st.session_state["auth"]["user_id"], "VIEW_PROJECT", "projects", int(selected_proj_id))
         st.rerun()
 
+    # 3. 🟢 ЛОГИКА СОЗДАНИЯ НОВОГО ПРОЕКТА
     if not st.session_state.get("selected_project_id"):
-        st.info("👆 Выберите поставщика и проект для начала работы.")
+        if selected_sup != "Все":
+            st.info("💡 Выберите проект поставщика или создайте новый проект")
+            if not is_readonly:
+                with st.expander("➕ Создать новый проект для этого поставщика"):
+                    # 🟢 МЫ УБРАЛИ st.form, чтобы кнопка могла напрямую влиять на session_state
+                    # Это сделает процесс "создать и открыть" более надежным
+                    new_p_name = st.text_input("Название проекта *", key="new_proj_name_field")
+                    new_p_agr = st.checkbox("Проект Соглашения (первичное подключение)", key="new_proj_agr_field")
+                    
+                    if st.button("🚀 Создать и открыть", use_container_width=True):
+                        if new_p_name:
+                            try:
+                                s_id = int(sup_map[selected_sup])
+                                # 1. Вставка в БД
+                                new_id_val = session.execute(text("""
+                                    INSERT INTO projects (supplier_id, project_name, status, is_agreement_project) 
+                                    VALUES (:sid, :pn, 1, :is_agr) RETURNING project_id
+                                """), {"sid": s_id, "pn": new_p_name.strip(), "is_agr": new_p_agr}).scalar()
+                                
+                                # 2. ЛОГИРОВАНИЕ
+                                log_action(
+                                    user_id=st.session_state["auth"]["user_id"], 
+                                    action="CREATE_PROJECT", 
+                                    target_table="projects", 
+                                    target_id=int(new_id_val), 
+                                    new={"name": new_p_name, "is_agreement": new_p_agr}
+                                )
+                                
+                                session.commit()
+                                clear_cache() # Сбрасываем кэш запросов
+                                
+                                # 3. Увеличиваем версию, чтобы селектбокс обновил список из БД
+                                st.session_state["proj_list_ver"] += 1
+                                # Принудительно ставим новый ID как выбранный
+                                st.session_state["selected_project_id"] = int(new_id_val)
+                                
+                                st.toast(f"✅ Проект '{new_p_name}' создан и открыт!")
+                                # Даем небольшую паузу, чтобы тост успел инициироваться перед рераном
+                                import time
+                                time.sleep(0.5)
+                                st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"Ошибка при создании: {e}")
+                                session.rollback()
+                        else:
+                            st.error("❌ Укажите название проекта")
+        else:
+            st.info("👆 Выберите поставщика и проект для начала работы.")
         return 
 
+    # 4. ЗАГРУЗКА ДАННЫХ ПРОЕКТА
     proj_id_int = int(st.session_state["selected_project_id"])
-
-    proj_data = query_db("""
+    
+    # Сначала получаем результат запроса
+    proj_query_res = query_db("""
         SELECT p.project_id, p.supplier_id, p.project_name, 
                s.supplier_name, c.full_name, rs.status_name, p.notes,
                p.is_agreement_project
@@ -94,12 +136,17 @@ def render_project_dashboard(session, user_role="user"):
         LEFT JOIN contacts c ON p.main_contact_id = c.contact_id
         LEFT JOIN ref_statuses rs ON p.status = rs.status_id
         WHERE p.project_id = :pid
-    """, {"pid": proj_id_int}).iloc[0]
+    """, {"pid": proj_id_int})
 
-    # ==========================================
-    # 📑 3. ПОД-НАВИГАЦИЯ (SEGMENTED CONTROL)
-    # ==========================================
+    # Если проект не найден (например, только что удален)
+    if proj_query_res.empty:
+        st.session_state["selected_project_id"] = None
+        st.session_state["proj_list_ver"] += 1 # Сбрасываем виджет выбора
+        st.rerun()
     
+    proj_data = proj_query_res.iloc[0]
+
+    # 5. ПОД-НАВИГАЦИЯ
     sub_nav = st.segmented_control(
         "Разделы проекта",
         options=["📄 Паспорт", "📦 Состав", "📈 Этапы"],
@@ -125,10 +172,10 @@ def render_project_dashboard(session, user_role="user"):
 # ==========================================
 
 def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
-    """Вынесенный паспорт проекта с обратной ссылкой"""
-
-    # Сбор ответственных (твой код)
-    combined_resp_query = """
+    """Паспорт проекта с редактированием и удалением"""
+    
+    # Сбор команды (ответственных)
+    resp_df = query_db("""
         SELECT DISTINCT u.display_name FROM users u
         WHERE u.user_id IN (
             SELECT responsible_id FROM project_stages WHERE project_id = :pid AND responsible_id IS NOT NULL
@@ -136,49 +183,77 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
             SELECT responsible_id FROM item_stages 
             WHERE item_id IN (SELECT item_id FROM project_items WHERE project_id = :pid) AND responsible_id IS NOT NULL
         )
-    """
-    resp_df = query_db(combined_resp_query, {"pid": proj_id_int})
+    """, {"pid": proj_id_int})
     responsibles_str = ", ".join(resp_df["display_name"].tolist()) if not resp_df.empty else "Не назначены"
-         
-    # дебаг: функция-коллбэк для возврата
-    def go_to_supplier_callback(sup_id):
-        st.session_state["main_nav"] = "📁 Поставщики"
-        st.session_state["filter_supplier_id"] = sup_id
 
-    # Визуальная карточка
     with st.container(border=True):
         col_main, col_side = st.columns([2, 1])
-        
         with col_main:
             st.markdown(f"### {proj_data['project_name']}")
             st.markdown(f"**🏢 Поставщик:** {proj_data['supplier_name']}")
-
-            # 🚀 ОБРАТНАЯ ССЫЛКА
-            if st.button(
+            
+            # 1. ОПРЕДЕЛЯЕМ КОЛЛБЭК ВНУТРИ ФУНКЦИИ
+            def nav_to_supplier_cb(sid):
+                st.session_state["main_nav"] = "📁 Поставщики"
+                st.session_state["filter_supplier_id"] = sid
+                # Логируем переход
+                log_action(
+                    user_id=st.session_state["auth"]["user_id"],
+                    action="NAVIGATE_TO_SUPPLIER",
+                    target_table="suppliers",
+                    target_id=sid
+                )
+                
+            # 2. ПРИВЯЗЫВАЕМ ЕГО К КНОПКЕ
+            st.button(
                 "🏢 Перейти к карточке поставщика", 
                 key="btn_go_to_sup",
-                on_click=go_to_supplier_callback,
-                args=(int(proj_data['supplier_id']),)
-            ):
-                st.session_state["main_nav"] = "📁 Поставщики"
-                st.session_state["filter_supplier_id"] = int(proj_data['supplier_id'])
-                st.rerun()
-                
+                on_click=nav_to_supplier_cb,
+                args=(int(proj_data['supplier_id']),) # Передаем ID поставщика в коллбэк
+            )
+            
             st.markdown(f"**📊 Статус:** {proj_data['status_name']}")
             st.markdown(f"**👥 Команда:** {responsibles_str}")
-        
         with col_side:
             if proj_data.get('is_agreement_project'):
-                st.warning("📜 Проект первичного заключения Соглашения")
+                st.warning("📜 Проект Соглашения")
             st.markdown(f"**👤 Контакт:** {proj_data['full_name'] or '—'}")
             st.info(f"📝 {proj_data['notes'] or 'Нет примечаний'}")
 
-    # Блок редактирования (твой код)
     if not is_readonly:
-        if st.button("✏️ Изменить реквизиты проекта", type="secondary"):
-            st.session_state["dash_edit_mode"] = not st.session_state.get("dash_edit_mode", False)
-            st.rerun()
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if st.button("✏️ Изменить реквизиты", type="secondary", use_container_width=True):
+                st.session_state["dash_edit_mode"] = not st.session_state.get("dash_edit_mode", False)
+                st.rerun()
         
+        with c2:
+            # БЛОК УДАЛЕНИЯ ПРОЕКТА
+            if st.button("🗑 Удалить проект", type="secondary", use_container_width=True, key="del_proj_btn"):
+                # Проверки
+                has_items = session.execute(text("SELECT 1 FROM project_items WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
+                has_stages = session.execute(text("SELECT 1 FROM project_stages WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
+                
+                if has_items or has_stages:
+                    st.error("❌ Нельзя удалить проект: в нем уже есть состав или этапы.")
+                else:
+                    try:
+                        # ЛОГИРОВАНИЕ ПЕРЕД УДАЛЕНИЕМ
+                        log_action(st.session_state["auth"]["user_id"], "DELETE_PROJECT", "projects", proj_id_int, 
+                                   old={"name": proj_data['project_name']})
+                        
+                        session.execute(text("DELETE FROM projects WHERE project_id = :pid"), {"pid": proj_id_int})
+                        session.commit()
+                        clear_cache()
+                        
+                        # ВАЖНО: Очищаем всё и меняем версию виджета
+                        st.session_state["selected_project_id"] = None
+                        st.session_state["proj_list_ver"] += 1 
+                        st.success("Проект успешно удален")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка удаления: {e}"); session.rollback()
+
         if st.session_state.get("dash_edit_mode"):  
             with st.form("edit_proj_form"):
                 st.markdown("#### 📝 Редактирование реквизитов")
