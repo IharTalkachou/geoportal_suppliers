@@ -465,83 +465,107 @@ def render_supplier_form(session, existing_data=None):
                 st.error(f"Ошибка БД: {e}"); session.rollback()
 
 def render_contacts_manager(session, supplier_id, is_readonly):
-    """Управление контактами"""
+    """Улучшенное управление контактами: Список | Детали | CRUD"""
     contacts_df = query_db("""
         SELECT contact_id, full_name, position, email, phone, notes
         FROM contacts WHERE supplier_id = :sid ORDER BY full_name
     """, {"sid": supplier_id})
     
-    if not contacts_df.empty:
-        st.dataframe(contacts_df[["full_name", "position", "email", "phone", "notes"]], 
-                     width="stretch", hide_index=True)
-    else:
+    if contacts_df.empty:
         st.info("📭 У этого поставщика пока нет контактов.")
+        if not is_readonly:
+            with st.expander("➕ Добавить первый контакт"):
+                _render_contact_form_standalone(session, supplier_id)
+        return
+
+    # Создаем три колонки
+    col_list, col_view, col_form = st.columns([0.25, 0.35, 0.4])
+
+    with col_list:
+        st.markdown("##### 👥 Список")
+        # Выбор контакта через таблицу
+        selection = st.dataframe(
+            contacts_df[["full_name"]], 
+            width="stretch", hide_index=True,
+            on_select="rerun", selection_mode="single-row",
+            key=f"cont_list_{supplier_id}",
+            column_config={"full_name": "ФИО"}
+        )
+        
+        selected_rows = selection.get("selection", {}).get("rows", [])
+        is_selected = len(selected_rows) > 0
+        curr_contact = contacts_df.iloc[selected_rows[0]] if is_selected else None
+
+    with col_view:
+        st.markdown("##### 🔍 Детали")
+        if is_selected:
+            with st.container(border=True):
+                st.markdown(f"### {curr_contact['full_name']}")
+                st.write(f"**Должность:** {curr_contact['position'] or '—'}")
+                st.write(f"**Email:** {curr_contact['email'] or '—'}")
+                st.write(f"**Телефон:** {curr_contact['phone'] or '—'}")
+                st.divider()
+                st.caption("Примечание:")
+                st.write(curr_contact['notes'] or "Нет данных")
+        else:
+            st.info("👈 Выберите контакт в списке слева")
+
+    with col_form:
+        if not is_readonly:
+            st.markdown("##### ✏️ Редактирование")
+            # Если выбран контакт - режим редактирования, если нет - кнопка "Создать новый"
+            if is_selected:
+                # Вспомогательная функция формы (код ниже)
+                _render_contact_form_standalone(session, supplier_id, curr_contact)
+                
+                # Кнопка удаления в самом низу колонки
+                st.write("<br>", unsafe_allow_html=True)
+                if st.button("🗑 Удалить контакт", type="secondary", use_container_width=True, key="del_cont_btn"):
+                    session.execute(text("DELETE FROM contacts WHERE contact_id = :id"), {"id": int(curr_contact['contact_id'])})
+                    session.commit(); clear_cache(); st.rerun()
+            else:
+                with st.container(border=True):
+                    st.write("Хотите добавить нового человека?")
+                    if st.button("➕ Создать новый контакт", use_container_width=True):
+                        st.session_state["force_new_contact"] = True # Временный флаг
+                
+                if st.session_state.get("force_new_contact"):
+                    _render_contact_form_standalone(session, supplier_id)
+
+def _render_contact_form_standalone(session, supplier_id, existing_data=None):
+    """Вынесенная форма контакта для встраивания в колонку"""
+    is_edit = existing_data is not None
     
-    if not is_readonly:
-        with st.expander("➕ Добавить / ✏️ Редактировать контакт"):
-            contact_options = ["(Новый контакт)"] + (contacts_df["full_name"].tolist() if not contacts_df.empty else [])
-            sel_contact = st.selectbox("Выберите контакт:", contact_options, key="cont_sel")
-            is_editing = sel_contact != "(Новый контакт)"
-
-            if "cont_sel_prev" not in st.session_state or st.session_state["cont_sel_prev"] != sel_contact:
-                if is_editing:
-                    curr = contacts_df[contacts_df["full_name"] == sel_contact].iloc[0]
-                    st.session_state["cont_fn_in"] = curr["full_name"]
-                    st.session_state["cont_pos_in"] = curr["position"] or ""
-                    st.session_state["cont_em_in"] = curr["email"] or ""
-                    st.session_state["cont_ph_in"] = curr["phone"] or ""
-                    st.session_state["cont_nt_in"] = curr["notes"] or ""
-                else:
-                    for k in ["cont_fn_in", "cont_pos_in", "cont_em_in", "cont_ph_in", "cont_nt_in"]:
-                        st.session_state[k] = ""
-                st.session_state["cont_sel_prev"] = sel_contact
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text_input("ФИО / Контакт *", key="cont_fn_in")
-                st.text_input("Должность", key="cont_pos_in")
-            with col2:
-                st.text_input("Email", key="cont_em_in")
-                st.text_input("Телефон", key="cont_ph_in")
-            st.text_area("Примечание", height=60, key="cont_nt_in")
-
-            col_btn, col_del = st.columns([3, 1])
-            with col_btn:
-                if st.button("💾 Сохранить контакт", type="primary"):
-                    fn = st.session_state["cont_fn_in"].strip()
-                    if not fn:
-                        st.error("❌ Имя контакта обязательно")
-                        st.stop()
-                    try:
-                        if is_editing:
-                            curr = contacts_df[contacts_df["full_name"] == sel_contact].iloc[0]
-                            cid = int(curr["contact_id"])
-                            session.execute(text("""
-                                UPDATE contacts SET full_name=:n, position=:p, email=:e, phone=:ph, notes=:nt
-                                WHERE contact_id=:id
-                            """), {"n": fn, "p": st.session_state["cont_pos_in"], "e": st.session_state["cont_em_in"],
-                                   "ph": st.session_state["cont_ph_in"], "nt": st.session_state["cont_nt_in"], "id": cid})
-                        else:
-                            session.execute(text("""
-                                INSERT INTO contacts (full_name, supplier_id, position, email, phone, notes)
-                                VALUES (:n, :sid, :p, :e, :ph, :nt)
-                            """), {"n": fn, "sid": supplier_id, "p": st.session_state["cont_pos_in"],
-                                   "e": st.session_state["cont_em_in"], "ph": st.session_state["cont_ph_in"], 
-                                   "nt": st.session_state["cont_nt_in"]})
-                        session.commit()
-                        st.cache_data.clear()
-                        st.success("✅ Готово!"); st.rerun()
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}"); session.rollback()
-            
-            with col_del:
-                if is_editing and st.button("🗑 Удалить", type="secondary"):
-                    try:
-                        curr = contacts_df[contacts_df["full_name"] == sel_contact].iloc[0]
-                        session.execute(text("DELETE FROM contacts WHERE contact_id = :id"), {"id": int(curr["contact_id"])})
-                        session.commit(); st.cache_data.clear(); st.rerun()
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}"); session.rollback()
+    # Чтобы значения в полях обновлялись при смене контакта, используем ключи с ID
+    cid = existing_data['contact_id'] if is_edit else "new"
+    
+    with st.container(border=True):
+        fn = st.text_input("ФИО *", value=existing_data['full_name'] if is_edit else "", key=f"fn_{cid}")
+        pos = st.text_input("Должность", value=existing_data['position'] if is_edit else "", key=f"pos_{cid}")
+        em = st.text_input("Email", value=existing_data['email'] if is_edit else "", key=f"em_{cid}")
+        ph = st.text_input("Телефон", value=existing_data['phone'] if is_edit else "", key=f"ph_{cid}")
+        nt = st.text_area("Примечание", value=existing_data['notes'] if is_edit else "", key=f"nt_{cid}", height=100)
+        
+        if st.button("💾 Сохранить", type="primary", use_container_width=True, key=f"save_cont_{cid}"):
+            if not fn:
+                st.error("ФИО обязательно")
+            else:
+                try:
+                    if is_edit:
+                        session.execute(text("""
+                            UPDATE contacts SET full_name=:n, position=:p, email=:e, phone=:ph, notes=:nt
+                            WHERE contact_id=:id
+                        """), {"n": fn, "p": pos, "e": em, "ph": ph, "nt": nt, "id": int(existing_data['contact_id'])})
+                    else:
+                        session.execute(text("""
+                            INSERT INTO contacts (full_name, supplier_id, position, email, phone, notes)
+                            VALUES (:n, :sid, :p, :e, :ph, :nt)
+                        """), {"n": fn, "sid": int(supplier_id), "p": pos, "e": em, "ph": ph, "nt": nt})
+                    session.commit(); clear_cache()
+                    st.session_state.pop("force_new_contact", None)
+                    st.success("Готово!"); st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}"); session.rollback()
 
 def render_surveys_manager(session, supplier_id, is_readonly):
     """Управление опросниками: Реестр + кнопки действий"""

@@ -141,23 +141,61 @@ def render_info_types_manager(session, is_readonly):
 
     info_df = query_db("""
         SELECT it.info_id, it.info_name, it.type, it.format, it."update",
-               COALESCE(STRING_AGG(DISTINCT s.supplier_name, ', ' ORDER BY s.supplier_name), '—') AS suppliers
+               s.supplier_name, s.supplier_id
         FROM info_types it
         LEFT JOIN project_items pi ON it.info_id = pi.info_id
         LEFT JOIN projects p ON pi.project_id = p.project_id
         LEFT JOIN suppliers s ON p.supplier_id = s.supplier_id
         WHERE it.dataset_id = :did
-        GROUP BY it.info_id, it.info_name, it.type, it.format, it."update"
         ORDER BY it.info_name
     """, {"did": sel_ds_id})
 
-    # 🔍 UI SIDE-QUEST: Быстрый поиск по видам
-    search_q = st.text_input("🔍 Быстрый поиск по названию вида...", key="info_search_q").lower()
-    display_info = info_df.copy()
-    if search_q:
-        display_info = display_info[display_info["info_name"].str.lower().str.contains(search_q)]
+    if info_df.empty:
+        st.info("В этом наборе еще нет видов сведений.")
+    else:
+        st.markdown(f"#### 📄 Виды сведений: {sel_ds_name}")
+        
+        # Группируем данные по названию вида (чтобы объединить разных поставщиков в одну карточку)
+        grouped = info_df.groupby("info_name")
+        
+        # Создаем сетку: 4 колонки
+        cols = st.columns(4)
+        
+        # Функция-коллбэк для перехода (определяем один раз)
+        def go_to_sup_callback(sid):
+            st.session_state["main_nav"] = "📁 Поставщики"
+            st.session_state["filter_supplier_id"] = sid
 
-    st.dataframe(display_info[["info_name", "type", "format", "update", "suppliers"]], width="stretch", hide_index=True)
+        # Итерируемся по группам с индексом для распределения по колонкам
+        for idx, (info_name, group) in enumerate(grouped):
+            with cols[idx % 4]:
+                with st.container(border=True):
+                    # Заголовок вида сведений
+                    st.markdown(f"**{info_name}**")
+                    
+                    # Компактные мета-данные
+                    row = group.iloc[0]
+                    st.caption(f"🛠 {row['type']} | 📂 {row['format']}")
+                    st.caption(f"📅 Обновление: {row['update']}")
+                    
+                    # Блок поставщиков (маленькие кнопки)
+                    st.markdown("---")
+                    st.markdown("<div style='font-size: 0.8rem; margin-bottom: 5px;'>Поставщики:</div>", unsafe_allow_html=True)
+                    
+                    valid_sups = group[group['supplier_id'].notna()]
+                    if not valid_sups.empty:
+                        for _, s_row in valid_sups.iterrows():
+                            st.button(
+                                f"🏢 {s_row['supplier_name']}", 
+                                key=f"btn_nav_{idx}_{s_row['supplier_id']}",
+                                on_click=go_to_sup_callback,
+                                args=(int(s_row['supplier_id']),),
+                                use_container_width=True
+                                # Мы можем добавить здесь небольшой CSS, чтобы кнопка была еще меньше, 
+                                # но стандартный use_container_width в колонке и так сделает её компактной
+                            )
+                    else:
+                        st.caption("Не используется в проектах")
 
     if not is_readonly:
         with st.expander("➕ Добавить / ✏️ Редактировать вид"):
