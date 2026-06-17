@@ -11,74 +11,124 @@ def render_reports_tab():
     
     report_type = st.selectbox("Выберите тип отчёта:", [
         "1. Реестр подписанных соглашений", 
-        "2. Сводный отчёт о ходе выполнения (Бюрократия)", 
+        "2. Сводный отчёт о ходе выполнения", 
         "3. Реестр предоставляемых сведений", 
-        "4. Просмотр технических опросников"
+        "4. Реестр протоколов совещаний",
+        "5. Просмотр технических опросников"
     ], key="report_type_sel")
 
     if report_type == "1. Реестр подписанных соглашений":
         _render_agreement_registry()
-    elif report_type == "2. Сводный отчёт о ходе выполнения (Бюрократия)":
+    elif report_type == "2. Сводный отчёт о ходе выполнения":
         _render_bureaucracy_progress()
     elif report_type == "3. Реестр предоставляемых сведений":
         _render_provided_data_registry()
-    elif report_type == "4. Просмотр технических опросников":
+    elif report_type == "4. Реестр протоколов совещаний":
+        _render_meeting_minutes_registry() # 👈 ВЫЗОВ НОВОЙ ФУНКЦИИ
+    elif report_type == "5. Просмотр технических опросников":
         _render_survey_explorer()
 
 # ==========================================
 # 1. РЕЕСТР СОГЛАШЕНИЙ
 # ==========================================
 def _render_agreement_registry():
-    df = get_analytics_snapshot()
+    """
+    Отчёт 1: Реестр подписанных соглашений (Интерактивный архив).
+    Показывает только тех, у кого подписано основное Соглашение, 
+    но собирает документы со всех доп. протоколов поставщика.
+    """
+    st.markdown("#### 📜 Электронный реестр соглашений и протоколов")
     
-    # 🟢 УСИЛЕННЫЙ ФИЛЬТР: 
-    # 1. Трек Бюрократия 
-    # 2. Название этапа "Документ подписан" (или системный код CONTRACT_SIGNED, если заполнил)
-    # 3. Статус "Выполнено"
-    # 4. ОБЯЗАТЕЛЬНО: Признак проекта первичного подключения (is_agreement_project)
-    mask = (
-        (df['track_type'] == 'bureaucracy') & 
-        ((df['stage_name'] == 'Документ подписан') | (df['stage_code'] == 'CONTRACT_SIGNED')) & 
-        (df['status'] == 'Выполнено') &
-        (df['is_agreement_project'] == True) # 👈 Тот самый фильтр
-    )
-    
-    data = df[mask].copy()
+    # 1. Получаем список "Квалифицированных" поставщиков (у кого есть выполненный этап Соглашения)
+    # Используем прямой SQL, так как нам нужны ID для последующей связки
+    qualifiers_query = """
+        SELECT 
+            s.supplier_id, 
+            s.supplier_name, 
+            ps.actual_end as main_sign_date
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE p.is_agreement_project = TRUE  -- Признак основного соглашения
+          AND (stg.stage_name = 'Документ подписан' OR stg.stage_code = 'CONTRACT_SIGNED')
+          AND ms.micro_status_name = 'Выполнено'
+          AND ps.actual_end IS NOT NULL
+        ORDER BY ps.actual_end ASC
+    """
+    qualifiers = query_db(qualifiers_query)
 
-    if data.empty:
-        st.info("Подписанные соглашения не найдены (убедитесь, что в паспорте проекта стоит флаг 'Проект первичного подключения').")
+    if qualifiers.empty:
+        st.info("📭 Подписанные соглашения пока не найдены.")
         return
 
-    # Сортируем по дате подписания (actual_end)
-    data = data.sort_values('actual_end')
-    data['Дата соглашения'] = data['actual_end'].dt.date
-    
-    # Формируем порядковый номер и формат 1/2026
-    data = data.reset_index(drop=True)
-    data['Номер'] = data.index + 1
-    data['№ Соглашения'] = data.apply(lambda x: f"{x['Номер']}/{x['actual_end'].year}", axis=1)
+    # 2. Получаем ВСЕ документы по этапам "Документ подписан" для ВСЕХ проектов
+    # Это позволит вытянуть протоколы из обычных проектов
+    docs_query = """
+        SELECT 
+            sd.doc_name, 
+            sd.doc_url, 
+            p.project_name, 
+            p.supplier_id,
+            ps.actual_end as sign_date,
+            p.is_agreement_project
+        FROM stage_documents sd
+        JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE (stg.stage_name = 'Документ подписан' OR stg.stage_code = 'CONTRACT_SIGNED')
+          AND ms.micro_status_name = 'Выполнено'
+        ORDER BY ps.actual_end ASC
+    """
+    all_docs = query_db(docs_query)
 
-    display_df = data[['№ Соглашения', 'supplier_name', 'Дата соглашения']].rename(
-        columns={'supplier_name': 'Наименование поставщика'}
-    )
-    
-    # Умный расчет высоты (35px на строку + заголовок)
-    calc_h = (len(display_df) * 35) + 40
-    
-    st.dataframe(display_df, width="stretch", hide_index=True, height=min(500, calc_h),
-                 column_config={"Дата соглашения": st.column_config.DateColumn(format="DD.MM.YYYY")})
+    # 3. Отрисовка реестра через экспандеры
+    st.write(f"Всего в реестре: **{len(qualifiers)}** поставщиков")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # Экспорт в Excel (с тем же набором колонок)
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        display_df.to_excel(writer, index=False, sheet_name='Реестр')
-    
-    st.download_button(
-        label="📥 Скачать Реестр соглашений (Excel)", 
-        data=buffer.getvalue(), 
-        file_name=f"agreements_registry_{datetime.now().strftime('%d_%m_%Y')}.xlsx", 
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    for i, row in qualifiers.iterrows():
+        # Формируем номер соглашения (1/2026)
+        year = row['main_sign_date'].year
+        agr_num = f"{i + 1}/{year}"
+        
+        # Заголовок экспандера
+        expander_title = f"📄 № {agr_num} | {row['supplier_name']} (от {row['main_sign_date'].strftime('%d.%m.%Y')})"
+        
+        with st.expander(expander_title):
+            # Фильтруем документы этого конкретного поставщика
+            sup_docs = all_docs[all_docs['supplier_id'] == row['supplier_id']]
+            
+            if sup_docs.empty:
+                st.caption("К записям в базе не прикреплено ни одного файла.")
+            else:
+                st.markdown("**Прикрепленные документы (Соглашение и Протоколы):**")
+                
+                # Выводим документы по одному
+                for _, doc in sup_docs.iterrows():
+                    col_icon, col_link = st.columns([0.05, 0.95])
+                    with col_icon:
+                        # Если это основное соглашение - выделяем иконкой
+                        st.write("📜" if doc['is_agreement_project'] else "📎")
+                    with col_link:
+                        # Подпись ссылки: Дата | Название проекта | Название файла
+                        btn_label = f"{doc['sign_date'].strftime('%d.%m.%Y')} | {doc['project_name']} : {doc['doc_name']}"
+                        st.link_button(btn_label, doc['doc_url'], use_container_width=True)
+
+    # 4. Кнопка экспорта (оставим стандартную таблицу для Excel)
+    st.markdown("---")
+    if st.button("📊 Сформировать таблицу для Excel"):
+        # Готовим плоский список для выгрузки
+        export_df = qualifiers.copy()
+        export_df.insert(0, "№ Соглашения", [f"{idx+1}/{d.year}" for idx, d in enumerate(export_df['main_sign_date'])])
+        export_df = export_df.rename(columns={'supplier_name': 'Поставщик', 'main_sign_date': 'Дата'})
+        
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            export_df[['№ Соглашения', 'Поставщик', 'Дата']].to_excel(writer, index=False, sheet_name='Реестр')
+        
+        st.download_button("📥 Скачать таблицу", buffer.getvalue(), "registry_table.xlsx")
 
 # ==========================================
 # 2. ХОД ВЫПОЛНЕНИЯ (БЮРОКРАТИЯ)
@@ -262,7 +312,76 @@ def _export_registry_to_excel_internal(df, writer):
     ws.set_column('A:A', 30); ws.set_column('B:B', 40); ws.set_column('C:C', 30); ws.set_column('D:D', 20)
 
 # ==========================================
-# 4. ПРОВОДНИК ОПРОСНИКОВ
+# 4. РЕЕСТР ПРОТОКОЛОВ СОВЕЩАНИЙ
+# ==========================================
+
+def _render_meeting_minutes_registry():
+    """
+    Отчёт 4: Реестр протоколов совещаний.
+    Собирает все документы с этапов 'Протокол переговоров' всех проектов.
+    """
+    st.markdown("#### 🤝 Архив протоколов совещаний и переговоров")
+
+    # 1. Получаем список поставщиков, у которых есть хоть один выполненный протокол
+    suppliers_query = """
+        SELECT DISTINCT s.supplier_id, s.supplier_name
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE (stg.stage_name = 'Протокол переговоров' OR stg.stage_code = 'MEETING_MINUTES')
+          AND ms.micro_status_name = 'Выполнено'
+        ORDER BY s.supplier_name
+    """
+    sups = query_db(suppliers_query)
+
+    if sups.empty:
+        st.info("📭 Протоколы совещаний в базе данных не найдены.")
+        return
+
+    # 2. Получаем все документы, привязанные к этим этапам
+    docs_query = """
+        SELECT 
+            sd.doc_name, 
+            sd.doc_url, 
+            p.project_name, 
+            p.supplier_id,
+            ps.actual_end as meeting_date
+        FROM stage_documents sd
+        JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE (stg.stage_name = 'Протокол переговоров' OR stg.stage_code = 'MEETING_MINUTES')
+          AND ms.micro_status_name = 'Выполнено'
+        ORDER BY ps.actual_end DESC
+    """
+    all_docs = query_db(docs_query)
+
+    st.write(f"Найдено протоколов у **{len(sups)}** поставщиков")
+
+    # 3. Отрисовка через экспандеры
+    for _, sup in sups.iterrows():
+        # Считаем количество протоколов для заголовка
+        sup_docs = all_docs[all_docs['supplier_id'] == sup['supplier_id']]
+        doc_count = len(sup_docs)
+        
+        with st.expander(f"🏢 {sup['supplier_name']} (Протоколов: {doc_count})"):
+            if sup_docs.empty:
+                st.caption("Записи об этапах есть, но файлы не прикреплены.")
+            else:
+                for _, doc in sup_docs.iterrows():
+                    col_date, col_btn = st.columns([0.2, 0.8])
+                    with col_date:
+                        st.write(f"📅 **{doc['meeting_date'].strftime('%d.%m.%Y')}**")
+                    with col_btn:
+                        # На кнопке пишем проект и название файла
+                        label = f"{doc['project_name']} — {doc['doc_name']}"
+                        st.link_button(label, doc['doc_url'], use_container_width=True)
+
+# ==========================================
+# 5. ПРОВОДНИК ОПРОСНИКОВ
 # ==========================================
 def _render_survey_explorer():
     st.markdown("#### 🔍 Проводник по опросникам")

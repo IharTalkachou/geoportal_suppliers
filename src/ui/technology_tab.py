@@ -297,7 +297,13 @@ def render_technology_tab(session, project_id, user_role="user"):
                                 planned_start, planned_end, actual_start, actual_end, comments, responsible_id)
                                 VALUES (:iid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm, :rid)"""), params)
 
-                    session.commit(); clear_cache()
+                    session.commit(); 
+
+                    # синхронизация статуса
+                    from utils.project_utils import sync_project_status
+                    sync_project_status(session, project_id)
+                    
+                    clear_cache()
                     st.success(f"✅ Готово! Обработано наборов: {len(items_to_process)}")
                     st.rerun()
                 except Exception as e:

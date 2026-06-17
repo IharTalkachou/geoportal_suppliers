@@ -234,7 +234,13 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                         planned_start, planned_end, actual_start, actual_end, comments, responsible_id)
                         VALUES (:pid, :sid, :mst, :iter, :ps, :pe, :as, :ae, :comm, :rid)"""), params)
 
-                session.commit(); clear_cache(); st.success("Готово!"); st.rerun()
+                session.commit(); 
+                
+                # синхронизация статуса
+                from utils.project_utils import sync_project_status
+                sync_project_status(session, project_id)
+                
+                clear_cache(); st.success("Готово!"); st.rerun()
             except Exception as e: st.error(f"Ошибка БД: {e}"); session.rollback()
 
         if is_editing and st.button("🗑 Удалить", type="secondary", use_container_width=True):
