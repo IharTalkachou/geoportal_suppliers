@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from datetime import date
+from datetime import date, timedelta
 from config.cache import query_db, clear_cache
 from config.auth import log_action
-from ui.shared_components import render_survey_viewer
 
 # 🔤 Маппинг для отображения
 RU_LABELS = {
@@ -19,77 +18,52 @@ def render_suppliers_tab(session, user_role="user"):
     st.subheader("📁 Реестр поставщиков")
     is_readonly = (user_role == "user")
     
-    # ==========================================
-    # 🧠 1. УПРАВЛЕНИЕ СОСТОЯНИЕМ (STATE)
-    # ==========================================
-    
-    # Проверяем, не пришли ли мы сюда по ссылке из другого раздела (Deep Link)
-    # Если в session_state лежит 'filter_supplier_id', приоритет отдаем ему
+    # --- 1. УПРАВЛЕНИЕ СОСТОЯНИЕМ ---
     incoming_sup_id = st.session_state.get("filter_supplier_id")
-    
     all_suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
     sup_map = dict(zip(all_suppliers["supplier_name"], all_suppliers["supplier_id"]))
-    inv_sup_map = {v: k for k, v in sup_map.items()} # Обратный маппинг ID -> Name
+    inv_sup_map = {v: k for k, v in sup_map.items()}
 
-    # Инициализация выбора в session_state, если его там нет
     if "selected_sup_id" not in st.session_state:
         st.session_state["selected_sup_id"] = None
 
-    # Если есть входящий ID, принудительно устанавливаем его как выбранный
     if incoming_sup_id:
         st.session_state["selected_sup_id"] = incoming_sup_id
-        # Очищаем входящий фильтр, чтобы он не срабатывал при следующем реране
         st.session_state["filter_supplier_id"] = None
 
-    # Определяем индекс для selectbox на основе ID из сессии
     current_sup_name = inv_sup_map.get(st.session_state["selected_sup_id"], "")
     try:
         current_index = ([""] + list(sup_map.keys())).index(current_sup_name)
     except ValueError:
         current_index = 0
 
-    # ==========================================
-    # 🏢 2. ГЛОБАЛЬНЫЙ ВЫБОР ПОСТАВЩИКА
-    # ==========================================
-    
+    # --- 2. ВЫБОР ПОСТАВЩИКА ---
     def on_sup_change():
-        # Сохраняем выбор в session_state при изменении
         new_name = st.session_state["sup_selector_widget"]
         st.session_state["selected_sup_id"] = sup_map.get(new_name)
         st.session_state["sup_edit_mode"] = False
-        # Логируем выбор поставщика
         if st.session_state["selected_sup_id"]:
-            log_action(st.session_state["auth"]["user_id"], "VIEW_SUPPLIER", 
-                       "suppliers", st.session_state["selected_sup_id"])
+            log_action(st.session_state["auth"]["user_id"], "VIEW_SUPPLIER", "suppliers", st.session_state["selected_sup_id"])
 
-    col_sel, col_add = st.columns([3, 1])
-    with col_sel:
-        selected_sup_name = st.selectbox(
-            "🏢 Выберите поставщика", 
-            [""] + list(sup_map.keys()), 
-            index=current_index,
-            key="sup_selector_widget",
-            on_change=on_sup_change
-        )
+    selected_sup_name = st.selectbox(
+        "🏢 Выберите поставщика", [""] + list(sup_map.keys()), 
+        index=current_index, key="sup_selector_widget", on_change=on_sup_change
+    )
     
     selected_sup_id = st.session_state["selected_sup_id"]
 
     if not selected_sup_id:
-        st.info("👈 Выберите поставщика в списке или добавьте нового.")
+        st.info("👈 Выберите поставщика в списке.")
         if not is_readonly:
-            with st.expander("➕ Добавить нового поставщика в базу"):
+            with st.expander("➕ Добавить нового поставщика"):
                 render_supplier_form(session)
         return
 
-    # ==========================================
-    # 📑 3. ПОД-НАВИГАЦИЯ (SEGMENTED CONTROL)
-    # ==========================================
+    # --- 3. ПОД-НАВИГАЦИЯ (ОБНОВЛЕННЫЕ ПУНКТЫ) ---
     st.markdown(f"## {selected_sup_name}")
-    
-    # Используем segmented_control вместо tabs для сохранения состояния
     sub_nav = st.segmented_control(
         "Разделы",
-        options=["🏠 Карточка", "👤 Контакты", "📦 Наборы", "📝 Опросники", "📋 Проекты"],
+        options=["🏠 Карточка", "👤 Контакты", "📋 Проекты", "📝 Опросники"],
         default="🏠 Карточка",
         key="sup_sub_nav",
         label_visibility="collapsed"
@@ -98,34 +72,23 @@ def render_suppliers_tab(session, user_role="user"):
 
     if sub_nav == "🏠 Карточка":
         render_supplier_card(session, selected_sup_id, is_readonly)
-
     elif sub_nav == "👤 Контакты":
         render_contacts_manager(session, selected_sup_id, is_readonly)
-
-    elif sub_nav == "📦 Наборы":
+    elif sub_nav == "📋 Проекты":
         render_datasets_subtab(session, selected_sup_id, is_readonly)
-
     elif sub_nav == "📝 Опросники":
         render_surveys_manager(session, selected_sup_id, is_readonly)
 
-    elif sub_nav == "📋 Проекты":
-        render_supplier_projects_grid(selected_sup_id)
-
 # ==========================================
-# 🛠️ НОВЫЕ И ОБНОВЛЕННЫЕ КОМПОНЕНТЫ
+# 🏠 КАРТОЧКА И ФОРМА
 # ==========================================
 
 def render_supplier_card(session, selected_sup_id, is_readonly):
-    """Вынесено в отдельную функцию для чистоты основного рендера"""
     sup_data = query_db("SELECT * FROM suppliers WHERE supplier_id = :sid", {"sid": selected_sup_id}).iloc[0]
-    
-    if sup_data.get('is_mandatory'):
-        st.warning("⭐ **Поставщик ОНПД**")
+    if sup_data.get('is_mandatory'): st.warning("⭐ **Поставщик ОНПД**")
     
     col_info, col_edit = st.columns([2, 1])
-    
-    if "sup_edit_mode" not in st.session_state:
-        st.session_state["sup_edit_mode"] = False
+    if "sup_edit_mode" not in st.session_state: st.session_state["sup_edit_mode"] = False
             
     with col_info:
         for col, label in RU_LABELS.items():
@@ -135,16 +98,72 @@ def render_supplier_card(session, selected_sup_id, is_readonly):
     
     with col_edit:
         if not is_readonly:
-            if st.button("✏️ Редактировать реквизиты", width="stretch"):
-                st.session_state["sup_edit_mode"] = not st.session_state["sup_edit_mode"]
-                st.rerun()
+            if st.button("✏️ Редактировать реквизиты", use_container_width=True):
+                st.session_state["sup_edit_mode"] = not st.session_state["sup_edit_mode"]; st.rerun()
     
     if st.session_state["sup_edit_mode"]:
         with st.expander("📝 Форма редактирования", expanded=True):
             render_supplier_form(session, sup_data)
-            if st.button("❌ Отменить редактирование"):
+
+def render_supplier_form(session, existing_data=None):
+    is_editing = existing_data is not None
+    with st.form("supplier_form_main"):
+        col1, col2 = st.columns(2)
+        with col1:
+            name = st.text_input("Наименование *", value=existing_data['supplier_name'] if is_editing else "")
+            addr = st.text_input("Адрес", value=existing_data['supplier_address'] if is_editing else "")
+            is_mand = st.checkbox("Поставщик ОНПД", value=bool(existing_data['is_mandatory']) if is_editing else False)
+        with col2:
+            phone = st.text_input("Телефон", value=existing_data['supplier_phone'] if is_editing else "")
+            mgr = st.text_input("Руководитель", value=existing_data['supplier_manager'] if is_editing else "")
+        
+        if st.form_submit_button("💾 Сохранить"):
+            if not name: 
+                st.error("Наименование обязательно")
+                return
+            try:
+                target_id = int(existing_data['supplier_id']) if is_editing else None
+                params = {"n": name, "a": addr, "p": phone, "m": mgr, "is_m": is_mand, "id": target_id}
+                
+                if is_editing:
+                    # 🔍 ЛОГИРОВАНИЕ
+                    log_action(st.session_state["auth"]["user_id"], "UPDATE_SUPPLIER_REQS", "suppliers", target_id, 
+                               old={"name": existing_data['supplier_name']}, new={"name": name})
+                    
+                    session.execute(text("""
+                        UPDATE suppliers SET 
+                            supplier_name=:n, supplier_address=:a, 
+                            supplier_phone=:p, supplier_manager=:m, is_mandatory=:is_m 
+                        WHERE supplier_id=:id
+                    """), params)
+                else:
+                    # Логика создания нового (если форма используется для этого)
+                    res = session.execute(text("""
+                        INSERT INTO suppliers (supplier_name, supplier_address, supplier_phone, supplier_manager, is_mandatory) 
+                        VALUES (:n, :a, :p, :m, :is_m) RETURNING supplier_id
+                    """), params)
+                    new_id = res.scalar()
+                    log_action(st.session_state["auth"]["user_id"], "CREATE_SUPPLIER", "suppliers", int(new_id), new={"name": name})
+
+                session.commit()
+                clear_cache()
+                
+                # 🟢 ЗАКРЫВАЕМ ФОРМУ И УВЕДОМЛЯЕМ
                 st.session_state["sup_edit_mode"] = False
+                st.toast("✅ Реквизиты изменены!")
+                
+                # Небольшая пауза, чтобы пользователь успел заметить тост перед обновлением страницы
+                import time
+                time.sleep(0.5)
                 st.rerun()
+
+            except Exception as e:
+                st.error(f"Ошибка БД: {e}")
+                session.rollback()
+
+# ==========================================
+# ГЕНЕРАТОР СЕТКИ КАРТОЧЕК ПРОЕКТОВ
+# ==========================================
 
 def render_supplier_projects_grid(supplier_id):
     """
@@ -204,9 +223,14 @@ def render_supplier_projects_grid(supplier_id):
                     st.rerun()
 
 
+# ==========================================
+# 📋 ПРОЕКТЫ И СОСТАВ (3 КОЛОНКИ)
+# ==========================================
+
 def render_datasets_subtab(session, selected_sup_id, is_readonly):
-    """Улучшенное управление наборами (3 колонки): Проекты | Состав (Markdown) | Управление"""
+    """Улучшенное управление проектами (3 колонки): Проекты | Состав | Управление"""
     
+    # 1. Загружаем проекты поставщика
     projs_df = query_db("""
         SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name
     """, {"sid": selected_sup_id})
@@ -218,267 +242,289 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
     with col_projs:
         st.markdown("##### 📁 Проекты")
         if projs_df.empty:
-            st.info("Нет проектов.")
+            st.info("Нет проектов")
         else:
             selection = st.dataframe(
-                projs_df[["project_name"]],
-                width="stretch", hide_index=True,
+                projs_df[["project_name"]], width="stretch", hide_index=True,
                 on_select="rerun", selection_mode="single-row",
-                key=f"sup_proj_list_{selected_sup_id}",
-                column_config={"project_name": "Название проекта"}
+                key=f"sup_proj_list_df_{selected_sup_id}"
             )
             selected_rows = selection.get("selection", {}).get("rows", [])
-            if selected_rows:
-                current_proj_id = int(projs_df.iloc[selected_rows[0]]["project_id"])
+            
+            # Проверяем не только наличие выбора, но и физическое наличие строки в DF
+            if selected_rows and len(projs_df) > selected_rows[0]:
+                row = projs_df.iloc[selected_rows[0]]
+                current_proj_id = int(row["project_id"])
+                
+                # Синхронизация при смене проекта
+                if st.session_state.get("last_active_proj_id") != current_proj_id:
+                    for k in ["tech_action_mode", "editing_item_id", "show_np_form"]:
+                        st.session_state.pop(k, None)
+                    st.session_state["last_active_proj_id"] = current_proj_id
             else:
+                current_proj_id = None
+                # Если проект только что удалили, очищаем состояние
+                if "last_active_proj_id" in st.session_state:
+                    st.session_state.pop("last_active_proj_id", None)
                 st.caption("👈 Выберите проект")
 
-    # --- КОЛОНКА 2: СОСТАВ ---
+    # --- КОЛОНКА 2: СОСТАВ (ТОЛЬКО ПРОСМОТР) ---
+    items_df = pd.DataFrame()
     with col_items:
         st.markdown("##### 📦 Состав наборов")
         if current_proj_id:
             items_df = query_db("""
-                SELECT 
-                    pi.item_id, d.dataset_name, i.info_name, i.info_id, d.dataset_id,
-                    c.full_name as tech_contact, pi.provision_right, p.project_name
+                SELECT pi.item_id, d.dataset_name, i.info_name, i.info_id, 
+                       c.full_name as tech_contact, pi.provision_right, p.project_name
                 FROM project_items pi
                 JOIN projects p ON pi.project_id = p.project_id
                 JOIN datasets d ON pi.dataset_id = d.dataset_id
                 JOIN info_types i ON pi.info_id = i.info_id
                 LEFT JOIN contacts c ON pi.tech_contact_id = c.contact_id
-                WHERE pi.project_id = :pid
-                ORDER BY d.dataset_name, i.info_name
+                WHERE pi.project_id = :pid ORDER BY d.dataset_name, i.info_name
             """, {"pid": current_proj_id})
-
-            if items_df.empty:
-                st.info("В проекте нет наборов.")
+            
+            if items_df.empty: st.info("В проекте нет наборов")
             else:
                 for _, row in items_df.iterrows():
                     with st.container(border=True):
                         st.markdown(f"**{row['dataset_name']}**")
-                        st.markdown(f"*{row['info_name']}*")
+                        st.markdown(f"_{row['info_name']}_")
                         st.caption(f"⚖️ {row['provision_right']}")
+        else:
+            st.caption("Выберите проект слева")
+
+    # --- КОЛОНКА 3: ЦЕНТР УПРАВЛЕНИЯ ---
+    with col_ctrl:
+        st.markdown("##### ⚙️ Управление")
+        if not is_readonly:
+            if not current_proj_id:
+                # 🟢 1а. НОВЫЙ ПРОЕКТ (АВТО-РЕЖИМ)
+                if not st.session_state.get("show_np_form"):
+                    with st.container(border=True):
+                        st.write("Добавить новый проект?")
+                        if st.button("➕ Создать новый проект", use_container_width=True):
+                            st.session_state["show_np_form"] = True; st.rerun()
+                else:
+                    if st.button("⬅️ Отмена"):
+                        st.session_state["show_np_form"] = False; st.rerun()
+                    _render_dataset_link_form(session, selected_sup_id, None, projs_df)
+            
+            else:
+                # 🟢 1б. СУЩЕСТВУЮЩИЙ ПРОЕКТ
+                action = st.session_state.get("tech_action_mode")
+                if not action:
+                    with st.container(border=True):
+                        if st.button("➕ Добавить новую связь", use_container_width=True):
+                            st.session_state["tech_action_mode"] = "ADD"; st.rerun()
+                        if not items_df.empty:
+                            if st.button("✏️ Изменить связь", use_container_width=True):
+                                st.session_state["tech_action_mode"] = "EDIT"; st.rerun()
+                            if st.button("🗑 Удалить связь", use_container_width=True):
+                                st.session_state["tech_action_mode"] = "DEL"; st.rerun()
+                        st.divider()
                         
-                        c_edit, c_del = st.columns(2)
-                        with c_edit:
-                            # 🟢 ПРИ НАЖАТИИ "ИЗМЕНИТЬ" - ЗАПОЛНЯЕМ SESSION_STATE
-                            if st.button("✏️ Изменить", key=f"edit_item_{row['item_id']}", use_container_width=True):
+                        def go_to_full_project_cb(pid):
+                            st.session_state["main_nav"] = "📋 Проекты"
+                            st.session_state["filter_project_id"] = pid
+
+                        st.button("🔎 Перейти к карточке проекта", use_container_width=True, type="secondary",
+                                  on_click=go_to_full_project_cb, args=(current_proj_id,))
+                        
+                        # 3. УДАЛЕНИЕ ПРОЕКТА
+                        if current_proj_id and not is_readonly:
+                            st.divider()
+                            if st.button("🗑 Удалить проект", use_container_width=True, help="Проект должен быть пустым"):
+                                # Проверяем, можно ли удалять
+                                has_content = session.execute(text("""
+                                    SELECT 1 FROM project_items WHERE project_id = :pid 
+                                    UNION ALL SELECT 1 FROM project_stages WHERE project_id = :pid LIMIT 1
+                                """), {"pid": current_proj_id}).scalar()
+                                
+                                if has_content:
+                                    st.error("❌ Нельзя удалить проект, в котором есть этапы или состав.")
+                                else:
+                                    try:
+                                        p_name = projs_df[projs_df['project_id'] == current_proj_id]['project_name'].iloc[0]
+                                        log_action(st.session_state["auth"]["user_id"], "DELETE_PROJECT", "projects", current_proj_id, old={"name": p_name})
+                                        
+                                        session.execute(text("DELETE FROM projects WHERE project_id = :pid"), {"pid": current_proj_id})
+                                        session.commit()
+                                        clear_cache()
+                                        
+                                        # ПРИНУДИТЕЛЬНАЯ ОЧИСТКА СОСТОЯНИЯ ПЕРЕД ПЕРЕЗАГРУЗКОЙ
+                                        st.session_state.pop("last_active_proj_id", None)
+                                        
+                                        # Очищаем ключ самого виджета таблицы, чтобы сбросить выделение строки
+                                        if f"sup_proj_list_df_{selected_sup_id}" in st.session_state:
+                                            st.session_state.pop(f"sup_proj_list_df_{selected_sup_id}", None)
+                                        
+                                        st.success("Проект удален"); st.rerun()
+                                    except Exception as e: st.error(f"Ошибка: {e}"); session.rollback()
+
+                else:
+                    if st.button("⬅️ Назад к меню"):
+                        for k in ["tech_action_mode", "editing_item_id", "ds_form_proj", "ds_form_ds", "ds_form_i", "ds_form_cont", "ds_form_prov"]:
+                            st.session_state.pop(k, None)
+                        st.rerun()
+                    
+                    if action == "ADD": 
+                        _render_dataset_link_form(session, selected_sup_id, current_proj_id, projs_df)
+                    elif action == "EDIT":
+                        opts = {f"{r['dataset_name']} | {r['info_name']}": r for _, r in items_df.iterrows()}
+                        sel = st.selectbox("Связь:", [""] + list(opts.keys()), key="edit_link_sel_new")
+                        if sel:
+                            row = opts[sel]
+                            if st.session_state.get("editing_item_id") != int(row['item_id']):
                                 st.session_state["editing_item_id"] = int(row['item_id'])
-                                # Заполняем поля формы напрямую
                                 st.session_state["ds_form_proj"] = row['project_name']
                                 st.session_state["ds_form_ds"] = row['dataset_name']
                                 st.session_state["ds_form_i"] = row['info_name']
                                 st.session_state["ds_form_cont"] = row['tech_contact'] if pd.notna(row['tech_contact']) else "Не выбран"
-                                st.session_state["ds_form_prov"] = row['provision_right']
-                                st.rerun()
-                        with c_del:
-                            if not is_readonly:
-                                if st.button("🗑", key=f"del_item_{row['item_id']}", use_container_width=True):
-                                    has_stages = query_db("SELECT 1 FROM item_stages WHERE item_id = :id LIMIT 1", {"id": int(row['item_id'])})
-                                    if not has_stages.empty:
-                                        st.error("Удаление заблокировано: есть этапы технологии.")
-                                    else:
-                                        session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(row['item_id'])})
-                                        session.commit(); clear_cache(); st.rerun()
-        else:
-            st.caption("Выберите проект слева")
+                                st.session_state["ds_form_prov"] = row['provision_right']; st.rerun()
+                            _render_dataset_link_form(session, selected_sup_id, current_proj_id, projs_df, is_edit=True)
+                    elif action == "DEL":
+                        opts = {f"{r['dataset_name']} | {r['info_name']}": r for _, r in items_df.iterrows()}
+                        sel = st.selectbox("Выберите для удаления:", [""] + list(opts.keys()))
+                        if sel and st.button("❌ Подтвердить удаление", use_container_width=True):
+                            _delete_item_logic(session, selected_sup_id, opts[sel])
+        else: st.info("Режим просмотра")
 
-    # --- КОЛОНКА 3: ФОРМА ---
-    with col_ctrl:
-        if not is_readonly:
-            is_edit_mode = "editing_item_id" in st.session_state
-            
-            if is_edit_mode:
-                st.markdown("##### ✏️ Редактирование")
-                if st.button("⬅️ Отмена / Новая запись", use_container_width=True):
-                    # Очищаем ключи формы при отмене
-                    for k in ["editing_item_id", "ds_form_proj", "ds_form_ds", "ds_form_i", "ds_form_cont", "ds_form_prov"]:
-                        st.session_state.pop(k, None)
-                    st.rerun()
-            else:
-                st.markdown("##### ➕ Новая связь")
-
-            _render_dataset_link_form(session, selected_sup_id, current_proj_id, projs_df, is_edit_mode)
-        else:
-            st.info("Режим просмотра")
-
-# ==========================================
-# 🛠️ ПОД-ФУНКЦИИ (КОМПОНЕНТЫ)
-# ==========================================
-
-def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, is_edit):
-    """Форма создания и редактирования (Разблокированная версия)"""
+def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, is_edit=False):
+    """Оптимизированная форма создания и редактирования"""
     
-    # 1. Выбор проекта
-    proj_names = ["(Новый проект)"] + projs_df["project_name"].tolist()
-    st.selectbox("Проект *", proj_names, key="ds_form_proj", disabled=is_edit)
-    
-    if st.session_state.get("ds_form_proj") == "(Новый проект)":
-        st.text_input("Название нового проекта", key="ds_form_new_p")
+    # 🟢 1. ЛОГИКА ОТОБРАЖЕНИЯ ПРОЕКТА
+    if not current_proj_id and not is_edit:
+        # Режим нового проекта (Колонка 1 пуста)
+        st.session_state["ds_form_proj"] = "(Новый проект)"
+        st.text_input("Название нового проекта *", key="ds_form_new_p")
         st.checkbox("Проект Соглашения", key="ds_form_new_p_agr")
+    else:
+        # Режим добавления/изменения в существующий проект
+        proj_names = projs_df["project_name"].tolist()
+        # Ищем текущее имя проекта для дефолта
+        def_p = projs_df[projs_df['project_id'] == current_proj_id]['project_name'].iloc[0] if current_proj_id else proj_names[0]
+        st.selectbox("Проект *", proj_names, index=proj_names.index(def_p), key="ds_form_proj", disabled=is_edit)
 
     st.divider()
 
-    # 2. Набор и Вид (Теперь разблокированы)
+    # 2. НАБОР И ВИД
     dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
     ds_names = ["(Новый набор)"] + dss["dataset_name"].tolist()
-    st.selectbox("Набор данных *", ds_names, key="ds_form_ds")
+    st.selectbox("Набор данных *", ds_names, key="ds_form_ds", disabled=is_edit)
     
-    current_ds_name = st.session_state.get("ds_form_ds")
-    if current_ds_name == "(Новый набор)":
+    if st.session_state.get("ds_form_ds") == "(Новый набор)" and not is_edit:
         st.text_input("Имя нового набора", key="ds_form_new_d")
         st.text_input("Имя нового вида", key="ds_form_new_i")
     else:
-        d_id = int(dss[dss["dataset_name"] == current_ds_name]["dataset_id"].iloc[0])
-        infos = query_db("SELECT info_id, info_name FROM info_types WHERE dataset_id = :did", {"did": d_id})
-        i_names = ["(Новый вид)"] + infos["info_name"].tolist()
-        st.selectbox("Вид сведений *", i_names, key="ds_form_i")
-        if st.session_state.get("ds_form_i") == "(Новый вид)":
-            st.text_input("Имя нового вида", key="ds_form_new_i_name")
+        d_id_res = dss[dss["dataset_name"] == st.session_state.get("ds_form_ds")]
+        if not d_id_res.empty:
+            d_id = int(d_id_res.iloc[0]["dataset_id"])
+            infos = query_db("SELECT info_id, info_name FROM info_types WHERE dataset_id = :did", {"did": d_id})
+            i_names = ["(Новый вид)"] + infos["info_name"].tolist()
+            st.selectbox("Вид сведений *", i_names, key="ds_form_i", disabled=is_edit)
+            if st.session_state.get("ds_form_i") == "(Новый вид)" and not is_edit:
+                st.text_input("Имя нового вида", key="ds_form_new_i_name")
 
-    # 3. Доп. параметры
-    conts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": supplier_id})
-    cont_names = ["Не выбран"] + conts["full_name"].tolist()
-    st.selectbox("Тех. контакт", cont_names, key="ds_form_cont")
+    # 3. ДОП ПАРАМЕТРЫ
+    conts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": int(supplier_id)})
+    c_names = ["Не выбран"] + conts["full_name"].tolist()
+    st.selectbox("Тех. контакт", c_names, key="ds_form_cont")
     
-    prov_options = ['Протокол не заключён', 'Оператор и Поставщик', 'Только Поставщик', 'Не предоставляется']
-    st.selectbox("Право предоставления", prov_options, key="ds_form_prov")
+    prov_opts = ['Протокол не заключён', 'Оператор и Поставщик', 'Только Поставщик', 'Не предоставляется']
+    st.selectbox("Право предоставления", prov_opts, key="ds_form_prov")
 
-    if st.button("💾 Сохранить изменения" if is_edit else "🚀 Создать связь", type="primary", use_container_width=True):
+    # --- СОХРАНЕНИЕ ---
+    btn_txt = "💾 Сохранить изменения" if is_edit else "🚀 Создать связь"
+    if st.button(btn_txt, type="primary", use_container_width=True, key="ds_save_btn_final"):
         try:
             # А. Получаем ID проекта
-            if not is_edit and st.session_state.ds_form_proj == "(Новый проект)":
+            if st.session_state.ds_form_proj == "(Новый проект)":
+                p_name = st.session_state.get("ds_form_new_p", "").strip()
+                if not p_name: st.error("Укажите имя проекта"); st.stop()
                 p_id = session.execute(text("INSERT INTO projects (supplier_id, project_name, status, is_agreement_project) VALUES (:sid, :pn, 1, :is_agr) RETURNING project_id"),
-                                       {"sid": supplier_id, "pn": st.session_state.ds_form_new_p.strip(), "is_agr": st.session_state.ds_form_new_p_agr}).scalar()
+                                       {"sid": int(supplier_id), "pn": p_name, "is_agr": st.session_state.get("ds_form_new_p_agr", False)}).scalar()
             else:
-                p_res = projs_df[projs_df["project_name"] == st.session_state.ds_form_proj]
-                p_id = int(p_res.iloc[0]["project_id"]) if not p_res.empty else None
+                p_id = int(projs_df[projs_df["project_name"] == st.session_state.ds_form_proj].iloc[0]["project_id"])
 
-            # Б. Получаем ID набора
-            if st.session_state.ds_form_ds == "(Новый набор)":
+            # Б. Набор и вид
+            if not is_edit and st.session_state.ds_form_ds == "(Новый набор)":
                 d_id = session.execute(text("INSERT INTO datasets (dataset_name) VALUES (:n) RETURNING dataset_id"), {"n": st.session_state.ds_form_new_d.strip()}).scalar()
-            else:
-                d_id = int(dss[dss["dataset_name"] == st.session_state.ds_form_ds]["dataset_id"].iloc[0])
-
-            # В. Получаем ID вида
-            if st.session_state.ds_form_ds == "(Новый набор)" or st.session_state.ds_form_i == "(Новый вид)":
-                # Если набор новый, то и вид новый (берем из ds_form_new_i), если набор старый, а вид новый - из ds_form_new_i_name
-                i_name = st.session_state.get("ds_form_new_i") or st.session_state.get("ds_form_new_i_name")
                 i_id = session.execute(text("INSERT INTO info_types (dataset_id, info_name) VALUES (:did, :n) RETURNING info_id"),
-                                       {"did": d_id, "n": i_name.strip()}).scalar()
+                                       {"did": d_id, "n": st.session_state.ds_form_new_i.strip()}).scalar()
             else:
-                i_id = int(infos[infos["info_name"] == st.session_state.ds_form_i]["info_id"].iloc[0])
+                d_id = int(dss[dss["dataset_name"] == st.session_state.ds_form_ds].iloc[0]["dataset_id"])
+                if not is_edit and st.session_state.ds_form_i == "(Новый вид)":
+                    i_id = session.execute(text("INSERT INTO info_types (dataset_id, info_name) VALUES (:did, :n) RETURNING info_id"),
+                                           {"did": d_id, "n": st.session_state.ds_form_new_i_name.strip()}).scalar()
+                else:
+                    i_res = query_db("SELECT info_id FROM info_types WHERE dataset_id=:did AND info_name=:n", {"did": d_id, "n": st.session_state.ds_form_i})
+                    i_id = int(i_res.iloc[0]["info_id"])
 
-            # Г. Параметры связи
-            c_id = int(conts[conts["full_name"] == st.session_state.ds_form_cont]["contact_id"].iloc[0]) if st.session_state.ds_form_cont != "Не выбран" else None
-            prov = st.session_state.ds_form_prov
-
+            # В. Параметры связи
+            c_id = int(conts[conts["full_name"] == st.session_state.ds_form_cont].iloc[0]["contact_id"]) if st.session_state.ds_form_cont != "Не выбран" else None
+            
             if is_edit:
-                session.execute(text("""
-                    UPDATE project_items SET dataset_id=:did, info_id=:iid, tech_contact_id=:cid, provision_right=CAST(:prov AS data_provision_type)
-                    WHERE item_id=:id
-                """), {"did": d_id, "iid": i_id, "cid": c_id, "prov": prov, "id": st.session_state.editing_item_id})
-                for k in ["editing_item_id", "ds_form_proj", "ds_form_ds", "ds_form_i", "ds_form_cont", "ds_form_prov"]:
-                    st.session_state.pop(k, None)
+                session.execute(text("UPDATE project_items SET dataset_id=:did, info_id=:iid, tech_contact_id=:cid, provision_right=CAST(:prov AS data_provision_type) WHERE item_id=:id"),
+                                {"did": i_id, "iid": i_id, "cid": c_id, "prov": st.session_state.ds_form_prov, "id": st.session_state.editing_item_id})
             else:
-                session.execute(text("""
-                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right) 
-                    VALUES (:pid, :did, :iid, :cid, CAST(:prov AS data_provision_type))
-                """), {"pid": p_id, "did": d_id, "iid": i_id, "cid": c_id, "prov": prov})
+                session.execute(text("INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right) VALUES (:pid, :did, :iid, :cid, CAST(:prov AS data_provision_type))"),
+                                {"pid": p_id, "did": d_id, "iid": i_id, "cid": c_id, "prov": st.session_state.ds_form_prov})
 
             session.commit(); clear_cache(); st.success("Успешно!"); st.rerun()
         except Exception as e:
-            st.error(f"Ошибка БД: {e}"); session.rollback()    
+            st.error(f"Ошибка БД: {e}"); session.rollback()
 
-
-def render_supplier_form(session, existing_data=None):
-    """Форма создания/редактирования поставщика"""
-    is_editing = existing_data is not None
-    prefix = "edit" if is_editing else "new"
+def _delete_item_logic(session, supplier_id, item_row):
+    """Вынесенная логика удаления, чтобы не дублировать код"""
+    has_stages = query_db("SELECT 1 FROM item_stages WHERE item_id = :id LIMIT 1", {"id": int(item_row['item_id'])})
+    has_surveys = query_db("""
+        SELECT 1 FROM surveys s JOIN survey_info_types sit ON s.survey_id = sit.survey_id
+        WHERE s.supplier_id = :sid AND sit.info_id = :iid LIMIT 1
+    """, {"sid": int(supplier_id), "iid": int(item_row['info_id'])})
     
-    with st.form(f"{prefix}_supplier_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            name = st.text_input("Наименование *", value=existing_data['supplier_name'] if is_editing else "")
-            addr = st.text_input("Адрес", value=existing_data['supplier_address'] if is_editing else "")
-            email = st.text_input("Email", value=existing_data['supplier_email'] if is_editing else "")
-            is_mand = st.checkbox("Поставщик ОНПД", value=bool(existing_data['is_mandatory']) if is_editing else False)
-        with col2:
-            phone = st.text_input("Телефон", value=existing_data['supplier_phone'] if is_editing else "")
-            mgr = st.text_input("Руководитель", value=existing_data['supplier_manager'] if is_editing else "")
-            notes = st.text_area("Примечание", value=existing_data['supplier_notes'] if is_editing else "")
+    if not has_stages.empty or not has_surveys.empty:
+        st.error("Удаление заблокировано: по этой связи есть история в базе.")
+    else:
+        session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(item_row['item_id'])})
+        session.commit(); clear_cache(); st.success("Удалено!"); st.rerun()  
 
-        if st.form_submit_button("💾 Сохранить"):
-            if not name:
-                st.error("Наименование обязательно"); return
-            
-            try:
-                # Явно приводим ID к стандартному int
-                target_id = int(existing_data['supplier_id']) if is_editing else None
-                
-                params = {
-                    "n": name, "a": addr, "e": email, "p": phone, 
-                    "m": mgr, "notes": notes, "is_m": is_mand, "id": target_id
-                }
-                
-                if is_editing:
-                    # Логируем изменение признака
-                    log_action(st.session_state["auth"]["user_id"], "UPDATE_SUPPLIER", "suppliers", target_id,
-                               old={"name": existing_data['supplier_name'], "mandatory": bool(existing_data['is_mandatory'])},
-                               new={"name": name, "mandatory": is_mand})
-
-                    session.execute(text("""
-                        UPDATE suppliers SET 
-                            supplier_name=:n, supplier_address=:a, supplier_email=:e,
-                            supplier_phone=:p, supplier_manager=:m, supplier_notes=:notes,
-                            is_mandatory=:is_m 
-                        WHERE supplier_id=:id
-                    """), params)
-                else:
-                    session.execute(text("""
-                        INSERT INTO suppliers (supplier_name, supplier_address, supplier_email, supplier_phone, supplier_manager, supplier_notes, is_mandatory)
-                        VALUES (:n, :a, :e, :p, :m, :notes, :is_m)
-                    """), params)
-                    
-                    # Логируем создание
-                    log_action(st.session_state["auth"]["user_id"], "CREATE_SUPPLIER", "suppliers", None, new={"name": name, "mandatory": is_mand})
-                
-                session.commit(); clear_cache()
-                st.success("Данные поставщика обновлены!"); st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка БД: {e}"); session.rollback()
+# ==========================================
+# 👤 КОНТАКТЫ (3 КОЛОНКИ)
+# ==========================================
 
 def render_contacts_manager(session, supplier_id, is_readonly):
-    """Улучшенное управление контактами: Список | Детали | CRUD"""
+    """Улучшенное управление контактами: Список | Детали | Управление"""
+    # 1. Загружаем данные (убеждаемся, что берем все поля)
     contacts_df = query_db("""
         SELECT contact_id, full_name, position, email, phone, notes
         FROM contacts WHERE supplier_id = :sid ORDER BY full_name
     """, {"sid": supplier_id})
     
-    if contacts_df.empty:
-        st.info("📭 У этого поставщика пока нет контактов.")
-        if not is_readonly:
-            with st.expander("➕ Добавить первый контакт"):
-                _render_contact_form_standalone(session, supplier_id)
-        return
-
-    # Создаем три колонки
     col_list, col_view, col_form = st.columns([0.25, 0.35, 0.4])
 
     with col_list:
         st.markdown("##### 👥 Список")
-        # Выбор контакта через таблицу
-        selection = st.dataframe(
-            contacts_df[["full_name"]], 
-            width="stretch", hide_index=True,
-            on_select="rerun", selection_mode="single-row",
-            key=f"cont_list_{supplier_id}",
-            column_config={"full_name": "ФИО"}
-        )
-        
-        selected_rows = selection.get("selection", {}).get("rows", [])
-        is_selected = len(selected_rows) > 0
-        curr_contact = contacts_df.iloc[selected_rows[0]] if is_selected else None
+        if contacts_df.empty:
+            is_selected = False
+        else:
+            selection = st.dataframe(
+                contacts_df[["full_name"]], width="stretch", hide_index=True,
+                on_select="rerun", selection_mode="single-row",
+                key=f"cl_{supplier_id}"
+            )
+            selected_rows = selection.get("selection", {}).get("rows", [])
+            is_selected = len(selected_rows) > 0
+            
+            if is_selected:
+                curr_contact = contacts_df.iloc[selected_rows[0]]
+                # Сброс формы при переключении между людьми
+                if st.session_state.get("last_cid") != int(curr_contact['contact_id']):
+                    st.session_state["show_c_form"] = False
+                    st.session_state["last_cid"] = int(curr_contact['contact_id'])
+            else:
+                # Если никто не выбран, убеждаемся, что режим редактирования выключен
+                st.session_state["show_c_form"] = False
 
     with col_view:
         st.markdown("##### 🔍 Детали")
@@ -492,64 +538,96 @@ def render_contacts_manager(session, supplier_id, is_readonly):
                 st.caption("Примечание:")
                 st.write(curr_contact['notes'] or "Нет данных")
         else:
-            st.info("👈 Выберите контакт в списке слева")
+            st.info("👈 Выберите контакт")
 
     with col_form:
         if not is_readonly:
-            st.markdown("##### ✏️ Редактирование")
-            # Если выбран контакт - режим редактирования, если нет - кнопка "Создать новый"
+            st.markdown("##### ⚙️ Управление")
             if is_selected:
-                # Вспомогательная функция формы (код ниже)
-                _render_contact_form_standalone(session, supplier_id, curr_contact)
-                
-                # Кнопка удаления в самом низу колонки
-                st.write("<br>", unsafe_allow_html=True)
-                if st.button("🗑 Удалить контакт", type="secondary", use_container_width=True, key="del_cont_btn"):
-                    session.execute(text("DELETE FROM contacts WHERE contact_id = :id"), {"id": int(curr_contact['contact_id'])})
-                    session.commit(); clear_cache(); st.rerun()
+                # РЕЖИМ: ВЫБРАН СУЩЕСТВУЮЩИЙ
+                if not st.session_state.get("show_c_form"):
+                    with st.container(border=True):
+                        st.write("Действие для выбранного контакта:")
+                        if st.button("✏️ Редактировать данные", use_container_width=True, key="btn_edit_c"):
+                            st.session_state["show_c_form"] = True
+                            st.rerun()
+                        if st.button("🗑 Удалить", type="secondary", use_container_width=True, key="btn_del_c"):
+                            try:
+                                log_action(st.session_state["auth"]["user_id"], "DELETE_CONTACT", "contacts", int(curr_contact['contact_id']), old={"name": curr_contact['full_name']})
+                                session.execute(text("DELETE FROM contacts WHERE contact_id = :id"), {"id": int(curr_contact['contact_id'])})
+                                session.commit(); clear_cache(); st.rerun()
+                            except Exception as e: st.error(f"Ошибка удаления: {e}")
+                else:
+                    if st.button("⬅️ Назад к меню"):
+                        st.session_state["show_c_form"] = False
+                        st.rerun()
+                    _render_contact_form_standalone(session, supplier_id, curr_contact)
             else:
-                with st.container(border=True):
-                    st.write("Хотите добавить нового человека?")
-                    if st.button("➕ Создать новый контакт", use_container_width=True):
-                        st.session_state["force_new_contact"] = True # Временный флаг
-                
-                if st.session_state.get("force_new_contact"):
+                # РЕЖИМ: НИКТО НЕ ВЫБРАН (СОЗДАНИЕ)
+                if not st.session_state.get("show_c_form_new"):
+                    with st.container(border=True):
+                        st.write("Хотите добавить нового человека?")
+                        if st.button("➕ Создать новый контакт", use_container_width=True, key="btn_new_c"):
+                            st.session_state["show_c_form_new"] = True
+                            st.rerun()
+                else:
+                    if st.button("⬅️ Отмена"):
+                        st.session_state["show_c_form_new"] = False
+                        st.rerun()
                     _render_contact_form_standalone(session, supplier_id)
 
-def _render_contact_form_standalone(session, supplier_id, existing_data=None):
-    """Вынесенная форма контакта для встраивания в колонку"""
-    is_edit = existing_data is not None
-    
-    # Чтобы значения в полях обновлялись при смене контакта, используем ключи с ID
-    cid = existing_data['contact_id'] if is_edit else "new"
+def _render_contact_form_standalone(session, supplier_id, data=None):
+    """Полная форма контакта: все поля + выход из режима правки"""
+    is_edit = data is not None
+    cid = data['contact_id'] if is_edit else "new"
     
     with st.container(border=True):
-        fn = st.text_input("ФИО *", value=existing_data['full_name'] if is_edit else "", key=f"fn_{cid}")
-        pos = st.text_input("Должность", value=existing_data['position'] if is_edit else "", key=f"pos_{cid}")
-        em = st.text_input("Email", value=existing_data['email'] if is_edit else "", key=f"em_{cid}")
-        ph = st.text_input("Телефон", value=existing_data['phone'] if is_edit else "", key=f"ph_{cid}")
-        nt = st.text_area("Примечание", value=existing_data['notes'] if is_edit else "", key=f"nt_{cid}", height=100)
+        fn = st.text_input("ФИО *", value=data['full_name'] if is_edit else "", key=f"f_{cid}")
+        pos = st.text_input("Должность", value=data['position'] if is_edit else "", key=f"p_{cid}")
+        # 🟢 ВОЗВРАЩЕННЫЕ ПОЛЯ:
+        em = st.text_input("Email", value=data['email'] if is_edit else "", key=f"e_{cid}")
+        ph = st.text_input("Телефон", value=data['phone'] if is_edit else "", key=f"ph_{cid}")
+        nt = st.text_area("Примечание", value=data['notes'] if is_edit else "", key=f"n_{cid}", height=100)
         
-        if st.button("💾 Сохранить", type="primary", use_container_width=True, key=f"save_cont_{cid}"):
+        if st.button("💾 Сохранить изменения" if is_edit else "💾 Создать", type="primary", use_container_width=True, key=f"s_{cid}"):
             if not fn:
                 st.error("ФИО обязательно")
-            else:
-                try:
-                    if is_edit:
-                        session.execute(text("""
-                            UPDATE contacts SET full_name=:n, position=:p, email=:e, phone=:ph, notes=:nt
-                            WHERE contact_id=:id
-                        """), {"n": fn, "p": pos, "e": em, "ph": ph, "nt": nt, "id": int(existing_data['contact_id'])})
-                    else:
-                        session.execute(text("""
-                            INSERT INTO contacts (full_name, supplier_id, position, email, phone, notes)
-                            VALUES (:n, :sid, :p, :e, :ph, :nt)
-                        """), {"n": fn, "sid": int(supplier_id), "p": pos, "e": em, "ph": ph, "nt": nt})
-                    session.commit(); clear_cache()
-                    st.session_state.pop("force_new_contact", None)
-                    st.success("Готово!"); st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка: {e}"); session.rollback()
+                return
+            try:
+                params = {"n": fn, "p": pos, "e": em, "ph": ph, "nt": nt, "sid": int(supplier_id)}
+                if is_edit:
+                    params["id"] = int(cid)
+                    log_action(st.session_state["auth"]["user_id"], "UPDATE_CONTACT", "contacts", params["id"], new={"name": fn})
+                    session.execute(text("""
+                        UPDATE contacts SET full_name=:n, position=:p, email=:e, phone=:ph, notes=:nt 
+                        WHERE contact_id=:id
+                    """), params)
+                else:
+                    res = session.execute(text("""
+                        INSERT INTO contacts (full_name, supplier_id, position, email, phone, notes) 
+                        VALUES (:n, :sid, :p, :e, :ph, :nt) RETURNING contact_id
+                    """), params)
+                    new_id = res.scalar()
+                    log_action(st.session_state["auth"]["user_id"], "CREATE_CONTACT", "contacts", int(new_id), new={"name": fn})
+
+                session.commit()
+                clear_cache()
+                
+                # 🟢 МАГИЯ ВЫХОДА: сбрасываем флаги показа формы
+                st.session_state["show_c_form"] = False
+                st.session_state["show_c_form_new"] = False
+                st.toast("✅ Контакт сохранен")
+                
+                import time
+                time.sleep(0.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка БД: {e}")
+                session.rollback()
+
+# ==========================================
+# 📝 ОПРОСНИКИ (SURVEYS)
+# ==========================================
 
 def render_surveys_manager(session, supplier_id, is_readonly):
     """Управление опросниками: Реестр + кнопки действий"""
