@@ -109,3 +109,13 @@ class AppSetting(Base):
     setting_key = Column(String(50), primary_key=True)
     setting_value = Column(JSONB, nullable=False)
     description = Column(Text)
+
+class MonthlyReport(Base):
+    __tablename__ = 'reports_monthly'
+    
+    report_id = Column(Integer, primary_key=True, autoincrement=True)
+    report_month = Column(Date, nullable=False, unique=True)
+    sections_data = Column(JSONB, nullable=False)
+    created_at = Column(DateTime, server_default=text("now()"))
+    updated_at = Column(DateTime, server_default=text("now()"), onupdate=text("now()"))
+    created_by = Column(Integer, ForeignKey('users.user_id', ondelete='SET NULL'))

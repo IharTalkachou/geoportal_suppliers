@@ -2,9 +2,13 @@ import streamlit as st
 import pandas as pd
 import io
 from datetime import datetime
+from sqlalchemy.orm import Session
+from config.database import engine
+
 from config.cache import query_db
 from ui.analytics.data_provider import get_analytics_snapshot
 from ui.shared_components import render_survey_viewer
+from ui.analytics.report_docx import render_monthly_report_tab
 
 def render_reports_tab():
     st.subheader("📋 Формирование регламентных отчётов")
@@ -14,7 +18,8 @@ def render_reports_tab():
         "2. Сводный отчёт о ходе выполнения", 
         "3. Реестр предоставляемых сведений", 
         "4. Реестр протоколов совещаний",
-        "5. Просмотр технических опросников"
+        "5. Просмотр технических опросников",
+        "6. Формирование месячного отчёта НИПД"
     ], key="report_type_sel")
 
     if report_type == "1. Реестр подписанных соглашений":
@@ -27,6 +32,9 @@ def render_reports_tab():
         _render_meeting_minutes_registry() # 👈 ВЫЗОВ НОВОЙ ФУНКЦИИ
     elif report_type == "5. Просмотр технических опросников":
         _render_survey_explorer()
+    elif report_type == "6. Формирование месячного отчёта НИПД":
+        with Session(engine) as sess:
+            render_monthly_report_tab(sess)   
 
 # ==========================================
 # 1. РЕЕСТР СОГЛАШЕНИЙ

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from config.database import engine
 from config.cache import query_db
 
+
 # Импортируем наши новые модули
 from ui.analytics.data_provider import get_analytics_snapshot, clear_analytics_cache
 from ui.analytics.kpi_logic import render_kpi_tab
@@ -12,6 +13,7 @@ from ui.analytics.progress_math import render_traffic_light_chart
 from ui.analytics.staff import render_staff_tab
 from ui.analytics.heatmap import render_heatmap_tab
 from ui.analytics.reports import render_reports_tab
+from ui.analytics.report_docx import render_monthly_report_tab
 
 def render_analytics_tab(user_role="user"):
     """Главная точка входа вкладки Аналитика"""
