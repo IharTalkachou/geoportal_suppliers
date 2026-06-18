@@ -176,7 +176,7 @@ def generate_docx_file(report_date, sections, month_name):
                     
                     # Стандартное форматирование абзаца
                     fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE # Интервал одиночный
-                    fmt.space_after = Pt(0)                             # Убираем лишние отступы между абзацами
+                    fmt.space_after = Pt(0)                        # Убираем лишние отступы между абзацами
                     fmt.space_before = Pt(0)
                     
                     if p_text.strip().startswith(('-', '*')):
