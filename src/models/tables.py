@@ -119,3 +119,29 @@ class MonthlyReport(Base):
     created_at = Column(DateTime, server_default=text("now()"))
     updated_at = Column(DateTime, server_default=text("now()"), onupdate=text("now()"))
     created_by = Column(Integer, ForeignKey('users.user_id', ondelete='SET NULL'))
+
+class RegistrationRequest(Base):
+    __tablename__ = 'reg_requests'
+    
+    req_id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, server_default=text("now()"))
+    processed_at = Column(DateTime)
+    applicant_type = Column(String) 
+    applicant_name = Column(Text, nullable=False)
+    applicant_phone = Column(String(50)) # 👈 Новое поле
+    scan_url = Column(Text)              # 👈 Новое поле
+    org_type = Column(String)
+    status = Column(String, server_default=text("'Новая'"))
+    result_supplier_id = Column(Integer, ForeignKey('suppliers.supplier_id'))
+    note = Column(Text)
+
+class RequestUser(Base):
+    __tablename__ = 'reg_request_users'
+    
+    user_row_id = Column(Integer, primary_key=True, autoincrement=True)
+    req_id = Column(Integer, ForeignKey('reg_requests.req_id', ondelete='CASCADE'))
+    full_name = Column(Text, nullable=False)
+    email = Column(String(255)) # 👈 Новое поле
+    login = Column(Text, nullable=False)
+    is_admin = Column(Boolean, default=False)
+

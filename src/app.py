@@ -30,6 +30,7 @@ from ui.analytics_tab import render_analytics_tab
 from ui.datasets_tab import render_datasets_tab
 from ui.project_dashboard import render_project_dashboard
 from ui.admin_panel import render_admin_panel
+from ui.requests_tab import render_requests_tab
 
 from config.session_store import create_token, restore_session, destroy_session
 
@@ -212,7 +213,7 @@ else:
     
     # Используем segmented_control для навигации (он вызывает rerun и обновляет сессию)
     # Список опций выносим в переменную, чтобы использовать одни и те же строки везде
-    nav_options = ["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📊 Аналитика"]
+    nav_options = ["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📩 Заявки", "📊 Аналитика"]
     
     # Если мы только зашли и ключа нет — создаем его со значением по умолчанию
     if "main_nav" not in st.session_state:
@@ -238,5 +239,8 @@ else:
     elif choice == "📋 Проекты":
         with Session(engine) as session: 
             render_project_dashboard(session, user_role=user_role)
+    elif choice == "📩 Заявки":
+        with Session(engine) as session:
+            render_requests_tab(session, user_role=user_role)
     elif choice == "📊 Аналитика":
         render_analytics_tab(user_role=user_role)
