@@ -119,6 +119,7 @@ class MonthlyReport(Base):
     created_at = Column(DateTime, server_default=text("now()"))
     updated_at = Column(DateTime, server_default=text("now()"), onupdate=text("now()"))
     created_by = Column(Integer, ForeignKey('users.user_id', ondelete='SET NULL'))
+    fixed_at = Column(DateTime) # 👈 Добавлена колонка фиксации
 
 class RegistrationRequest(Base):
     __tablename__ = 'reg_requests'
