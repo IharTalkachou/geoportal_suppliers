@@ -190,7 +190,7 @@ def render_info_types_manager(session, is_readonly):
                                 key=f"btn_nav_{idx}_{s_row['supplier_id']}",
                                 on_click=go_to_sup_callback,
                                 args=(int(s_row['supplier_id']),),
-                                use_container_width=True
+                                width='stretch'
                                 # Мы можем добавить здесь небольшой CSS, чтобы кнопка была еще меньше, 
                                 # но стандартный use_container_width в колонке и так сделает её компактной
                             )

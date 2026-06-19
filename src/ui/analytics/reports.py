@@ -122,7 +122,7 @@ def _render_agreement_registry():
                     with col_link:
                         # Подпись ссылки: Дата | Название проекта | Название файла
                         btn_label = f"{doc['sign_date'].strftime('%d.%m.%Y')} | {doc['project_name']} : {doc['doc_name']}"
-                        st.link_button(btn_label, doc['doc_url'], use_container_width=True)
+                        st.link_button(btn_label, doc['doc_url'], width='stretch')
 
     # 4. Кнопка экспорта (оставим стандартную таблицу для Excel)
     st.markdown("---")
@@ -386,7 +386,7 @@ def _render_meeting_minutes_registry():
                     with col_btn:
                         # На кнопке пишем проект и название файла
                         label = f"{doc['project_name']} — {doc['doc_name']}"
-                        st.link_button(label, doc['doc_url'], use_container_width=True)
+                        st.link_button(label, doc['doc_url'], width='stretch')
 
 # ==========================================
 # 5. ПРОВОДНИК ОПРОСНИКОВ

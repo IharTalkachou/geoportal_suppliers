@@ -166,7 +166,7 @@ def render_monthly_report_tab(session):
     
     # 🟢 ЕДИНАЯ КНОПКА СБОРА ДАННЫХ
     if not is_fixed:
-        if st.button("✨ Собрать данные для отчёта из базы", use_container_width=True, type="secondary"):
+        if st.button("✨ Собрать данные для отчёта из базы", width='stretch', type="secondary"):
             new_users, totals = fetch_registration_stats(start_p, end_p)
             
             # Логика для Блока 02 (Регистрация)
@@ -240,16 +240,16 @@ def render_monthly_report_tab(session):
     col1, col2, col3 = st.columns(3)
     with col1:
         if not is_fixed:
-            if st.button("💾 Сохранить черновик", use_container_width=True, type="primary"):
+            if st.button("💾 Сохранить черновик", width='stretch', type="primary"):
                 session.execute(text("UPDATE reports_monthly SET sections_data=:d WHERE report_id=:id"),
                                 {"d": json.dumps(updated_full_data, ensure_ascii=False), "id": report_id})
                 session.commit(); clear_cache(); st.toast("✅ Сохранено")
     with col2:
         if not is_fixed:
-            if st.button("🔒 Зафиксировать", use_container_width=True):
+            if st.button("🔒 Зафиксировать", width='stretch'):
                 session.execute(text("UPDATE reports_monthly SET fixed_at=NOW(), sections_data=:d WHERE report_id=:id"),
                                 {"d": json.dumps(updated_full_data, ensure_ascii=False), "id": report_id})
                 session.commit(); clear_cache(); st.rerun()
     with col3:
         buf = generate_docx_file(report_date, updated_full_data, MONTHS_RU[s_month])
-        st.download_button("📥 Скачать .docx", buf, f"Report_{s_year}_{s_month}.docx", use_container_width=True)
+        st.download_button("📥 Скачать .docx", buf, f"Report_{s_year}_{s_month}.docx", width='stretch')

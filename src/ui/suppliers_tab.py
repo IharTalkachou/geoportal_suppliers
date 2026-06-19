@@ -98,7 +98,7 @@ def render_supplier_card(session, selected_sup_id, is_readonly):
     
     with col_edit:
         if not is_readonly:
-            if st.button("✏️ Редактировать реквизиты", use_container_width=True):
+            if st.button("✏️ Редактировать реквизиты", width='stretch'):
                 st.session_state["sup_edit_mode"] = not st.session_state["sup_edit_mode"]; st.rerun()
     
     if st.session_state["sup_edit_mode"]:
@@ -303,7 +303,7 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                 if not st.session_state.get("show_np_form"):
                     with st.container(border=True):
                         st.write("Добавить новый проект?")
-                        if st.button("➕ Создать новый проект", use_container_width=True):
+                        if st.button("➕ Создать новый проект", width='stretch'):
                             st.session_state["show_np_form"] = True; st.rerun()
                 else:
                     if st.button("⬅️ Отмена"):
@@ -315,12 +315,12 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                 action = st.session_state.get("tech_action_mode")
                 if not action:
                     with st.container(border=True):
-                        if st.button("➕ Добавить новую связь", use_container_width=True):
+                        if st.button("➕ Добавить новую связь", width='stretch'):
                             st.session_state["tech_action_mode"] = "ADD"; st.rerun()
                         if not items_df.empty:
-                            if st.button("✏️ Изменить связь", use_container_width=True):
+                            if st.button("✏️ Изменить связь", width='stretch'):
                                 st.session_state["tech_action_mode"] = "EDIT"; st.rerun()
-                            if st.button("🗑 Удалить связь", use_container_width=True):
+                            if st.button("🗑 Удалить связь", width='stretch'):
                                 st.session_state["tech_action_mode"] = "DEL"; st.rerun()
                         st.divider()
                         
@@ -328,13 +328,13 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                             st.session_state["main_nav"] = "📋 Проекты"
                             st.session_state["filter_project_id"] = pid
 
-                        st.button("🔎 Перейти к карточке проекта", use_container_width=True, type="secondary",
+                        st.button("🔎 Перейти к карточке проекта", width='stretch', type="secondary",
                                   on_click=go_to_full_project_cb, args=(current_proj_id,))
                         
                         # 3. УДАЛЕНИЕ ПРОЕКТА
                         if current_proj_id and not is_readonly:
                             st.divider()
-                            if st.button("🗑 Удалить проект", use_container_width=True, help="Проект должен быть пустым"):
+                            if st.button("🗑 Удалить проект", width='stretch', help="Проект должен быть пустым"):
                                 # Проверяем, можно ли удалять
                                 has_content = session.execute(text("""
                                     SELECT 1 FROM project_items WHERE project_id = :pid 
@@ -386,7 +386,7 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                     elif action == "DEL":
                         opts = {f"{r['dataset_name']} | {r['info_name']}": r for _, r in items_df.iterrows()}
                         sel = st.selectbox("Выберите для удаления:", [""] + list(opts.keys()))
-                        if sel and st.button("❌ Подтвердить удаление", use_container_width=True):
+                        if sel and st.button("❌ Подтвердить удаление", width='stretch'):
                             _delete_item_logic(session, selected_sup_id, opts[sel])
         else: st.info("Режим просмотра")
 
@@ -436,7 +436,7 @@ def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, i
 
     # --- СОХРАНЕНИЕ ---
     btn_txt = "💾 Сохранить изменения" if is_edit else "🚀 Создать связь"
-    if st.button(btn_txt, type="primary", use_container_width=True, key="ds_save_btn_final"):
+    if st.button(btn_txt, type="primary", width='stretch', key="ds_save_btn_final"):
         try:
             # А. Получаем ID проекта
             if st.session_state.ds_form_proj == "(Новый проект)":
@@ -548,10 +548,10 @@ def render_contacts_manager(session, supplier_id, is_readonly):
                 if not st.session_state.get("show_c_form"):
                     with st.container(border=True):
                         st.write("Действие для выбранного контакта:")
-                        if st.button("✏️ Редактировать данные", use_container_width=True, key="btn_edit_c"):
+                        if st.button("✏️ Редактировать данные", width='stretch', key="btn_edit_c"):
                             st.session_state["show_c_form"] = True
                             st.rerun()
-                        if st.button("🗑 Удалить", type="secondary", use_container_width=True, key="btn_del_c"):
+                        if st.button("🗑 Удалить", type="secondary", width='stretch', key="btn_del_c"):
                             try:
                                 log_action(st.session_state["auth"]["user_id"], "DELETE_CONTACT", "contacts", int(curr_contact['contact_id']), old={"name": curr_contact['full_name']})
                                 session.execute(text("DELETE FROM contacts WHERE contact_id = :id"), {"id": int(curr_contact['contact_id'])})
@@ -567,7 +567,7 @@ def render_contacts_manager(session, supplier_id, is_readonly):
                 if not st.session_state.get("show_c_form_new"):
                     with st.container(border=True):
                         st.write("Хотите добавить нового человека?")
-                        if st.button("➕ Создать новый контакт", use_container_width=True, key="btn_new_c"):
+                        if st.button("➕ Создать новый контакт", width='stretch', key="btn_new_c"):
                             st.session_state["show_c_form_new"] = True
                             st.rerun()
                 else:
@@ -589,7 +589,7 @@ def _render_contact_form_standalone(session, supplier_id, data=None):
         ph = st.text_input("Телефон", value=data['phone'] if is_edit else "", key=f"ph_{cid}")
         nt = st.text_area("Примечание", value=data['notes'] if is_edit else "", key=f"n_{cid}", height=100)
         
-        if st.button("💾 Сохранить изменения" if is_edit else "💾 Создать", type="primary", use_container_width=True, key=f"s_{cid}"):
+        if st.button("💾 Сохранить изменения" if is_edit else "💾 Создать", type="primary", width='stretch', key=f"s_{cid}"):
             if not fn:
                 st.error("ФИО обязательно")
                 return

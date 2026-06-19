@@ -174,3 +174,13 @@ with st.sidebar:
                 saved_at = data.get("_saved_at", "нет данных")
                 st.write(f"Синхронизация на диске: {saved_at[11:19]}")
 # --------------------------------------------------------------------'''
+
+.streamlit/config.toml
+[server]
+# Отключает автоматическую перезагрузку при изменении кода
+# Это уберет нагрузку на Watchdog и WinAPI
+folderWatchBlacklist = ["*"]
+fileWatcherType = "none"
+
+# Дополнительно можно настроить запуск, чтобы не открывался браузер автоматически
+headless = true

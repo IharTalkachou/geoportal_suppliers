@@ -174,7 +174,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                 for _, d in docs.iterrows():
                     d_col1, d_col2 = st.columns([0.8, 0.2])
                     with d_col1:
-                        st.link_button(f"📄 {d['doc_name']}", d['doc_url'], use_container_width=True)
+                        st.link_button(f"📄 {d['doc_name']}", d['doc_url'], width='stretch')
                     with d_col2:
                         if st.button("🗑", key=f"del_doc_buro_{d['doc_id']}", help="Удалить ссылку"):
                             session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"), {"id": int(d['doc_id'])})
@@ -200,7 +200,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
             st.markdown("---")
 
         # СОХРАНЕНИЕ
-        if st.button("💾 Сохранить изменения", type="primary", use_container_width=True):
+        if st.button("💾 Сохранить изменения", type="primary", width='stretch'):
             try:
                 s_id = stage_map[st.session_state.buro_stage_in]["id"]
                 # 🟢 ИСПРАВЛЕНИЕ NUMPY INT
@@ -243,6 +243,6 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                 clear_cache(); st.success("Готово!"); st.rerun()
             except Exception as e: st.error(f"Ошибка БД: {e}"); session.rollback()
 
-        if is_editing and st.button("🗑 Удалить", type="secondary", use_container_width=True):
+        if is_editing and st.button("🗑 Удалить", type="secondary", width='stretch'):
             session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"), {"id": int(item_ids_map[sel_item])})
             session.commit(); clear_cache(); st.rerun()

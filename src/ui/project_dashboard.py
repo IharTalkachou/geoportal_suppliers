@@ -81,7 +81,7 @@ def render_project_dashboard(session, user_role="user"):
                     new_p_name = st.text_input("Название проекта *", key="new_proj_name_field")
                     new_p_agr = st.checkbox("Проект Соглашения (первичное подключение)", key="new_proj_agr_field")
                     
-                    if st.button("🚀 Создать и открыть", use_container_width=True):
+                    if st.button("🚀 Создать и открыть", width='stretch'):
                         if new_p_name:
                             try:
                                 s_id = int(sup_map[selected_sup])
@@ -223,13 +223,13 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
     if not is_readonly:
         c1, c2 = st.columns([1, 1])
         with c1:
-            if st.button("✏️ Изменить реквизиты", type="secondary", use_container_width=True):
+            if st.button("✏️ Изменить реквизиты", type="secondary", width='stretch'):
                 st.session_state["dash_edit_mode"] = not st.session_state.get("dash_edit_mode", False)
                 st.rerun()
         
         with c2:
             # БЛОК УДАЛЕНИЯ ПРОЕКТА
-            if st.button("🗑 Удалить проект", type="secondary", use_container_width=True, key="del_proj_btn"):
+            if st.button("🗑 Удалить проект", type="secondary", width='stretch', key="del_proj_btn"):
                 # Проверки
                 has_items = session.execute(text("SELECT 1 FROM project_items WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
                 has_stages = session.execute(text("SELECT 1 FROM project_stages WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()

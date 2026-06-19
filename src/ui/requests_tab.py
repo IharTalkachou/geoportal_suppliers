@@ -100,7 +100,7 @@ def render_registration_form(session):
                         if u['fio'] == admin_fio: u['is_admin'] = True
 
         st.divider()
-        if st.button("🚀 Создать заявку", type="primary", use_container_width=True):
+        if st.button("🚀 Создать заявку", type="primary", width='stretch'):
             if not main_applicant_name: st.error("Заполните имя заявителя"); st.stop()
             try:
                 res = session.execute(text("""
@@ -190,20 +190,20 @@ def render_requests_registry(session, user_role):
                               on_click=go_to_sup_cb, 
                               args=(det['result_supplier_id'],), 
                               type="secondary",
-                              use_container_width=True)
+                              width='stretch')
             
             with c2:
                 # 🟢 ИСПРАВЛЕНИЕ: Индикация скана
                 if det['applicant_type'] == "Юридическое лицо":
                     if det['scan_url'] and str(det['scan_url']).strip() != "":
-                        st.link_button("📄 Открыть скан заявки", det['scan_url'], use_container_width=True)
+                        st.link_button("📄 Открыть скан заявки", det['scan_url'], width='stretch')
                     else:
                         st.warning("⚠️ Заявка не приложена (ссылка отсутствует)")
                 
                 # Механизм повышения для организаций-пользователей
                 if det['org_type'] == "Пользователь" and pd.isna(det['result_supplier_id']):
                     st.info("💡 Эту организацию можно внести в реестр Поставщиков")
-                    if st.button("🏗 Создать запись Поставщика", type="primary", use_container_width=True):
+                    if st.button("🏗 Создать запись Поставщика", type="primary", width='stretch'):
                         try:
                             new_sup = session.execute(text("""
                                 INSERT INTO suppliers (supplier_name, supplier_phone, supplier_notes) 
@@ -224,7 +224,7 @@ def render_requests_registry(session, user_role):
                     cp1, cp2 = st.columns(2)
                     with cp1: d_proc = st.date_input("Дата", value=datetime.now().date(), key=f"dp_{sel_id}")
                     with cp2: t_proc = st.time_input("Время", value=datetime.now().time(), key=f"tp_{sel_id}")
-                    if st.button("✅ Завершить заявку", use_container_width=True, key=f"btn_finish_{sel_id}"):
+                    if st.button("✅ Завершить заявку", width='stretch', key=f"btn_finish_{sel_id}"):
                         proc_dt = datetime.combine(d_proc, t_proc)
                         session.execute(text("UPDATE reg_requests SET processed_at=:p, status='Завершена' WHERE req_id=:id"),
                                         {"p": proc_dt, "id": int(sel_id)})

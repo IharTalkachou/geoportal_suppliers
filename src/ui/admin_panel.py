@@ -130,7 +130,7 @@ def _render_audit_log_management(session):
             days_to_keep = st.slider("Удалить записи старше (дней):", 7, 365, 30)
         with c_clean2:
             st.write("<br>", unsafe_allow_html=True)
-            if st.button("🧹 Выполнить очистку", use_container_width=True):
+            if st.button("🧹 Выполнить очистку", width='stretch'):
                 try:
                     # Выполняем SQL напрямую для надежности
                     cutoff = datetime.now() - timedelta(days=days_to_keep)
@@ -190,7 +190,7 @@ def _render_system_settings(session):
     with col_m2:
         new_lock_msg = st.text_input("Текст при блокировке", value=current_cfg.get("lockout_message", "Техработы"))
 
-    if st.button("💾 Сохранить системные настройки", type="primary", use_container_width=True):
+    if st.button("💾 Сохранить системные настройки", type="primary", width='stretch'):
         updated = {
             "session_timeout_minutes": new_timeout, "maintenance_mode": new_maint,
             "maintenance_warning": new_warn, "maintenance_message": new_warn_msg,
@@ -240,7 +240,7 @@ def _render_lifecycle_management(session):
                 "stage_type": st.column_config.SelectboxColumn("Тип", options=["Задача", "Веха"]),
                 "stage_color": st.column_config.TextColumn("Цвет")
             },
-            use_container_width=True
+            width='stretch'
         )
 
         if st.button("💾 Применить изменения в списке", key="btn_save_stages"):

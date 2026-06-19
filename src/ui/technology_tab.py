@@ -205,7 +205,7 @@ def render_technology_tab(session, project_id, user_role="user"):
                 for _, d in docs.iterrows():
                     d_col1, d_col2 = st.columns([0.8, 0.2])
                     with d_col1:
-                        st.link_button(f"📄 {d['doc_name']}", d['doc_url'], use_container_width=True)
+                        st.link_button(f"📄 {d['doc_name']}", d['doc_url'], width='stretch')
                     with d_col2:
                         if st.button("🗑", key=f"del_doc_tech_{d['doc_id']}", help="Удалить ссылку"):
                             session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"), {"id": int(d['doc_id'])})
@@ -234,7 +234,7 @@ def render_technology_tab(session, project_id, user_role="user"):
         cb1, cb2 = st.columns([3, 1])
 
         with cb1:
-            if st.button("💾 Сохранить изменения", type="primary", use_container_width=True, key="tech_save_final_btn"):
+            if st.button("💾 Сохранить изменения", type="primary", width='stretch', key="tech_save_final_btn"):
                 try:
                     s_id = stage_map[st.session_state.tech_stage_in]["id"]
                     r_id = None
@@ -309,6 +309,6 @@ def render_technology_tab(session, project_id, user_role="user"):
                 except Exception as e:
                     st.error(f"❌ Ошибка БД: {e}"); session.rollback()
         with cb2:
-            if is_editing and st.button("🗑 Удалить", type="secondary", use_container_width=True, key="tech_delete_final_btn"):
+            if is_editing and st.button("🗑 Удалить", type="secondary", width='stretch', key="tech_delete_final_btn"):
                 session.execute(text("DELETE FROM item_stages WHERE stage_progress_id = :id"), {"id": int(item_ids_map[sel_item])})
                 session.commit(); clear_cache(); st.rerun()
