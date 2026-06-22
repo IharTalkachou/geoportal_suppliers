@@ -264,113 +264,199 @@ def render_requests_registry(session, user_role):
             st.table(users_disp[["full_name", "email", "login", "is_admin"]].rename(columns={"full_name": "ФИО", "is_admin": "Админ"}))
 
 def render_provision_form(session):
-    st.markdown("### 📦 Новая заявка на предоставление набора")
-    
-    with st.container(border=True):
-        # --- 1. ОБЩИЕ ДАННЫЕ ЗАЯВИТЕЛЯ ---
-        st.markdown("##### 👤 Информация о заявителе")
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c1:
-            app_cat = st.selectbox("Тип лица", ["Физическое лицо", "Представитель", "Гос. орган", "Иная организация"], key="prov_app_cat")
-            # 🟢 ВНУТРЕННИЙ НОМЕР УДАЛЕН ОТСЮДА
-        with c2:
-            app_name = st.text_input("Наименование (ФИО или Организация) *")
-            contact_fio = st.text_input("Контактное лицо (ФИО) *")
-        with c3:
-            contact_phone = st.text_input("Телефон *")
-            contact_email = st.text_input("Email *")
+    # 1. Инициализация состояния, если его нет
+    if "prov_submitted" not in st.session_state:
+        st.session_state.prov_submitted = False
+    if "last_prov_id" not in st.session_state:
+        st.session_state.last_prov_id = None
 
-        c4, c5, c6 = st.columns(3)
-        with c4:
-            channel = st.selectbox("Канал поступления", ["Национальный геопортал", "Почта", "Личное обращение"])
-        with c5:
-            reg_date = st.date_input("Дата поступления", value=datetime.now().date())
-        with c6:
-            pref_method = st.selectbox("Способ связи", ["Email", "Почта", "Лично"])
-
-        st.divider()
-
-        # --- 2. ПРЕДМЕТ ЗАЯВКИ (НИПД vs ГКГФ) ---
-        st.markdown("##### 🔍 Предмет заявки")
-        req_type = st.radio("Тип запрашиваемых данных", ["НИПД", "Госкартгеофонд"], horizontal=True, key="prov_req_type")
+    # 2. Логика переключения экранов
+    if st.session_state.prov_submitted:
+        # ЭКРАН УСПЕХА
+        st.success(f"🎉 Поступление заявки успешно зафиксировано!")
+        st.balloons()
         
-        selected_nipd_id = None
-        selected_gkf_ids = []
-
-        if req_type == "НИПД":
-            dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
-            sel_ds = st.selectbox("Выберите набор данных", [""] + dss["dataset_name"].tolist())
-            if sel_ds:
-                ds_id = dss[dss["dataset_name"] == sel_ds]["dataset_id"].iloc[0]
-                infos = query_db("""
-                    SELECT it.info_id, it.info_name, it.format, it.update, s.supplier_name, pi.provision_right
-                    FROM info_types it
-                    JOIN project_items pi ON it.info_id = pi.info_id
-                    JOIN projects p ON pi.project_id = p.project_id
-                    JOIN suppliers s ON p.supplier_id = s.supplier_id
-                    WHERE it.dataset_id = :did
-                """, {"did": int(ds_id)})
-                sel_info = st.selectbox("Выберите вид сведений", [""] + infos["info_name"].tolist())
-                if sel_info:
-                    info_row = infos[infos["info_name"] == sel_info].iloc[0]
-                    selected_nipd_id = int(info_row["info_id"])
-                    st.info(f"**Справочно:** Поставщик: {info_row['supplier_name']} | Формат: {info_row['format']} | Право предоставления: {info_row['provision_right']}")
-        else:
-            g_types = query_db("SELECT * FROM ref_gkf_types")
-            sel_g_type = st.selectbox("Тип материала ГКГФ", [""] + g_types["type_name"].tolist())
-            if sel_g_type:
-                tid = int(g_types[g_types["type_name"] == sel_g_type]["type_id"].iloc[0])
-                materials = query_db("SELECT * FROM ref_gkf_materials WHERE type_id = :tid", {"tid": tid})
-                sel_mats = st.multiselect("Вид материала", materials["material_name"].tolist())
-                if sel_mats:
-                    selected_gkf_ids = materials[materials["material_name"].isin(sel_mats)]["material_id"].tolist()
-
-        scan_url = st.text_input("🔗 Ссылка на скан заявки (если есть)")
-
-        # --- 3. АВТО-РАСЧЕТ SLA (Справочно) ---
-        st.divider()
-        deadline_validation = add_business_days(reg_date, 5)
-        deadline_review = add_business_days(reg_date, 10)
-        cl1, cl2 = st.columns(2)
-        cl1.metric("Срок валидации", deadline_validation.strftime("%d.%m.%Y"))
-        cl2.metric("Срок рассмотрения", deadline_review.strftime("%d.%m.%Y"))
-
-        # --- 4. СОХРАНЕНИЕ ---
-        st.divider()
-        if st.button("🚀 Зарегистрировать поступление", type="primary", width='stretch'):
-            if not app_name or not contact_fio:
-                st.error("Заполните обязательные поля"); st.stop()
+        with st.container(border=True):
+            st.markdown(f"""
+                ### Заявка зарегистрирована
+                Системный номер в базе: **{st.session_state.last_prov_id}**
+                
+                Теперь вы можете найти её в разделе **"Реестр (Предоставление)"** для дальнейшей обработки.
+            """)
             
-            try:
-                # 1. Вставка основной записи (reg_number пока NULL)
-                res = session.execute(text("""
-                    INSERT INTO provision_requests (
-                        created_at, applicant_category, applicant_name, 
-                        contact_person, phone, email, channel, preferred_contact_method, 
-                        request_type, scan_url, nipd_info_id, gkf_material_ids, status_id
-                    ) VALUES (
-                        :ca, :ac, :an, :cp, :ph, :em, :ch, :pm, :rt, :su, :ni, :gi, 
-                        (SELECT stage_id FROM stages WHERE stage_code = 'REQ_OPENE' LIMIT 1)
-                    ) RETURNING req_id
-                """), {
-                    "ca": reg_date, "ac": app_cat, "an": app_name,
-                    "cp": contact_fio, "ph": contact_phone, "em": contact_email,
-                    "ch": channel, "pm": pref_method, "rt": req_type, "su": scan_url,
-                    "ni": selected_nipd_id, "gi": selected_gkf_ids
-                })
-                new_req_id = res.scalar()
+            if st.button("➕ Создать еще одну заявку", type="primary", width="stretch"):
+                st.session_state.prov_submitted = False
+                st.session_state.last_prov_id = None
+                st.rerun()
+    else:
+        # СТАНДАРТНЫЙ ЭКРАН ФОРМЫ
+        st.markdown("### 📦 Новая заявка на предоставление набора")
+        
+        with st.container(border=True):
+            # --- 1. ОБЩИЕ ДАННЫЕ ЗАЯВИТЕЛЯ ---
+            st.markdown("##### 👤 Информация о заявителе")
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                app_cat = st.selectbox("Тип лица", ["Физическое лицо", "Представитель", "Гос. орган", "Иная организация"], key="prov_app_cat")
+            with c2:
+                app_name = st.text_input("Наименование (ФИО или Организация) *")
+                contact_fio = st.text_input("Контактное лицо (ФИО) *")
+            with c3:
+                contact_phone = st.text_input("Телефон *")
+                contact_email = st.text_input("Email *")
 
-                # 2. Первая веха
-                session.execute(text("""
-                    INSERT INTO provision_request_history (req_id, stage_id, actual_start, comments)
-                    VALUES (:rid, (SELECT stage_id FROM stages WHERE stage_code = 'REQ_OPENE' LIMIT 1), :now, 'Заявка поступила в систему')
-                """), {"rid": new_req_id, "now": datetime.now()})
+            c4, c5, c6 = st.columns(3)
+            with c4:
+                channel = st.selectbox("Канал поступления", ["Национальный геопортал", "Почта", "Личное обращение"])
+            with c5:
+                reg_date = st.date_input("Дата поступления", value=datetime.now().date())
+            with c6:
+                pref_method = st.selectbox("Способ связи", ["Email", "Почта", "Лично"])
 
-                session.commit(); clear_cache()
-                st.success(f"Поступление заявки зафиксировано. Системный ID: {new_req_id}")
-                time_module.sleep(1); st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка БД: {e}"); session.rollback()
+            st.divider()
+
+            # --- 2. ПРЕДМЕТ ЗАЯВКИ ---
+            st.markdown("##### 🔍 Предмет заявки")
+            req_type = st.radio("Тип запрашиваемых данных", ["НИПД", "Госкартгеофонд"], horizontal=True, key="prov_req_type")
+            
+            selected_nipd_id = None
+            selected_gkf_ids = []
+            gkf_extra_note = ""
+
+            if req_type == "НИПД":
+                dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
+                sel_ds = st.selectbox("Выберите набор данных", [""] + dss["dataset_name"].tolist())
+                if sel_ds:
+                    ds_id = dss[dss["dataset_name"] == sel_ds]["dataset_id"].iloc[0]
+                    infos = query_db("""
+                        SELECT it.info_id, it.info_name, it.format, it.update, s.supplier_name, pi.provision_right
+                        FROM info_types it
+                        JOIN project_items pi ON it.info_id = pi.info_id
+                        JOIN projects p ON pi.project_id = p.project_id
+                        JOIN suppliers s ON p.supplier_id = s.supplier_id
+                        WHERE it.dataset_id = :did
+                    """, {"did": int(ds_id)})
+                    sel_info = st.selectbox("Выберите вид сведений", [""] + infos["info_name"].tolist())
+                    if sel_info:
+                        info_row = infos[infos["info_name"] == sel_info].iloc[0]
+                        selected_nipd_id = int(info_row["info_id"])
+                        st.info(f"**Справочно:** Поставщик: {info_row['supplier_name']} | Формат: {info_row['format']} | Право предоставления: {info_row['provision_right']}")
+            else:
+                g_types = query_db("SELECT * FROM ref_gkf_types")
+                sel_g_type = st.selectbox("Тип материала ГКГФ", [""] + g_types["type_name"].tolist())
+                
+                # Вспомогательные переменные для сохранения
+                selected_gkf_ids = []
+                gkf_extra_note = ""
+
+                if sel_g_type:
+                    tid = int(g_types[g_types["type_name"] == sel_g_type]["type_id"].iloc[0])
+                    
+                    # 1. Материалы аэрофотосъёмки (ID 1)
+                    if tid == 1:
+                        sub_opt = st.selectbox("Вид материалов аэрофотосъёмки", ["Аэрофотоснимки", "Ортофотопланы"])
+                        # Ищем ID в базе по названию
+                        mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE material_name = :n", {"n": sub_opt})
+                        if not mat_res.empty: selected_gkf_ids = [int(mat_res.iloc[0]['material_id'])]
+                        
+                        if sub_opt == "Ортофотопланы":
+                            gkf_extra_note = st.text_area("Номенклатуры листов или наименование территории")
+
+                    # 2. Материалы ЗИС (ID 2)
+                    elif tid == 2:
+                        zis_list = [
+                            "Административно-территориальные единицы", "Земельные участки",
+                            "Земельные участки, предоставленные гражданам", "Виды земель",
+                            "Мелиоративное состояние земель", "Ограничения (обременения) прав на земельные участки",
+                            "Коммуникации", "Внемасштабные объекты и символы"
+                        ]
+                        sel_mats = st.multiselect("Выберите слои ЗИС", zis_list)
+                        if sel_mats:
+                            # В данной логике ЗИС - это набор материалов. 
+                            # Если их нет в ref_gkf_materials, их нужно туда добавить или хранить текстом.
+                            # Пока ищем те, что есть:
+                            mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE material_name IN :l", {"l": tuple(sel_mats)})
+                            if not mat_res.empty: selected_gkf_ids = mat_res['material_id'].tolist()
+
+                    # 3. Топографические карты (ID 3)
+                    elif tid == 3:
+                        sub_opt = st.selectbox("Вид (Топокарты)", ["совмещённый", "контур", "гидрография", "рельеф", "растительность", "дорожная сеть, огнестойкие кварталы", "другое"])
+                        gkf_extra_note = st.text_area("Номенклатуры листов или наименование территории")
+                        # Для карт/планов часто ID один (общий тип), детали в ноте
+                        mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE type_id = 3 LIMIT 1")
+                        if not mat_res.empty: selected_gkf_ids = [int(mat_res.iloc[0]['material_id'])]
+
+                    # 4. Топографические планы (ID 4)
+                    elif tid == 4:
+                        sub_opt = st.selectbox("Вид (Топопланы)", ["совмещённый", "контур", "гидрография", "рельеф", "растительность", "дорожная сеть, огнестойкие кварталы", "другое"])
+                        gkf_extra_note = st.text_input("Название топографического плана")
+                        mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE type_id = 4 LIMIT 1")
+                        if not mat_res.empty: selected_gkf_ids = [int(mat_res.iloc[0]['material_id'])]
+
+                    # 5. Тематические карты... (ID 5)
+                    elif tid == 5:
+                        sub_opt = st.selectbox("Вид (Тематика)", ["обзорно-топографические", "политико-административные", "дорожные", "туристические", "исторические", "экологические", "астрономические", "учебные", "другие"])
+                        gkf_extra_note = st.text_input("Название тематической карты, плана, атласа")
+                        mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE type_id = 5 LIMIT 1")
+                        if not mat_res.empty: selected_gkf_ids = [int(mat_res.iloc[0]['material_id'])]
+
+                    # 6. ПВО (ID 6)
+                    elif tid == 6:
+                        sub_opt = st.selectbox("Вид (ПВО)", ["координаты", "отметки высот", "кроки"])
+                        mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE material_name = :n", {"n": sub_opt.capitalize()})
+                        if not mat_res.empty: selected_gkf_ids = [int(mat_res.iloc[0]['material_id'])]
+
+                    # 7. ЦМР (ID 7)
+                    elif tid == 7:
+                        st.info("Выбрана Цифровая модель рельефа")
+                        mat_res = query_db("SELECT material_id FROM ref_gkf_materials WHERE type_id = 7 LIMIT 1")
+                        if not mat_res.empty: selected_gkf_ids = [int(mat_res.iloc[0]['material_id'])]
+
+            scan_url = st.text_input("🔗 Ссылка на скан заявки (если есть)")
+
+            st.divider()
+            
+            # --- 4. СОХРАНЕНИЕ ---
+            if st.button("🚀 Зарегистрировать поступление", type="primary", width='stretch'):
+                if not app_name or not contact_fio:
+                    st.error("Заполните обязательные поля"); st.stop()
+                
+                try:
+                    # ВАЖНО: Переменная gkf_extra_note должна быть доступна здесь.
+                    # Если это НИПД, она будет пустой.
+                    final_note = gkf_extra_note if req_type == "Госкартгеофонд" else ""
+
+                    res = session.execute(text("""
+                        INSERT INTO provision_requests (
+                            created_at, applicant_category, applicant_name, 
+                            contact_person, phone, email, channel, preferred_contact_method, 
+                            request_type, scan_url, nipd_info_id, gkf_material_ids, status_id, note
+                        ) VALUES (
+                            :ca, :ac, :an, :cp, :ph, :em, :ch, :pm, :rt, :su, :ni, :gi, 
+                            (SELECT stage_id FROM stages WHERE stage_code = 'REQ_OPENE' LIMIT 1), :nt
+                        ) RETURNING req_id
+                    """), {
+                        "ca": reg_date, "ac": app_cat, "an": app_name,
+                        "cp": contact_fio, "ph": contact_phone, "em": contact_email,
+                        "ch": channel, "pm": pref_method, "rt": req_type, "su": scan_url,
+                        "ni": selected_nipd_id, "gi": selected_gkf_ids,
+                        "nt": final_note  # 👈 Новая переменная здесь
+                    })
+                    new_req_id = res.scalar()
+
+                    session.execute(text("""
+                        INSERT INTO provision_request_history (req_id, stage_id, actual_start, comments)
+                        VALUES (:rid, (SELECT stage_id FROM stages WHERE stage_code = 'REQ_OPENE' LIMIT 1), :now, 'Заявка поступила в систему')
+                    """), {"rid": new_req_id, "now": datetime.now()})
+
+                    session.commit(); clear_cache()
+                    
+                    st.session_state.prov_submitted = True
+                    st.session_state.last_prov_id = new_req_id
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Ошибка БД: {e}"); session.rollback()
 
 # ==========================================
 # 🗺️ ГЕО-ПОМОЩНИК
@@ -428,12 +514,33 @@ def render_provision_registry(session, user_role):
     if reqs.empty:
         st.info("Заявок пока нет."); return
 
-    # 2. Выбор заявки
+    # --- СТАБИЛЬНЫЙ ВЫБОР ЧЕРЕЗ SESSION STATE ---
+    if "sel_prov_id" not in st.session_state:
+        st.session_state.sel_prov_id = None
+
+    # Формируем список опций
     req_opts = {f"ID {r['req_id']} | {r['reg_number'] or 'Без №'} | {r['applicant_name']}": r['req_id'] for _, r in reqs.iterrows()}
-    sel_label = st.selectbox("🎯 Выберите заявку для обработки:", [""] + list(req_opts.keys()), key="prov_reg_sel")
-    if not sel_label: return
+    
+    # Ищем индекс текущего выбранного ID, чтобы селектбокс не сбрасывался
+    current_index = 0
+    if st.session_state.sel_prov_id:
+        ids_list = [r['req_id'] for _, r in reqs.iterrows()]
+        if st.session_state.sel_prov_id in ids_list:
+            current_index = ids_list.index(st.session_state.sel_prov_id) + 1 # +1 так как первая опция пустая
+
+    sel_label = st.selectbox(
+        "🎯 Выберите заявку для обработки:", 
+        [""] + list(req_opts.keys()), 
+        index=current_index,
+        key="prov_reg_sel_widget"
+    )
+
+    if not sel_label:
+        st.session_state.sel_prov_id = None
+        return
     
     rid = req_opts[sel_label]
+    st.session_state.sel_prov_id = rid # Запоминаем выбор
     det = reqs[reqs['req_id'] == rid].iloc[0]
     
     # Рассчитываем сроки от даты поступления (created_at)
@@ -521,6 +628,8 @@ def render_provision_registry(session, user_role):
 
         # 🟢 ЭТАП 2: РЕГИСТРАЦИЯ
         elif cur_code == 'REQ_REGIS_START': # РЕГИСТРАЦИЯ -> ВАЛИДАЦИЯ
+            st.info("📂 Заявка успешно зарегистрирована. Следующий шаг: проверка комплектности документов (валидация).")
+            
             with st.popover("🔍 Начать проверку комплектности", width='stretch'):
                 target_dt = render_time_selector("val_start", rid)
                 if st.button("Начать валидацию"):
@@ -546,13 +655,24 @@ def render_provision_registry(session, user_role):
                 _render_provision_docs(session, rid, is_closed=is_closed)
 
                 target_dt = render_time_selector("val_end", rid)
+                
+                # Проверяем, ГКГФ ли это
+                is_gkf = (det['request_type'] == 'Госкартгеофонд')
+                
                 cv1, cv2, cv3 = st.columns(3)
                 with cv1:
                     if st.button("🎉 Пройдена", type="primary", width='stretch'):
+                        # Для ГКГФ следующим этапом логично ставить REQ_REGIS_ENDED (Зарегистрирована)
                         _move_to_stage(session, rid, 'REQ_REGIS_ENDED', "Валидация успешна", coords_raw=coords_input, custom_dt=target_dt)
+                
                 with cv2:
-                    if st.button("⚠️ Поставщику", width='stretch'):
-                        _move_to_stage(session, rid, 'REQ_TRANS_PREPA', "Заявка перенаправляется Поставщику", coords_raw=coords_input, custom_dt=target_dt)
+                    # КНОПКА СКРЫВАЕТСЯ ДЛЯ ГКГФ
+                    if not is_gkf:
+                        if st.button("⚠️ Поставщику", width='stretch'):
+                            _move_to_stage(session, rid, 'REQ_TRANS_PREPA', "Заявка перенаправляется Поставщику", coords_raw=coords_input, custom_dt=target_dt)
+                    else:
+                        st.info("ℹ️ ГКГФ: Поставщик не требуется (Оператор)")
+
                 with cv3:
                     with st.popover("❌ Ошибка", use_container_width=True):
                         reason = st.text_area("Укажите причину возврата:", placeholder="Напр: некорректная доверенность...")
@@ -724,10 +844,11 @@ def render_provision_registry(session, user_role):
                         st.caption(f"🔗 [{d['doc_name']}]({d['doc_url']})")
 
 def _move_to_stage(session, req_id, stage_code, comment, reg_no=None, coords_raw=None, custom_dt=None):
-    """Обновленная функция: записывает подробный комментарий в историю"""
+    """Обновленная функция: записывает подробный комментарий в историю и уведомляет пользователя"""
     try:
-        stage_res = session.execute(text("SELECT stage_id FROM stages WHERE stage_code = :c LIMIT 1"), {"c": stage_code}).fetchone()
+        stage_res = session.execute(text("SELECT stage_id, stage_name FROM stages WHERE stage_code = :c LIMIT 1"), {"c": stage_code}).fetchone()
         new_sid = int(stage_res[0])
+        new_sname = stage_res[1]
         exec_time = custom_dt if custom_dt else datetime.now()
 
         # 1. Обновляем статус заявки
@@ -744,13 +865,22 @@ def _move_to_stage(session, req_id, stage_code, comment, reg_no=None, coords_raw
         session.execute(text("UPDATE provision_request_history SET actual_end = :t WHERE req_id = :rid AND actual_end IS NULL"), 
                         {"rid": req_id, "t": exec_time})
 
-        # 3. Открываем новый этап (comment здесь — это уже готовая фраза с пояснением)
+        # 3. Открываем новый этап
         session.execute(text("""
             INSERT INTO provision_request_history (req_id, stage_id, actual_start, comments, responsible_id)
             VALUES (:rid, :sid, :t, :comm, :uid)
         """), {"rid": req_id, "sid": new_sid, "t": exec_time, "comm": comment, "uid": st.session_state.auth['user_id']})
 
-        session.commit(); clear_cache(); st.rerun()
+        session.commit(); clear_cache()
+        
+        # 🟢 Уведомление пользователя перед обновлением
+        st.toast(f"✅ Статус изменен: {new_sname}", icon="🚀")
+        if reg_no:
+            st.toast(f"🔢 Присвоен номер: {reg_no}")
+            
+        time_module.sleep(0.5) # Даем время БД и кэшу синхронизироваться
+        st.rerun()
+        
     except Exception as e:
         st.error(f"Ошибка: {e}"); session.rollback()
     

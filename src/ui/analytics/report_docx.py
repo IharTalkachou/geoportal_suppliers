@@ -59,18 +59,45 @@ DEFAULT_SECTIONS = {
 }
 
 def pluralize(n, forms):
-    """Склонение существительных: pluralize(5, ['заявка', 'заявки', 'заявок'])"""
-    if n % 10 == 1 and n % 100 != 11:
-        return forms[0]
-    elif 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
-        return forms[1]
-    else:
-        return forms[2]
+    """Склонение существительных: [заявка, заявки, заявок]"""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11: return forms[0]
+    elif 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20): return forms[1]
+    else: return forms[2]
 
-def pluralize_verb(n, forms):
-    """Склонение глаголов: pluralize_verb(1, ['обработано', 'обработано'])"""
-    # Для глаголов в отчетном стиле обычно: 1 - 'обработано', >1 - 'обработаны'
-    return forms[0] if n == 1 else forms[1]
+def pluralize_verb_fem(n, forms):
+    """Склонение глаголов (была/были, выполнена/выполнены)"""
+    n = abs(int(n))
+    return forms[0] if (n % 10 == 1 and n % 100 != 11) else forms[1]
+
+def pluralize_outcome(n, variant):
+    """Склонение категорий исходов: выполнена/выполнены и т.д."""
+    n = abs(int(n))
+    forms = {
+        "done": ["выполнена", "выполнены"],
+        "op": ["отклонена Оператором", "отклонены Оператором"],
+        "sup": ["отказана Поставщиком", "отказаны Поставщиками"]
+    }
+    return forms[variant][0] if (n % 10 == 1 and n % 100 != 11) else forms[variant][1]
+
+def get_gkf_material_names(material_ids):
+    """Превращает [1, 2] в 'Аэрофотоснимки, Ортофотопланы'"""
+    if not material_ids: return "не указаны"
+    # Принудительно приводим к списку целых чисел, если пришел JSON
+    if isinstance(material_ids, str):
+        import json
+        try: ids = json.loads(material_ids)
+        except: return "ошибка формата"
+    else: ids = material_ids
+    
+    if not ids: return "не указаны"
+    
+    # Запрашиваем названия материалов
+    placeholders = ', '.join([':id' + str(i) for i in range(len(ids))])
+    params = {f'id{i}': int(v) for i, v in enumerate(ids)}
+    res = query_db(f"SELECT material_name FROM ref_gkf_materials WHERE material_id IN ({placeholders})", params)
+    
+    return ", ".join(res['material_name'].tolist()) if not res.empty else "не найдены"
 
 def get_report_period_bounds(report_month_date):
     prev = query_db("""
@@ -219,7 +246,6 @@ def render_monthly_report_tab(session):
         if st.button("✨ Собрать данные для отчёта из базы", use_container_width=True, type="secondary"):
             # А. Получаем данные из базы
             new_users, totals = fetch_registration_stats(start_p, end_p)
-            proc_df, in_work_count, p_totals = fetch_provision_stats(start_p, end_p)
 
             # --- БЛОК 02: РЕГИСТРАЦИЯ ---
             phys = len(new_users[new_users['applicant_type'] == 'Физическое лицо'])
@@ -248,43 +274,92 @@ def render_monthly_report_tab(session):
             st.session_state[f"t_6.1_04_total_stats"] = True
 
             # --- БЛОК 05: ПРЕДОСТАВЛЕНИЕ НИПД ---
-            a_count = len(proc_df)
-            word_req = pluralize(a_count, ['заявка', 'заявки', 'заявок'])
+            stats = fetch_provision_stats(start_p, end_p)
 
-            v_obrabotano = pluralize_verb(a_count, ['обработано', 'обработано']) # или 'обработана'/'обработано'
-            v_ispolneno = pluralize_verb(p_totals['total_done'], ['исполнено', 'исполнено']) 
+            def get_outcome_category(row):
+                code = row['stage_code']
+                comm = str(row['last_comment']).lower() if row['last_comment'] else ""
+                # Если закрыта, но в комментарии есть слово "отказ" - это отказ
+                if code == 'REQ_CLOSE' and ('отказ' in comm or 'возврат' in comm):
+                    return "отказана Поставщиком"
+                if code in ('REQ_AGREE_COMPL', 'REQ_CLOSE'): return "выполнена"
+                if code == 'REQ_REGIS_RETUR' or code == 'REQ_REFUS_SUBMI': return "отклонена Оператором"
+                return "отказана Поставщиком"
 
-            v_word = "обработана" if a_count == 1 else "обработано"
+            def format_passport(row, is_nipd=True):
+                applicant = row['applicant_name']
+                if is_nipd:
+                    details = f"заявитель — {applicant}, набор «{row['dataset_name']}» ({row['info_name']}), поставщик — {row['supplier_name']}"
+                else:
+                    mats = get_gkf_material_names(row['gkf_material_ids'])
+                    details = f"заявитель — {applicant}, материалы: {mats}"
+                
+                cat = get_outcome_category(row)
+                variant = "done" if "выполн" in cat else "op" if "Оператор" in cat else "sup"
+                outcome_text = pluralize_outcome(1, variant)
+                
+                if variant != "done":
+                    reason = f", причина: {row['last_comment']}" if row['last_comment'] else ""
+                    return f"{outcome_text} ({details}{reason})"
+                return f"{outcome_text} ({details})"
 
-            if a_count == 0:
-                p1 = f"– обработанных заявок в отчетном периоде нет, по {in_work_count} {pluralize(in_work_count, ['заявке', 'заявкам', 'заявкам'])} продолжается работа;"
-            elif a_count < 3:
-                # 🟢 ПУНКТ 3: Детализация с пояснениями
-                details = []
-                for _, r in proc_df.iterrows():
-                    details.append(
-                        f"Заявитель – {r['applicant_name']}, "
-                        f"Набор ({r['info_name']}), "
-                        f"Поставщик – {r['supplier_name']}, "
-                        f"{r['last_comment']}"
-                    )
-                p1 = f"– {v_word} {a_count} {word_req}: {'; '.join(details)};"
-            else:
-                p1 = f"– {a_count} {word_req} надлежащим образом выполнены и закрыты, по {in_work_count} {pluralize(in_work_count, ['заявке', 'заявкам', 'заявкам'])} продолжается работа;"
+            def build_section(data, label, is_nipd=True):
+                proc = data['processed']
+                work = data['in_work']
+                
+                if proc.empty and work.empty:
+                    return f"– {label} — в отчетном периоде не поступало;"
 
-            # 🟢 ПУНКТ 4: Накопительные итоги
-            x_v, y_v = p_totals['total_received'], p_totals['total_done']
-            p2 = (f"на конец отчётного периода поступило {x_v} {pluralize(x_v, ['заявка', 'заявки', 'заявок'])}, "
-                  f"{pluralize_verb(y_v, ['выполнена', 'выполнено'])} {y_v} {pluralize(y_v, ['заявка', 'заявки', 'заявок'])};")
+                count_proc = len(proc)
+                v_obrab = pluralize_verb_fem(count_proc, ['полностью обработана', 'полностью обработаны'])
+                n_curr = f"{count_proc} {pluralize(count_proc, ['заявка', 'заявки', 'заявок'])}"
+                
+                if count_proc >= 3:
+                    bits = []
+                    # Группируем для краткой формы
+                    results = [get_outcome_category(r) for _, r in proc.iterrows()]
+                    d_n = results.count("выполнена")
+                    o_n = results.count("отклонена Оператором")
+                    s_n = results.count("отказана Поставщиком")
+                    if d_n: bits.append(f"{d_n} — {pluralize_outcome(d_n, 'done')}")
+                    if o_n: bits.append(f"{o_n} — {pluralize_outcome(o_n, 'op')}")
+                    if s_n: bits.append(f"{s_n} — {pluralize_outcome(s_n, 'sup')}")
+                    res_str = f" ({', '.join(bits)})"
+                else:
+                    res_str = f" ({', '.join([format_passport(r, is_nipd) for _, r in proc.iterrows()])})"
 
-            st.session_state[f"tx_6.1_05_provision_nipd_{report_id}"] = (
-                "прием, рассмотрение заявок на предоставление в пользование наборов пространственных данных, включенных в НИПД:\n"
-                f"{p1}\n{p2}"
+                # Логика "В работе": Скрываем, если пусто
+                work_str = ""
+                if not work.empty:
+                    w_list = []
+                    for _, r in work.iterrows():
+                        if is_nipd: w_list.append(f"заявитель — {r['applicant_name']}, «{r['dataset_name']}»")
+                        else: w_list.append(f"заявитель — {r['applicant_name']}, материалы: {get_gkf_material_names(r['gkf_material_ids'])}")
+                    
+                    w_desc = f" ({'; '.join(w_list)})" if len(work) < 3 else ""
+                    work_str = f", по {len(work)} {pluralize(len(work), ['заявке', 'заявкам', 'заявкам'])}{w_desc} работа продолжается"
+
+                return f"– {label} — {v_obrab} {n_curr}{res_str}{work_str};"
+
+            text_nipd = build_section(stats['NIPD'], "включенных в НИПД", True)
+            text_gkf = build_section(stats['GKF'], "материалов Госкартгеофонда", False) # 👈 Одно слово "материалов"
+            
+            def format_total(count, label_text):
+                if count == 0: return f"– {label_text} — не получены"
+                return f"– {count} {pluralize(count, ['заявка', 'заявки', 'заявок'])} {label_text}"
+
+            t_nipd = format_total(stats['NIPD']['totals']['total_received'], "на предоставление в пользование наборов пространственных данных, включенных в НИПД")
+            t_gkf = format_total(stats['GKF']['totals']['total_received'], "на предоставление в пользование материалов Госкартгеофонда")
+
+            full_content = (
+                "прием, рассмотрение заявок на предоставление в пользование наборов пространственных данных:\n"
+                f"{text_nipd}\n{text_gkf}\n"
+                "на конец отчётного периода обработано:\n"
+                f"{t_nipd},\n{t_gkf};"
             )
-            st.session_state[f"t_6.1_05_provision_nipd"] = True
 
-            st.success("✨ Данные успешно собраны из базы данных!")
-            st.rerun()
+            st.session_state[f"tx_6.1_05_provision_nipd_{report_id}"] = full_content
+            st.session_state[f"t_6.1_05_provision_nipd"] = True
 
     # --- 5. РЕНДЕР КОНСТРУКТОРА (ЦИКЛ ПО ГРУППАМ) ---
     updated_full_data = {}
@@ -345,39 +420,58 @@ def render_monthly_report_tab(session):
         )
 
 def fetch_provision_stats(start_t, end_t):
-    """Собирает данные по заявкам на предоставление (НИПД)"""
-    # Запрос на завершенные заявки (те, что попали в финальный статус в этом периоде)
-    query_proc = """
-        SELECT pr.applicant_name, it.info_name, sup.supplier_name, h.comments AS last_comment
-        FROM provision_requests pr
-        JOIN info_types it ON pr.nipd_info_id = it.info_id
-        JOIN project_items pi ON it.info_id = pi.info_id
-        JOIN projects p ON pi.project_id = p.project_id
-        JOIN suppliers sup ON p.supplier_id = sup.supplier_id
-        JOIN stages s ON pr.status_id = s.stage_id
-        JOIN provision_request_history h ON h.req_id = pr.req_id AND h.stage_id = pr.status_id
-        WHERE pr.request_type = 'НИПД' 
-          AND s.stage_code IN ('REQ_CLOSE', 'REQ_AGREE_COMPL', 'REQ_REGIS_RETUR')
-          AND h.actual_start BETWEEN :s AND :e
-    """
-    processed = query_db(query_proc, {"s": start_t, "e": end_t})
+    """Сбор статистики с расширенными данными для НИПД и ГКГФ"""
+    
+    SUCCESS = ('REQ_AGREE_COMPL', 'REQ_CLOSE')
+    # Для ГКГФ REQ_CLOSE часто может быть и успехом, и отказом. 
+    # Поэтому мы будем смотреть на финальный статус в истории.
 
-    # Считаем активные в работе (кроме архива)
-    in_work = query_db("""
-        SELECT COUNT(*) FROM provision_requests pr
-        JOIN stages s ON pr.status_id = s.stage_id
-        WHERE pr.request_type = 'НИПД' 
-          AND s.stage_code NOT IN ('REQ_CLOSE', 'REQ_REGIS_RETUR', 'REQ_REFUS_RECEI', 'REQ_AGREE_COMPL')
-    """).iat[0,0]
+    def get_details(req_type):
+        # 1. Завершенные (теперь тянем gkf_material_ids)
+        query = f"""
+            SELECT 
+                pr.req_id, pr.applicant_name, pr.request_type, pr.gkf_material_ids,
+                it.info_name, ds.dataset_name, sup.supplier_name,
+                s.stage_code, h.comments as last_comment,
+                (SELECT s2.stage_code FROM provision_request_history h2 
+                 JOIN stages s2 ON h2.stage_id = s2.stage_id 
+                 WHERE h2.req_id = pr.req_id AND h2.actual_end = h.actual_start 
+                 LIMIT 1) as prev_stage_code
+            FROM provision_requests pr
+            JOIN stages s ON pr.status_id = s.stage_id
+            JOIN provision_request_history h ON h.req_id = pr.req_id AND h.stage_id = pr.status_id
+            LEFT JOIN info_types it ON pr.nipd_info_id = it.info_id
+            LEFT JOIN datasets ds ON it.dataset_id = ds.dataset_id
+            LEFT JOIN project_items pi ON it.info_id = pi.info_id
+            LEFT JOIN projects p ON pi.project_id = p.project_id
+            LEFT JOIN suppliers sup ON p.supplier_id = sup.supplier_id
+            WHERE pr.request_type = :rt AND h.actual_start BETWEEN :s AND :e
+              AND s.stage_code IN ('REQ_CLOSE', 'REQ_AGREE_COMPL', 'REQ_REGIS_RETUR', 'REQ_REFUS_SUBMI', 'REQ_REFUS_RECEI')
+        """
+        processed = query_db(query, {"rt": req_type, "s": start_t, "e": end_t})
 
-    # Накопительный итог
-    totals = query_db("""
-        SELECT 
-            COUNT(*) as total_received,
-            COUNT(*) FILTER (WHERE s.stage_code IN ('REQ_CLOSE', 'REQ_AGREE_COMPL')) as total_done
-        FROM provision_requests pr
-        JOIN stages s ON pr.status_id = s.stage_id
-        WHERE pr.request_type = 'НИПД'
-    """).iloc[0]
+        # 2. В работе (тянем gkf_material_ids)
+        query_work = f"""
+            SELECT pr.applicant_name, pr.gkf_material_ids, it.info_name, ds.dataset_name, sup.supplier_name
+            FROM provision_requests pr
+            JOIN stages s ON pr.status_id = s.stage_id
+            LEFT JOIN info_types it ON pr.nipd_info_id = it.info_id
+            LEFT JOIN datasets ds ON it.dataset_id = ds.dataset_id
+            LEFT JOIN project_items pi ON it.info_id = pi.info_id
+            LEFT JOIN projects p ON pi.project_id = p.project_id
+            LEFT JOIN suppliers sup ON p.supplier_id = sup.supplier_id
+            WHERE pr.request_type = :rt 
+              AND s.stage_code NOT IN ('REQ_CLOSE', 'REQ_AGREE_COMPL', 'REQ_REGIS_RETUR', 'REQ_REFUS_SUBMI', 'REQ_REFUS_RECEI')
+        """
+        in_work = query_db(query_work, {"rt": req_type})
 
-    return processed, in_work, totals
+        # 3. Накопительный
+        totals = query_db(f"""
+            SELECT COUNT(*) as total_received
+            FROM provision_requests pr
+            WHERE pr.request_type = :rt
+        """, {"rt": req_type}).iloc[0]
+
+        return {"processed": processed, "in_work": in_work, "totals": totals}
+
+    return {"NIPD": get_details("НИПД"), "GKF": get_details("Госкартгеофонд")}
