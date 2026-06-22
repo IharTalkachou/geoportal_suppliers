@@ -183,21 +183,58 @@ def _render_system_settings(session):
     
     new_warn_msg = st.text_area("Текст предупреждения", value=current_cfg.get("maintenance_message", ""), height=68)
     
-    st.divider()
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
-        new_maint = st.toggle("🚨 ВКЛЮЧИТЬ РЕЖИМ ОБСЛУЖИВАНИЯ", value=current_cfg.get("maintenance_mode", False))
-    with col_m2:
-        new_lock_msg = st.text_input("Текст при блокировке", value=current_cfg.get("lockout_message", "Техработы"))
-
     if st.button("💾 Сохранить системные настройки", type="primary", width='stretch'):
         updated = {
-            "session_timeout_minutes": new_timeout, "maintenance_mode": new_maint,
+            "session_timeout_minutes": new_timeout, "maintenance_mode": current_cfg.get("maintenance_mode", False),
             "maintenance_warning": new_warn, "maintenance_message": new_warn_msg,
-            "lockout_message": new_lock_msg
+            "lockout_message": current_cfg.get("lockout_message", "Техработы")
         }
         if save_settings(updated):
             st.success("✅ Настройки сохранены!"); clear_cache(); st.rerun()
+
+    st.markdown("---")
+    
+    # 🟢 НОВЫЙ БЛОК: ПРОИЗВОДСТВЕННЫЙ КАЛЕНДАРЬ
+    st.subheader("📅 Производственный календарь (Праздники РБ)")
+    st.caption("Укажите праздничные дни (выходные) и рабочие субботы для корректного расчета SLA.")
+
+    cal_df = query_db("SELECT * FROM ref_calendar_exceptions ORDER BY exception_date DESC")
+    
+    # Редактор календаря
+    edited_cal = st.data_editor(
+        cal_df,
+        key="calendar_editor",
+        num_rows="dynamic", # Позволяет добавлять и удалять строки прямо в таблице
+        hide_index=True,
+        column_config={
+            "exception_date": st.column_config.DateColumn("Дата", required=True),
+            "is_workday": st.column_config.CheckboxColumn("Рабочий день?", help="Отметьте, если это рабочая суббота"),
+            "description": st.column_config.TextColumn("Описание (напр. 'Новый год')")
+        },
+        width='stretch'
+    )
+
+    if st.button("💾 Сохранить календарь", key="save_calendar_btn"):
+        try:
+            # Простое решение: очищаем и перезаписываем (для небольших справочников это ок)
+            session.execute(text("DELETE FROM ref_calendar_exceptions"))
+            for _, row in edited_cal.iterrows():
+                if pd.notna(row['exception_date']):
+                    session.execute(text("""
+                        INSERT INTO ref_calendar_exceptions (exception_date, is_workday, description)
+                        VALUES (:d, :w, :desc)
+                    """), {
+                        "d": row['exception_date'], 
+                        "w": bool(row['is_workday']), 
+                        "desc": row['description']
+                    })
+            session.commit()
+            clear_cache()
+            st.success("Календарь обновлен!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка сохранения календаря: {e}")
+            session.rollback()
 
 # ==========================================
 # 4. ЖИЗНЕННЫЙ ЦИКЛ (CRUD ЭТАПОВ)
@@ -290,3 +327,5 @@ def _render_lifecycle_management(session):
                 else:
                     session.execute(text("DELETE FROM stages WHERE stage_id=:id"), {"id": sid})
                     session.commit(); clear_cache(); st.success("Удалено!"); st.rerun()
+
+

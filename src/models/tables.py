@@ -146,3 +146,52 @@ class RequestUser(Base):
     login = Column(Text, nullable=False)
     is_admin = Column(Boolean, default=False)
 
+class GkfType(Base):
+    __tablename__ = 'ref_gkf_types'
+    type_id = Column(Integer, primary_key=True, autoincrement=True)
+    type_name = Column(Text, nullable=False)
+
+class GkfMaterial(Base):
+    __tablename__ = 'ref_gkf_materials'
+    material_id = Column(Integer, primary_key=True, autoincrement=True)
+    type_id = Column(Integer, ForeignKey('ref_gkf_types.type_id'))
+    material_name = Column(Text, nullable=False)
+
+class ProvisionRequest(Base):
+    __tablename__ = 'provision_requests'
+    req_id = Column(Integer, primary_key=True, autoincrement=True)
+    reg_number = Column(String(50))
+    created_at = Column(DateTime, server_default=text("now()"))
+    applicant_category = Column(Text, nullable=False)
+    applicant_name = Column(Text, nullable=False)
+    contact_person = Column(Text)
+    phone = Column(String(50))
+    email = Column(String(255))
+    channel = Column(Text)
+    preferred_contact_method = Column(Text)
+    request_type = Column(Text, nullable=False)
+    scan_url = Column(Text)
+    nipd_info_id = Column(Integer, ForeignKey('info_types.info_id'))
+    gkf_material_ids = Column(JSON) # Используем JSON для хранения массива ID
+    status_id = Column(Integer, ForeignKey('stages.stage_id'))
+    note = Column(Text)
+    area_coords_raw = Column(Text)
+
+class ProvisionHistory(Base):
+    __tablename__ = 'provision_request_history'
+    history_id = Column(Integer, primary_key=True, autoincrement=True)
+    req_id = Column(Integer, ForeignKey('provision_requests.req_id', ondelete='CASCADE'))
+    stage_id = Column(Integer, ForeignKey('stages.stage_id'))
+    planned_start = Column(Date)
+    planned_end = Column(Date)
+    actual_start = Column(DateTime)
+    actual_end = Column(DateTime)
+    responsible_id = Column(Integer, ForeignKey('users.user_id'))
+    comments = Column(Text)
+
+class CalendarException(Base):
+    __tablename__ = 'ref_calendar_exceptions'
+    exception_date = Column(Date, primary_key=True)
+    is_workday = Column(Boolean, default=False)
+    description = Column(Text)
+

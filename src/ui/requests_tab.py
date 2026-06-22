@@ -1,29 +1,53 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from datetime import datetime
+from datetime import datetime, time
 import time as time_module
+import re
+import folium
+from streamlit_folium import st_folium
+
 from config.cache import query_db, clear_cache
 from config.auth import log_action
+from utils.date_utils import add_business_days
 
 def render_requests_tab(session, user_role="user"):
-    st.subheader("📩 Управление заявками на регистрацию")
+    st.subheader("📩 Управление входящими заявками")
     is_readonly = (user_role == "user")
     
+    # 🟢 ОБНОВЛЕННАЯ НАВИГАЦИЯ
     choice = st.segmented_control(
         "Навигация",
-        options=["➕ Новая заявка", "📋 Реестр заявок"],
+        options=["➕ Новая заявка", "📋 Реестр (Регистрация)", "📦 Реестр (Предоставление)"],
         default="➕ Новая заявка",
-        key="req_sub_nav_main",
+        key="req_main_nav",
         label_visibility="collapsed"
     )
     st.markdown("---")
 
     if choice == "➕ Новая заявка":
-        if is_readonly: st.warning("Недостаточно прав."); return
-        render_registration_form(session)
-    else:
+        if is_readonly: 
+            st.warning("Недостаточно прав."); return
+            
+        # 🟢 ВЫБОР ТИПА ЗАЯВКИ
+        req_type = st.radio(
+            "Выберите тип оформляемой заявки:",
+            ["Заявка на регистрацию", "Заявка на предоставление набора"],
+            horizontal=True,
+            key="new_req_type_toggle"
+        )
+        st.markdown("---")
+
+        if req_type == "Заявка на регистрацию":
+            render_registration_form(session)
+        else:
+            render_provision_form(session)
+            
+    elif choice == "📋 Реестр (Регистрация)":
         render_requests_registry(session, user_role)
+        
+    elif choice == "📦 Реестр (Предоставление)":
+        render_provision_registry(session, user_role)
 
 def render_registration_form(session):
     st.markdown("### 📝 Оформление новой заявки")
@@ -238,3 +262,521 @@ def render_requests_registry(session, user_role):
             users_disp = users.copy()
             users_disp['is_admin'] = users_disp['is_admin'].apply(lambda x: "🔑 Да" if x else "—")
             st.table(users_disp[["full_name", "email", "login", "is_admin"]].rename(columns={"full_name": "ФИО", "is_admin": "Админ"}))
+
+def render_provision_form(session):
+    st.markdown("### 📦 Новая заявка на предоставление набора")
+    
+    with st.container(border=True):
+        # --- 1. ОБЩИЕ ДАННЫЕ ЗАЯВИТЕЛЯ ---
+        st.markdown("##### 👤 Информация о заявителе")
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            app_cat = st.selectbox("Тип лица", ["Физическое лицо", "Представитель", "Гос. орган", "Иная организация"], key="prov_app_cat")
+            # 🟢 ВНУТРЕННИЙ НОМЕР УДАЛЕН ОТСЮДА
+        with c2:
+            app_name = st.text_input("Наименование (ФИО или Организация) *")
+            contact_fio = st.text_input("Контактное лицо (ФИО) *")
+        with c3:
+            contact_phone = st.text_input("Телефон *")
+            contact_email = st.text_input("Email *")
+
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            channel = st.selectbox("Канал поступления", ["Национальный геопортал", "Почта", "Личное обращение"])
+        with c5:
+            reg_date = st.date_input("Дата поступления", value=datetime.now().date())
+        with c6:
+            pref_method = st.selectbox("Способ связи", ["Email", "Почта", "Лично"])
+
+        st.divider()
+
+        # --- 2. ПРЕДМЕТ ЗАЯВКИ (НИПД vs ГКГФ) ---
+        st.markdown("##### 🔍 Предмет заявки")
+        req_type = st.radio("Тип запрашиваемых данных", ["НИПД", "Госкартгеофонд"], horizontal=True, key="prov_req_type")
+        
+        selected_nipd_id = None
+        selected_gkf_ids = []
+
+        if req_type == "НИПД":
+            dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
+            sel_ds = st.selectbox("Выберите набор данных", [""] + dss["dataset_name"].tolist())
+            if sel_ds:
+                ds_id = dss[dss["dataset_name"] == sel_ds]["dataset_id"].iloc[0]
+                infos = query_db("""
+                    SELECT it.info_id, it.info_name, it.format, it.update, s.supplier_name, pi.provision_right
+                    FROM info_types it
+                    JOIN project_items pi ON it.info_id = pi.info_id
+                    JOIN projects p ON pi.project_id = p.project_id
+                    JOIN suppliers s ON p.supplier_id = s.supplier_id
+                    WHERE it.dataset_id = :did
+                """, {"did": int(ds_id)})
+                sel_info = st.selectbox("Выберите вид сведений", [""] + infos["info_name"].tolist())
+                if sel_info:
+                    info_row = infos[infos["info_name"] == sel_info].iloc[0]
+                    selected_nipd_id = int(info_row["info_id"])
+                    st.info(f"**Справочно:** Поставщик: {info_row['supplier_name']} | Формат: {info_row['format']} | Право предоставления: {info_row['provision_right']}")
+        else:
+            g_types = query_db("SELECT * FROM ref_gkf_types")
+            sel_g_type = st.selectbox("Тип материала ГКГФ", [""] + g_types["type_name"].tolist())
+            if sel_g_type:
+                tid = int(g_types[g_types["type_name"] == sel_g_type]["type_id"].iloc[0])
+                materials = query_db("SELECT * FROM ref_gkf_materials WHERE type_id = :tid", {"tid": tid})
+                sel_mats = st.multiselect("Вид материала", materials["material_name"].tolist())
+                if sel_mats:
+                    selected_gkf_ids = materials[materials["material_name"].isin(sel_mats)]["material_id"].tolist()
+
+        scan_url = st.text_input("🔗 Ссылка на скан заявки (если есть)")
+
+        # --- 3. АВТО-РАСЧЕТ SLA (Справочно) ---
+        st.divider()
+        deadline_validation = add_business_days(reg_date, 5)
+        deadline_review = add_business_days(reg_date, 10)
+        cl1, cl2 = st.columns(2)
+        cl1.metric("Срок валидации", deadline_validation.strftime("%d.%m.%Y"))
+        cl2.metric("Срок рассмотрения", deadline_review.strftime("%d.%m.%Y"))
+
+        # --- 4. СОХРАНЕНИЕ ---
+        st.divider()
+        if st.button("🚀 Зарегистрировать поступление", type="primary", width='stretch'):
+            if not app_name or not contact_fio:
+                st.error("Заполните обязательные поля"); st.stop()
+            
+            try:
+                # 1. Вставка основной записи (reg_number пока NULL)
+                res = session.execute(text("""
+                    INSERT INTO provision_requests (
+                        created_at, applicant_category, applicant_name, 
+                        contact_person, phone, email, channel, preferred_contact_method, 
+                        request_type, scan_url, nipd_info_id, gkf_material_ids, status_id
+                    ) VALUES (
+                        :ca, :ac, :an, :cp, :ph, :em, :ch, :pm, :rt, :su, :ni, :gi, 
+                        (SELECT stage_id FROM stages WHERE stage_code = 'REQ_OPENE' LIMIT 1)
+                    ) RETURNING req_id
+                """), {
+                    "ca": reg_date, "ac": app_cat, "an": app_name,
+                    "cp": contact_fio, "ph": contact_phone, "em": contact_email,
+                    "ch": channel, "pm": pref_method, "rt": req_type, "su": scan_url,
+                    "ni": selected_nipd_id, "gi": selected_gkf_ids
+                })
+                new_req_id = res.scalar()
+
+                # 2. Первая веха
+                session.execute(text("""
+                    INSERT INTO provision_request_history (req_id, stage_id, actual_start, comments)
+                    VALUES (:rid, (SELECT stage_id FROM stages WHERE stage_code = 'REQ_OPENE' LIMIT 1), :now, 'Заявка поступила в систему')
+                """), {"rid": new_req_id, "now": datetime.now()})
+
+                session.commit(); clear_cache()
+                st.success(f"Поступление заявки зафиксировано. Системный ID: {new_req_id}")
+                time_module.sleep(1); st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка БД: {e}"); session.rollback()
+
+# ==========================================
+# 🗺️ ГЕО-ПОМОЩНИК
+# ==========================================
+def parse_area_coords(raw_text):
+    if not raw_text: return None
+    pattern = r"(\d+\.\d+)\s*,\s*(\d+\.\d+)"
+    matches = re.findall(pattern, raw_text)
+    if not matches: return None
+    return [[float(m[0]), float(m[1])] for m in matches]
+
+def render_preview_map(coords):
+    if not coords: return
+    # Используем альтернативный сервер плиток (CartoDB), он надежнее в корп. сетях
+    m = folium.Map(
+        location=coords[0], 
+        zoom_start=9, 
+        tiles='https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    )
+    folium.Polygon(
+        locations=coords, color="#3498DB", fill=True, fill_opacity=0.4, weight=3
+    ).add_to(m)
+    
+    # Вместо Маркеров (иконок) используем Круги (рисуются вектором)
+    for i, p in enumerate(coords):
+        folium.CircleMarker(
+            location=p, radius=5, color="red", fill=True, 
+            popup=f"Точка {i+1}"
+        ).add_to(m)
+    
+    st_folium(m, height=400, width='stretch', key="prov_map_render")
+
+# ==========================================
+# 📋 РЕЕСТР ЗАЯВОК НА ПРЕДОСТАВЛЕНИЕ
+# ==========================================
+def render_provision_registry(session, user_role):
+    st.markdown("### 📦 Реестр заявок на предоставление")
+    
+    # 1. Загрузка расширенных данных
+    reqs = query_db("""
+        SELECT pr.*, s.stage_name, s.stage_code, s.stage_color,
+               it.info_name, ds.dataset_name, 
+               sup.supplier_name, it.format, pi.provision_right
+        FROM provision_requests pr
+        JOIN stages s ON pr.status_id = s.stage_id
+        LEFT JOIN info_types it ON pr.nipd_info_id = it.info_id
+        LEFT JOIN datasets ds ON it.dataset_id = ds.dataset_id
+        LEFT JOIN project_items pi ON it.info_id = pi.info_id 
+        LEFT JOIN projects p ON pi.project_id = p.project_id
+        LEFT JOIN suppliers sup ON p.supplier_id = sup.supplier_id
+        ORDER BY pr.req_id DESC
+    """)
+    
+    if reqs.empty:
+        st.info("Заявок пока нет."); return
+
+    # 2. Выбор заявки
+    req_opts = {f"ID {r['req_id']} | {r['reg_number'] or 'Без №'} | {r['applicant_name']}": r['req_id'] for _, r in reqs.iterrows()}
+    sel_label = st.selectbox("🎯 Выберите заявку для обработки:", [""] + list(req_opts.keys()), key="prov_reg_sel")
+    if not sel_label: return
+    
+    rid = req_opts[sel_label]
+    det = reqs[reqs['req_id'] == rid].iloc[0]
+    
+    # Рассчитываем сроки от даты поступления (created_at)
+    base_date = det['created_at'].date()
+    deadline_val = add_business_days(base_date, 5)
+    deadline_rev = add_business_days(base_date, 10)
+
+    is_closed = det['stage_code'] in ['REQ_CLOSE', 'REQ_REGIS_RETUR', 'REQ_REFUS_RECEI']
+
+    # 3. ДЕТАЛЬНЫЙ ПРОСМОТР
+    with st.container(border=True):
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.markdown(f"🚦 **Этап:** <span style='background-color:{det['stage_color']}; color:white; padding:2px 8px; border-radius:4px;'>{det['stage_name']}</span>", unsafe_allow_html=True)
+            st.write(f"🏢 **Заявитель:** {det['applicant_name']}")
+            st.write(f"📞 **Контакт:** {det['contact_person']} | {det['phone']}")
+            if det['reg_number']: st.info(f"🔢 Внутренний номер: **{det['reg_number']}**")
+
+            # 🟢 БЛОК КОНТРОЛЬНЫХ СРОКОВ (SLA)
+            with st.expander("⏳ Контрольные сроки (SLA)", expanded=not is_closed):
+                sc1, sc2 = st.columns(2)
+                sc1.metric("Валидация (5 дн.)", deadline_val.strftime("%d.%m.%Y"))
+                sc2.metric("Рассмотрение (10 дн.)", deadline_rev.strftime("%d.%m.%Y"))
+                if not is_closed and datetime.now().date() > deadline_val:
+                    st.error("🚨 Срок валидации превышен!")
+               
+        with c2:
+            # 🟢 НИПД с названием набора
+            data_label = f"{det['request_type']}"
+            if det['request_type'] == 'НИПД' and pd.notna(det['dataset_name']):
+                data_label += f" | {det['dataset_name']} ({det['info_name']})"
+            st.write(f"📦 **Данные:** {data_label}")
+            
+            # 🟢 Справочная информация
+            if det['request_type'] == 'НИПД':
+                with st.expander("ℹ️ Справка по базе", expanded=True):
+                    st.caption(f"**Поставщик:** {det['supplier_name'] or 'Не найден'}")
+                    st.caption(f"**Формат:** {det['format'] or '—'}")
+                    st.caption(f"**Право:** {det['provision_right'] or '—'}")
+
+            if det['scan_url']: st.link_button("📄 Открыть скан", det['scan_url'], width='stretch')
+            else: st.warning("⚠️ Заявка не приложена")
+
+        # --- ГЕО-БЛОК ---
+        if det['area_coords_raw']:
+            with st.expander("🗺️ Геометрия запрашиваемой области", expanded=False):
+                coords = parse_area_coords(det['area_coords_raw'])
+                if coords: render_preview_map(coords)
+
+        # 🟢 ЦЕНТРАЛЬНЫЙ ВЫЗОВ ДОКУМЕНТОВ
+        #_render_provision_docs(session, rid, is_closed=is_closed)
+
+        # --- 🛠️ УПРАВЛЕНИЕ ЭТАПАМИ (WORKFLOW) ---
+        st.divider()
+        #st.markdown("##### 🛠️ Переход на следующий этап")
+        
+        cur_code = det['stage_code']
+        
+        # Вспомогательный UI для времени (Пункт 4)
+        def render_time_selector(key_prefix, rid):
+            st.write("🕒 **Время совершения действия:**")
+            mode = st.radio("Установить время:", ["Текущее", "Ввести вручную"], 
+                            horizontal=True, key=f"tm_{key_prefix}_{rid}")
+            
+            if mode == "Ввести вручную":
+                cc1, cc2 = st.columns(2)
+                # Подставляем ТЕКУЩЕЕ время как дефолт, чтобы не начинать с 00:00
+                d = cc1.date_input("Дата", value=datetime.now().date(), key=f"d_{key_prefix}_{rid}")
+                t = cc2.time_input("Время", value=datetime.now().time(), key=f"t_{key_prefix}_{rid}", step=60)
+                return datetime.combine(d, t)
+            
+            return datetime.now()
+
+        # Кнопки переходов
+        # 🟢 ЭТАП 1: ЗАЯВКА ПОСТУПИЛА
+        if cur_code == 'REQ_OPENE': # ПОСТУПИЛА -> РЕГИСТРАЦИЯ
+            with st.popover("✅ Зарегистрировать и присвоить номер", width='stretch'):
+                target_dt = render_time_selector("reg", rid)
+                _render_provision_docs(session, rid, is_closed=is_closed)
+
+                new_no = st.text_input("Внутренний номер регистрации *")
+                if st.button("Подтвердить регистрацию"):
+                    if new_no: _move_to_stage(session, rid, 'REQ_REGIS_START', f"Присвоен № {new_no}", reg_no=new_no, custom_dt=target_dt)
+                    else: st.error("Номер обязателен")
+
+        # 🟢 ЭТАП 2: РЕГИСТРАЦИЯ
+        elif cur_code == 'REQ_REGIS_START': # РЕГИСТРАЦИЯ -> ВАЛИДАЦИЯ
+            with st.popover("🔍 Начать проверку комплектности", width='stretch'):
+                target_dt = render_time_selector("val_start", rid)
+                if st.button("Начать валидацию"):
+                    _move_to_stage(session, rid, 'REQ_REGIS_VALID', "Передано на проверку", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 3: ВАЛИДАЦИЯ
+        elif cur_code == 'REQ_REGIS_VALID': # ВАЛИДАЦИЯ (КАРТА + РЕЗУЛЬТАТ)
+            with st.container(border=True):
+                st.write("📊 **Координаты из заявки:**")
+                coords_input = st.text_area("Вставьте текст с координатами:", value=det['area_coords_raw'] or "", height=80, key="coords_ta")
+                
+                # Отрисовка по кнопке
+                if st.button("🗺️ Отрисовать область на карте", width='stretch'):
+                    parsed = parse_area_coords(coords_input)
+                    if parsed:
+                        st.session_state[f"preview_coords_{rid}"] = parsed
+                    else: st.error("Формат не распознан")
+                
+                if f"preview_coords_{rid}" in st.session_state:
+                    render_preview_map(st.session_state[f"preview_coords_{rid}"])
+
+                st.write("---")
+                _render_provision_docs(session, rid, is_closed=is_closed)
+
+                target_dt = render_time_selector("val_end", rid)
+                cv1, cv2, cv3 = st.columns(3)
+                with cv1:
+                    if st.button("🎉 Пройдена", type="primary", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_REGIS_ENDED', "Валидация успешна", coords_raw=coords_input, custom_dt=target_dt)
+                with cv2:
+                    if st.button("⚠️ Поставщику", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_TRANS_PREPA', "Заявка перенаправляется Поставщику", coords_raw=coords_input, custom_dt=target_dt)
+                with cv3:
+                    if st.button("❌ Ошибка", type="secondary", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_REGIS_RETUR', "Отказ: некомплект", coords_raw=coords_input, custom_dt=target_dt)
+
+        # 🟢 ЭТАП 5: ЗАРЕГИСТРИРОВАНА -> ОБРАБОТКА ОПЕРАТОРОМ
+        elif cur_code == 'REQ_REGIS_ENDED':
+            with st.container(border=True):
+                st.write("📋 Заявка готова к внутренней обработке.")
+                target_dt = render_time_selector("proc_op_start", rid)
+                if st.button("⚙️ Начать обработку Оператором", type="primary", use_container_width=True):
+                    _move_to_stage(session, rid, 'REQ_PROCE_OPERA', "Оператор приступил к подготовке договора", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 6: ПОДГОТОВКА ПЕРЕДАЧИ ПОСТАВЩИКУ
+        elif cur_code == 'REQ_TRANS_PREPA':
+            with st.container(border=True):
+                st.info("ℹ️ На этом этапе необходимо направить уведомления Поставщику и Заявителю.")
+                st.write("")
+                _render_provision_docs(session, rid, is_closed=is_closed)
+
+                target_dt = render_time_selector("trans_prep", rid)
+                if st.button("📤 Подтвердить факт передачи Поставщику", type="primary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_TRANS_COMPL', "Уведомления направлены, заявка передана", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 7: ПЕРЕДАНА ПОСТАВЩИКУ
+        elif cur_code == 'REQ_TRANS_COMPL':
+            with st.container(border=True):
+                st.write("⏳ Ожидание подтверждения начала работ от Поставщика...")
+                target_dt = render_time_selector("trans_compl", rid)
+                if st.button("⚙️ Поставщик приступил к обработке", type="primary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_PROCE_SUPPL', "Поставщик начал рассмотрение заявки", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 8: ОБРАБОТКА ОПЕРАТОРОМ (Аналогично 9-му этапу)
+        elif cur_code == 'REQ_PROCE_OPERA':
+            with st.container(border=True):
+                st.write("📝 **Подготовка договора и расчет стоимости:**")
+                _render_provision_docs(session, rid, is_closed=False) # Тут крепим черновик договора
+                
+                target_dt = render_time_selector("proc_op_end", rid)
+                deadline = add_business_days(det['created_at'].date(), 10)
+                st.caption(f"Срок по регламенту (10 раб. дн.): **{deadline.strftime('%d.%m.%Y')}**")
+
+                co1, co2 = st.columns(2)
+                with co1:
+                    if st.button("📄 Проект договора отправлен", type="primary", use_container_width=True):
+                        _move_to_stage(session, rid, 'REQ_AGREE_SENT', "Проект договора направлен заявителю", custom_dt=target_dt)
+                with co2:
+                    if st.button("🚫 Отказать", type="secondary", use_container_width=True):
+                        _move_to_stage(session, rid, 'REQ_REFUS_SUBMI', "Оператором выявлены основания для отказа", custom_dt=target_dt)
+        
+        # 🟢 ЭТАП 9: ОБРАБОТКА ПОСТАВЩИКОМ
+        elif cur_code == 'REQ_PROCE_SUPPL':
+            with st.container(border=True):
+                st.write("📝 **Результат рассмотрения Поставщиком:**")
+                
+                st.write("")
+                target_dt = render_time_selector("proc_suppl", rid)
+                
+                deadline = add_business_days(det['created_at'].date(), 10)
+                st.caption(f"Контрольный срок ответа (10 раб. дн. от подачи): **{deadline.strftime('%d.%m.%Y')}**")
+
+                cv1, cv2 = st.columns(2)
+                with cv1:
+                    if st.button("📄 Проект договора готов", type="primary", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_AGREE_SENT', "Поставщик подготовил проект договора", custom_dt=target_dt)
+                with cv2:
+                    if st.button("🚫 Отказ Поставщика", type="secondary", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_REFUS_SUBMI', "Поставщиком направлен отказ в предоставлении", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 10: ОТКАЗАНО (Внедряем документы здесь)
+        elif cur_code == 'REQ_REFUS_SUBMI':
+            with st.container(border=True):
+                st.error("🚫 Заявка отклонена на этапе рассмотрения.")
+                _render_provision_docs(session, rid, is_closed=is_closed)
+                st.write("")
+                target_dt = render_time_selector("refus_close", rid)
+                if st.button("🏁 Закрыть заявку (в архив)", type="secondary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_CLOSE', "Заявка закрыта после официального отказа", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 11: ДОГОВОР ОТПРАВЛЕН -> ОЖИДАНИЕ (ЭТАП 12)
+        elif cur_code == 'REQ_AGREE_SENT':
+            with st.container(border=True):
+                st.write("📩 Проект договора находится у Заявителя.")
+                target_dt = render_time_selector("agr_sent", rid)
+                if st.button("⏳ Перейти в режим ожидания подписания", type="primary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_AGREE_WAIT', "Начат отсчет 10 дней на подписание Заявителем", custom_dt=target_dt)
+        
+        # 🟢 ЭТАП 12: ОЖИДАНИЕ ПОДПИСАНИЯ
+        elif cur_code == 'REQ_AGREE_WAIT':
+            with st.container(border=True):
+                st.info("⏳ Ожидание подписанных экземпляров договора от Заявителя.")
+
+                target_dt = render_time_selector("agree_wait", rid)
+                _render_provision_docs(session, rid, is_closed=is_closed)
+
+                c_v1, c_v2 = st.columns(2)
+                with c_v1:
+                    if st.button("🤝 Договор подписан", type="primary", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_AGREE_CONCL', "Договор официально заключен", custom_dt=target_dt)
+                with c_v2:
+                    if st.button("🚫 Отказ от подписания", type="secondary", width='stretch'):
+                        _move_to_stage(session, rid, 'REQ_REFUS_RECEI', "Заявитель не вернул подписанный договор", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 14: ДОГОВОР ЗАКЛЮЧЕН
+        elif cur_code == 'REQ_AGREE_CONCL':
+            with st.container(border=True):
+                st.success("🤝 Договор заключен. Можно переходить к передаче данных.")
+
+                target_dt = render_time_selector("exec_start", rid)
+                if st.button("📦 Начать исполнение (передачу)", type="primary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_AGREE_EXECU', "Начат процесс подготовки и передачи данных", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 15: ИСПОЛНЕНИЕ ДОГОВОРА
+        elif cur_code == 'REQ_AGREE_EXECU':
+            with st.container(border=True):
+                st.info("🛠 Процесс передачи данных по договору.")
+                
+                target_dt = render_time_selector("exec_end", rid)
+                _render_provision_docs(session, rid, is_closed=is_closed)
+                if st.button("✅ Данные переданы (Акт подписан)", type="primary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_AGREE_COMPL', "Данные переданы Заявителю, акт подписан", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 16: ИСПОЛНЕНА
+        elif cur_code == 'REQ_AGREE_COMPL':
+            with st.container(border=True):
+                st.success("🏁 Все обязательства по заявке выполнены.")
+
+                target_dt = render_time_selector("final_close", rid)
+                if st.button("🔒 Закрыть заявку в архив", type="primary", width='stretch'):
+                    _move_to_stage(session, rid, 'REQ_CLOSE', "Заявка переведена в архив", custom_dt=target_dt)
+
+        # 🟢 ЭТАП 17 / 4 / 13: ФИНАЛЬНЫЕ СТАТУСЫ (АРХИВ)
+        elif cur_code in ['REQ_CLOSE', 'REQ_REGIS_RETUR', 'REQ_REFUS_RECEI']:
+            st.success("✅ Заявка находится в архиве. Все действия завершены.")
+            
+
+        # 4. ИСТОРИЯ ЭТАПОВ
+        st.markdown("---")
+        st.write("**🕰 История прохождения:**")
+        history = query_db("""
+            SELECT h.history_id, h.actual_start, s.stage_name, u.display_name, h.comments
+            FROM provision_request_history h
+            JOIN stages s ON h.stage_id = s.stage_id
+            LEFT JOIN users u ON h.responsible_id = u.user_id
+            WHERE h.req_id = :rid ORDER BY h.actual_start DESC
+        """, {"rid": rid})
+        
+        for _, h_row in history.iterrows():
+            st.caption(f"**{h_row['actual_start'].strftime('%d.%m.%Y %H:%M')}** — {h_row['stage_name']} ({h_row['display_name'] or 'Система'})")
+            st.write(f"└ {h_row['comments']}")
+            
+            # Проверяем, были ли в этом этапе документы
+            h_docs = query_db("SELECT doc_name, doc_url FROM stage_documents WHERE provision_history_id = :hid", {"hid": int(h_row['history_id'])})
+            if not h_docs.empty:
+                cols = st.columns(len(h_docs) if len(h_docs) < 4 else 4) # Рисуем в ряд до 4-х штук
+                for i, (_, d) in enumerate(h_docs.iterrows()):
+                    with cols[i % 4]:
+                        st.caption(f"🔗 [{d['doc_name']}]({d['doc_url']})")
+
+def _move_to_stage(session, req_id, stage_code, comment, reg_no=None, coords_raw=None, custom_dt=None):
+    """Обновленная функция с поддержкой кастомного времени"""
+    try:
+        stage_res = session.execute(text("SELECT stage_id FROM stages WHERE stage_code = :c LIMIT 1"), {"c": stage_code}).fetchone()
+        new_sid = int(stage_res[0])
+        
+        # Используем custom_dt или NOW()
+        exec_time = custom_dt if custom_dt else datetime.now()
+
+        # 1. Обновляем заявку
+        upd_query = "UPDATE provision_requests SET status_id = :sid"
+        params = {"sid": new_sid, "rid": req_id}
+        if reg_no: 
+            upd_query += ", reg_number = :rn"
+            params["rn"] = reg_no
+        if coords_raw:
+            upd_query += ", area_coords_raw = :cr"
+            params["cr"] = coords_raw
+        upd_query += " WHERE req_id = :rid"
+        session.execute(text(upd_query), params)
+
+        # 2. Закрываем прошлый этап
+        session.execute(text("UPDATE provision_request_history SET actual_end = :t WHERE req_id = :rid AND actual_end IS NULL"), 
+                        {"rid": req_id, "t": exec_time})
+
+        # 3. Открываем новый
+        session.execute(text("""
+            INSERT INTO provision_request_history (req_id, stage_id, actual_start, comments, responsible_id)
+            VALUES (:rid, :sid, :t, :comm, :uid)
+        """), {"rid": req_id, "sid": new_sid, "t": exec_time, "comm": comment, "uid": st.session_state.auth['user_id']})
+
+        session.commit(); clear_cache(); st.rerun()
+    except Exception as e:
+        st.error(f"Ошибка: {e}"); session.rollback()
+    
+def _render_provision_docs(session, req_id, is_closed=False):
+    """Блок управления документами для заявок на предоставление"""
+    # 1. Находим ID текущей (активной) записи в истории
+    curr_h = query_db("SELECT history_id FROM provision_request_history WHERE req_id = :rid AND actual_end IS NULL LIMIT 1", {"rid": req_id})
+    
+    # Список уже прикрепленных показываем ВСЕГДА
+    docs = query_db("""
+        SELECT sd.* FROM stage_documents sd
+        JOIN provision_request_history h ON sd.provision_history_id = h.history_id
+        WHERE h.req_id = :rid
+    """, {"rid": req_id})
+    
+    if not docs.empty:
+        st.markdown("##### 📂 Документы по заявке")
+        for _, d in docs.iterrows():
+            d_c1, d_c2 = st.columns([0.85, 0.15])
+            d_c1.link_button(f"📄 {d['doc_name']}", d['doc_url'], use_container_width=True)
+            # Удаление разрешено, только если заявка НЕ закрыта
+            if not is_closed:
+                if d_c2.button("🗑", key=f"del_doc_pr_{d['doc_id']}"):
+                    session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"), {"id": int(d['doc_id'])})
+                    session.commit(); clear_cache(); st.rerun()
+    
+    # Форму добавления показываем только если НЕ закрыта и есть активный этап
+    if not is_closed and not curr_h.empty:
+        hid = int(curr_h.iloc[0]['history_id'])
+        with st.popover("📎 Прикрепить документ", use_container_width=True):
+            name = st.text_input("Название", key=f"add_doc_n_{hid}")
+            url = st.text_input("Ссылка", key=f"add_doc_u_{hid}")
+            if st.button("Добавить", key=f"btn_add_{hid}"):
+                if name and url:
+                    session.execute(text("INSERT INTO stage_documents (provision_history_id, doc_name, doc_url) VALUES (:hid, :n, :u)"),
+                                    {"hid": hid, "n": name, "u": url})
+                    session.commit(); clear_cache(); st.rerun()
