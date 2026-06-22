@@ -554,15 +554,19 @@ def render_provision_registry(session, user_role):
                     if st.button("⚠️ Поставщику", width='stretch'):
                         _move_to_stage(session, rid, 'REQ_TRANS_PREPA', "Заявка перенаправляется Поставщику", coords_raw=coords_input, custom_dt=target_dt)
                 with cv3:
-                    if st.button("❌ Ошибка", type="secondary", width='stretch'):
-                        _move_to_stage(session, rid, 'REQ_REGIS_RETUR', "Отказ: некомплект", coords_raw=coords_input, custom_dt=target_dt)
+                    with st.popover("❌ Ошибка", use_container_width=True):
+                        reason = st.text_area("Укажите причину возврата:", placeholder="Напр: некорректная доверенность...")
+                        target_dt = render_time_selector("val_err", rid)
+                        if st.button("Подтвердить возврат", type="primary"):
+                            full_comm = f"Заявка возвращена без рассмотрения (Причина: {reason})"
+                            _move_to_stage(session, rid, 'REQ_REGIS_RETUR', full_comm, coords_raw=coords_input, custom_dt=target_dt)
 
         # 🟢 ЭТАП 5: ЗАРЕГИСТРИРОВАНА -> ОБРАБОТКА ОПЕРАТОРОМ
         elif cur_code == 'REQ_REGIS_ENDED':
             with st.container(border=True):
                 st.write("📋 Заявка готова к внутренней обработке.")
                 target_dt = render_time_selector("proc_op_start", rid)
-                if st.button("⚙️ Начать обработку Оператором", type="primary", use_container_width=True):
+                if st.button("⚙️ Начать обработку Оператором", type="primary", width='stretch'):
                     _move_to_stage(session, rid, 'REQ_PROCE_OPERA', "Оператор приступил к подготовке договора", custom_dt=target_dt)
 
         # 🟢 ЭТАП 6: ПОДГОТОВКА ПЕРЕДАЧИ ПОСТАВЩИКУ
@@ -596,11 +600,15 @@ def render_provision_registry(session, user_role):
 
                 co1, co2 = st.columns(2)
                 with co1:
-                    if st.button("📄 Проект договора отправлен", type="primary", use_container_width=True):
+                    if st.button("📄 Проект договора отправлен", type="primary", width='stretch'):
                         _move_to_stage(session, rid, 'REQ_AGREE_SENT', "Проект договора направлен заявителю", custom_dt=target_dt)
                 with co2:
-                    if st.button("🚫 Отказать", type="secondary", use_container_width=True):
-                        _move_to_stage(session, rid, 'REQ_REFUS_SUBMI', "Оператором выявлены основания для отказа", custom_dt=target_dt)
+                    with st.popover("🚫 Отказать", use_container_width=True):
+                        reason = st.text_area("Обоснование отказа Оператора:", placeholder="Напр: содержит сведения о нац. безопасности...")
+                        target_dt = render_time_selector("proc_op_ref", rid)
+                        if st.button("Подтвердить отказ", type="primary"):
+                            full_comm = f"Заявка закрыта после официального отказа Оператора ({reason})"
+                            _move_to_stage(session, rid, 'REQ_REFUS_SUBMI', full_comm, custom_dt=target_dt)
         
         # 🟢 ЭТАП 9: ОБРАБОТКА ПОСТАВЩИКОМ
         elif cur_code == 'REQ_PROCE_SUPPL':
@@ -618,8 +626,12 @@ def render_provision_registry(session, user_role):
                     if st.button("📄 Проект договора готов", type="primary", width='stretch'):
                         _move_to_stage(session, rid, 'REQ_AGREE_SENT', "Поставщик подготовил проект договора", custom_dt=target_dt)
                 with cv2:
-                    if st.button("🚫 Отказ Поставщика", type="secondary", width='stretch'):
-                        _move_to_stage(session, rid, 'REQ_REFUS_SUBMI', "Поставщиком направлен отказ в предоставлении", custom_dt=target_dt)
+                    with st.popover("🚫 Отказ Поставщика", use_container_width=True):
+                        reason = st.text_area("Обоснование отказа Поставщика:", placeholder="Напр: данные не подлежат распространению...")
+                        target_dt = render_time_selector("proc_sup_ref", rid)
+                        if st.button("Зафиксировать отказ", type="primary"):
+                            full_comm = f"Заявка закрыта после официального отказа Поставщика ({reason})"
+                            _move_to_stage(session, rid, 'REQ_REFUS_SUBMI', full_comm, custom_dt=target_dt)
 
         # 🟢 ЭТАП 10: ОТКАЗАНО (Внедряем документы здесь)
         elif cur_code == 'REQ_REFUS_SUBMI':
@@ -712,23 +724,19 @@ def render_provision_registry(session, user_role):
                         st.caption(f"🔗 [{d['doc_name']}]({d['doc_url']})")
 
 def _move_to_stage(session, req_id, stage_code, comment, reg_no=None, coords_raw=None, custom_dt=None):
-    """Обновленная функция с поддержкой кастомного времени"""
+    """Обновленная функция: записывает подробный комментарий в историю"""
     try:
         stage_res = session.execute(text("SELECT stage_id FROM stages WHERE stage_code = :c LIMIT 1"), {"c": stage_code}).fetchone()
         new_sid = int(stage_res[0])
-        
-        # Используем custom_dt или NOW()
         exec_time = custom_dt if custom_dt else datetime.now()
 
-        # 1. Обновляем заявку
+        # 1. Обновляем статус заявки
         upd_query = "UPDATE provision_requests SET status_id = :sid"
         params = {"sid": new_sid, "rid": req_id}
         if reg_no: 
-            upd_query += ", reg_number = :rn"
-            params["rn"] = reg_no
+            upd_query += ", reg_number = :rn"; params["rn"] = reg_no
         if coords_raw:
-            upd_query += ", area_coords_raw = :cr"
-            params["cr"] = coords_raw
+            upd_query += ", area_coords_raw = :cr"; params["cr"] = coords_raw
         upd_query += " WHERE req_id = :rid"
         session.execute(text(upd_query), params)
 
@@ -736,7 +744,7 @@ def _move_to_stage(session, req_id, stage_code, comment, reg_no=None, coords_raw
         session.execute(text("UPDATE provision_request_history SET actual_end = :t WHERE req_id = :rid AND actual_end IS NULL"), 
                         {"rid": req_id, "t": exec_time})
 
-        # 3. Открываем новый
+        # 3. Открываем новый этап (comment здесь — это уже готовая фраза с пояснением)
         session.execute(text("""
             INSERT INTO provision_request_history (req_id, stage_id, actual_start, comments, responsible_id)
             VALUES (:rid, :sid, :t, :comm, :uid)
@@ -762,7 +770,7 @@ def _render_provision_docs(session, req_id, is_closed=False):
         st.markdown("##### 📂 Документы по заявке")
         for _, d in docs.iterrows():
             d_c1, d_c2 = st.columns([0.85, 0.15])
-            d_c1.link_button(f"📄 {d['doc_name']}", d['doc_url'], use_container_width=True)
+            d_c1.link_button(f"📄 {d['doc_name']}", d['doc_url'], width='stretch')
             # Удаление разрешено, только если заявка НЕ закрыта
             if not is_closed:
                 if d_c2.button("🗑", key=f"del_doc_pr_{d['doc_id']}"):
@@ -772,7 +780,7 @@ def _render_provision_docs(session, req_id, is_closed=False):
     # Форму добавления показываем только если НЕ закрыта и есть активный этап
     if not is_closed and not curr_h.empty:
         hid = int(curr_h.iloc[0]['history_id'])
-        with st.popover("📎 Прикрепить документ", use_container_width=True):
+        with st.popover("📎 Прикрепить документ", width='stretch'):
             name = st.text_input("Название", key=f"add_doc_n_{hid}")
             url = st.text_input("Ссылка", key=f"add_doc_u_{hid}")
             if st.button("Добавить", key=f"btn_add_{hid}"):
