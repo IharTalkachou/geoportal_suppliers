@@ -11,7 +11,8 @@ RU_LABELS = {
     "supplier_email": "Email", "supplier_phone": "Телефон",
     "supplier_website": "Сайт", "supplier_manager": "Руководитель",
     "supplier_notes": "Примечание",
-    "is_mandatory": "Поставщик ОПНД"
+    "is_mandatory": "Поставщик ОПНД",
+    "is_gov_agency": "Государственный орган" # 👈 Добавлено
 }
 
 def render_suppliers_tab(session, user_role="user"):
@@ -59,7 +60,7 @@ def render_suppliers_tab(session, user_role="user"):
                 render_supplier_form(session)
         return
 
-    # --- 3. ПОД-НАВИГАЦИЯ (ОБНОВЛЕННЫЕ ПУНКТЫ) ---
+    # --- 3. ПОД-НАВИГАЦИЯ ---
     st.markdown(f"## {selected_sup_name}")
     sub_nav = st.segmented_control(
         "Разделы",
@@ -85,14 +86,22 @@ def render_suppliers_tab(session, user_role="user"):
 
 def render_supplier_card(session, selected_sup_id, is_readonly):
     sup_data = query_db("SELECT * FROM suppliers WHERE supplier_id = :sid", {"sid": selected_sup_id}).iloc[0]
-    if sup_data.get('is_mandatory'): st.warning("⭐ **Поставщик ОНПД**")
+    
+    # 🟢 Визуальная индикация статусов
+    c_stat1, c_stat2 = st.columns(2)
+    with c_stat1:
+        if sup_data.get('is_mandatory'): 
+            st.warning("⭐ **Поставщик ОНПД**")
+    with c_stat2:
+        if sup_data.get('is_gov_agency'): 
+            st.info("🏛 **Государственный орган**")
     
     col_info, col_edit = st.columns([2, 1])
     if "sup_edit_mode" not in st.session_state: st.session_state["sup_edit_mode"] = False
             
     with col_info:
         for col, label in RU_LABELS.items():
-            if col in ["supplier_id", "supplier_name", "is_mandatory"]: continue
+            if col in ["supplier_id", "supplier_name", "is_mandatory", "is_gov_agency"]: continue
             if pd.notna(sup_data.get(col)) and str(sup_data[col]).strip() != "":
                 st.write(f"**{label}:** {sup_data[col]}")
     
@@ -113,46 +122,53 @@ def render_supplier_form(session, existing_data=None):
             name = st.text_input("Наименование *", value=existing_data['supplier_name'] if is_editing else "")
             addr = st.text_input("Адрес", value=existing_data['supplier_address'] if is_editing else "")
             is_mand = st.checkbox("Поставщик ОНПД", value=bool(existing_data['is_mandatory']) if is_editing else False)
+            # 🟢 Новое поле в форме
+            is_gov = st.checkbox("Государственный орган", value=bool(existing_data.get('is_gov_agency', False)) if is_editing else False)
         with col2:
             phone = st.text_input("Телефон", value=existing_data['supplier_phone'] if is_editing else "")
             mgr = st.text_input("Руководитель", value=existing_data['supplier_manager'] if is_editing else "")
+            email = st.text_input("Email", value=existing_data['supplier_email'] if is_editing else "")
+            site = st.text_input("Сайт", value=existing_data['supplier_website'] if is_editing else "")
         
+        notes = st.text_area("Примечание", value=existing_data['supplier_notes'] if is_editing else "")
+
         if st.form_submit_button("💾 Сохранить"):
             if not name: 
                 st.error("Наименование обязательно")
                 return
             try:
                 target_id = int(existing_data['supplier_id']) if is_editing else None
-                params = {"n": name, "a": addr, "p": phone, "m": mgr, "is_m": is_mand, "id": target_id}
+                params = {
+                    "n": name, "a": addr, "p": phone, "m": mgr, "em": email, "w": site, 
+                    "nt": notes, "is_m": is_mand, "is_g": is_gov, "id": target_id
+                }
                 
                 if is_editing:
-                    # 🔍 ЛОГИРОВАНИЕ
                     log_action(st.session_state["auth"]["user_id"], "UPDATE_SUPPLIER_REQS", "suppliers", target_id, 
                                old={"name": existing_data['supplier_name']}, new={"name": name})
                     
                     session.execute(text("""
                         UPDATE suppliers SET 
                             supplier_name=:n, supplier_address=:a, 
-                            supplier_phone=:p, supplier_manager=:m, is_mandatory=:is_m 
+                            supplier_phone=:p, supplier_manager=:m, 
+                            supplier_email=:em, supplier_website=:w, supplier_notes=:nt,
+                            is_mandatory=:is_m, is_gov_agency=:is_g 
                         WHERE supplier_id=:id
                     """), params)
                 else:
-                    # Логика создания нового (если форма используется для этого)
                     res = session.execute(text("""
-                        INSERT INTO suppliers (supplier_name, supplier_address, supplier_phone, supplier_manager, is_mandatory) 
-                        VALUES (:n, :a, :p, :m, :is_m) RETURNING supplier_id
+                        INSERT INTO suppliers (
+                            supplier_name, supplier_address, supplier_phone, supplier_manager, 
+                            supplier_email, supplier_website, supplier_notes, is_mandatory, is_gov_agency
+                        ) VALUES (:n, :a, :p, :m, :em, :w, :nt, :is_m, :is_g) RETURNING supplier_id
                     """), params)
                     new_id = res.scalar()
                     log_action(st.session_state["auth"]["user_id"], "CREATE_SUPPLIER", "suppliers", int(new_id), new={"name": name})
 
                 session.commit()
                 clear_cache()
-                
-                # 🟢 ЗАКРЫВАЕМ ФОРМУ И УВЕДОМЛЯЕМ
                 st.session_state["sup_edit_mode"] = False
-                st.toast("✅ Реквизиты изменены!")
-                
-                # Небольшая пауза, чтобы пользователь успел заметить тост перед обновлением страницы
+                st.toast("✅ Реквизиты сохранены!")
                 import time
                 time.sleep(0.5)
                 st.rerun()
