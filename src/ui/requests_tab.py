@@ -674,7 +674,7 @@ def render_provision_registry(session, user_role):
                         st.info("ℹ️ ГКГФ: Поставщик не требуется (Оператор)")
 
                 with cv3:
-                    with st.popover("❌ Ошибка", use_container_width=True):
+                    with st.popover("❌ Ошибка", width='stretch'):
                         reason = st.text_area("Укажите причину возврата:", placeholder="Напр: некорректная доверенность...")
                         target_dt = render_time_selector("val_err", rid)
                         if st.button("Подтвердить возврат", type="primary"):
@@ -723,7 +723,7 @@ def render_provision_registry(session, user_role):
                     if st.button("📄 Проект договора отправлен", type="primary", width='stretch'):
                         _move_to_stage(session, rid, 'REQ_AGREE_SENT', "Проект договора направлен заявителю", custom_dt=target_dt)
                 with co2:
-                    with st.popover("🚫 Отказать", use_container_width=True):
+                    with st.popover("🚫 Отказать", width='stretch'):
                         reason = st.text_area("Обоснование отказа Оператора:", placeholder="Напр: содержит сведения о нац. безопасности...")
                         target_dt = render_time_selector("proc_op_ref", rid)
                         if st.button("Подтвердить отказ", type="primary"):
@@ -746,7 +746,7 @@ def render_provision_registry(session, user_role):
                     if st.button("📄 Проект договора готов", type="primary", width='stretch'):
                         _move_to_stage(session, rid, 'REQ_AGREE_SENT', "Поставщик подготовил проект договора", custom_dt=target_dt)
                 with cv2:
-                    with st.popover("🚫 Отказ Поставщика", use_container_width=True):
+                    with st.popover("🚫 Отказ Поставщика", width='stretch'):
                         reason = st.text_area("Обоснование отказа Поставщика:", placeholder="Напр: данные не подлежат распространению...")
                         target_dt = render_time_selector("proc_sup_ref", rid)
                         if st.button("Зафиксировать отказ", type="primary"):

@@ -78,7 +78,9 @@ def _render_heatmap_router():
         # Здесь в будущем будет вызов heatmap_logic.render_heatmap(track)
 
 def _sync_overdue_log_internal():
-    """Перенесенная логика синхронизации просрочек"""
+    """Обновленная логика синхронизации просрочек с поддержкой JSONB и единой таблицы этапов"""
+    
+    # 1. Запрос для Бюрократии (Категория 1)
     query_buro = """
         INSERT INTO overdue_log (source_table, stage_progress_id, supplier_name, project_name, stage_name, responsible_name, planned_start, planned_end, actual_start, comments)
         SELECT 'project_stages', ps.stage_progress_id, s.supplier_name, p.project_name, stg.stage_name, u.display_name, ps.planned_start, ps.planned_end, ps.actual_start, ps.comments
@@ -87,28 +89,54 @@ def _sync_overdue_log_internal():
         JOIN suppliers s ON p.supplier_id = s.supplier_id
         JOIN stages stg ON ps.stage_id = stg.stage_id
         LEFT JOIN users u ON ps.responsible_id = u.user_id
-        WHERE ps.actual_end IS NULL AND ps.planned_end < CURRENT_DATE AND p.is_agreement_project = TRUE
+        WHERE ps.actual_end IS NULL 
+          AND ps.planned_end < CURRENT_DATE 
+          AND stg.track_category = '1. Документарный'
+          AND p.is_agreement_project = TRUE
         ON CONFLICT (source_table, stage_progress_id) DO NOTHING
     """
+    
+    # 2. Запрос для Технологии (Категория 2) с вытягиванием названий наборов из массива JSONB
     query_tech = """
         INSERT INTO overdue_log (source_table, stage_progress_id, supplier_name, project_name, info_name, stage_name, responsible_name, planned_start, planned_end, actual_start, comments)
-        SELECT 'item_stages', ist.stage_progress_id, s.supplier_name, p.project_name, it.info_name, stg.stage_name, u.display_name, ist.planned_start, ist.planned_end, ist.actual_start, ist.comments
-        FROM item_stages ist
-        JOIN project_items pi ON ist.item_id = pi.item_id
-        JOIN projects p ON pi.project_id = p.project_id
+        SELECT 
+            'project_stages', 
+            ps.stage_progress_id, 
+            s.supplier_name, 
+            p.project_name, 
+            (
+                SELECT STRING_AGG(it_inner.info_name, ', ')
+                FROM project_items pi_inner
+                JOIN info_types it_inner ON pi_inner.info_id = it_inner.info_id
+                WHERE pi_inner.item_id IN (
+                    SELECT jsonb_array_elements_text(ps.affected_item_ids)::int
+                )
+            ) as info_name,
+            stg.stage_name, 
+            u.display_name, 
+            ps.planned_start, 
+            ps.planned_end, 
+            ps.actual_start, 
+            ps.comments
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id
-        JOIN info_types it ON pi.info_id = it.info_id
-        JOIN stages stg ON ist.stage_id = stg.stage_id
-        LEFT JOIN users u ON ist.responsible_id = u.user_id
-        WHERE ist.actual_end IS NULL AND ist.planned_end < CURRENT_DATE
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        LEFT JOIN users u ON ps.responsible_id = u.user_id
+        WHERE ps.actual_end IS NULL 
+          AND ps.planned_end < CURRENT_DATE 
+          AND stg.track_category = '2. Технологический'
         ON CONFLICT (source_table, stage_progress_id) DO NOTHING
     """
+    
     try:
         with Session(engine) as session:
             session.execute(text(query_buro))
             session.execute(text(query_tech))
             session.commit()
-    except: pass
+    except Exception as e:
+        st.error(f"Ошибка синхронизации лога: {e}") # Для отладки, если нужно
+        pass
 
 def _render_heatmap_router():
     """Обновленный роутер: Светофор + Тепловые карты"""

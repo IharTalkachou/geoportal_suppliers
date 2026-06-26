@@ -15,7 +15,7 @@ def load_settings():
     """Загружает настройки из БД с кэшированием на 60 секунд."""
     return _get_settings_from_db()
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def _get_settings_from_db():
     settings = DEFAULT_SETTINGS.copy()
     try:

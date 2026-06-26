@@ -3,15 +3,24 @@ import json
 import streamlit as st
 from datetime import datetime, timedelta
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 from config.settings_handler import load_settings
-
+# 🟢 Импортируем готовый engine
+from config.database import engine
 
 ROLE_NAMES = {
     "admin": "Администратор",
     "editor": "Редактор",
     "user": "Пользователь"
 }
-SESSION_TIMEOUT_MINUTES = load_settings().get("session_timeout_minutes", 30)
+
+# 🟢 Кэшируем получение таймаута, чтобы не запрашивать БД при каждом клике
+@st.cache_data(ttl=600)
+def get_session_timeout():
+    try:
+        return load_settings().get("session_timeout_minutes", 30)
+    except:
+        return 30
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(12)).decode('utf-8')
@@ -21,26 +30,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def log_action(user_id: int, action: str, target_table: str = None,
                target_id: int = None, old: dict = None, new: dict = None):
-    import sys, os, json
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.orm import Session
-
-    # 🔹 Пишем в stderr + flush=True для мгновенного вывода в Docker
-    print(f"🔍 [AUDIT] Вызов: user={user_id}, action={action}", file=sys.stderr, flush=True)
+    """
+    Обновленная функция аудита: теперь использует системный пул соединений.
+    """
+    import sys
+    # Пишем в консоль для Docker/Logs
+    print(f"🔍 [AUDIT] user={user_id}, action={action}", file=sys.stderr, flush=True)
 
     try:
-        # В Docker переменные уже в окружении, load_dotenv не нужен
-        db_user = os.getenv('DB_USER')
-        db_pass = os.getenv('DB_PASS')
-        db_host = os.getenv('DB_HOST')
-        db_port = os.getenv('DB_PORT')
-        db_name = os.getenv('DB_NAME')
-
-        if not all([db_user, db_pass, db_host, db_port, db_name]):
-            print(f"❌ [AUDIT] Отсутствуют ENV переменные БД!", file=sys.stderr, flush=True)
-            return
-
-        engine = create_engine(f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}", pool_pre_ping=True)
         with Session(engine) as sess:
             sess.execute(text("""
                 INSERT INTO audit_log (user_id, action, target_table, target_id, old_value, new_value, created_at)
@@ -51,11 +48,8 @@ def log_action(user_id: int, action: str, target_table: str = None,
                 "new": json.dumps(new, ensure_ascii=False, default=str) if new else None
             })
             sess.commit()
-            print(f"✅ [AUDIT] Записано в БД успешно", file=sys.stderr, flush=True)
     except Exception as e:
-        print(f"❌ [AUDIT] Ошибка: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    finally:
-        if 'engine' in locals(): engine.dispose()
+        print(f"❌ [AUDIT] Ошибка записи: {e}", file=sys.stderr, flush=True)
 
 def authenticate_user(username: str, password: str, session) -> dict | None:
     res = session.execute(text("""
@@ -73,7 +67,6 @@ def authenticate_user(username: str, password: str, session) -> dict | None:
         session.execute(text("UPDATE users SET last_login = :now WHERE user_id = :uid"),
                         {"now": datetime.now(), "uid": user_data["user_id"]})
         session.commit()
-        # ✅ ИСПРАВЛЕНО: Первый аргумент (session) удалён
         log_action(user_data["user_id"], "LOGIN", target_table="auth")
         return user_data
     return None
@@ -91,23 +84,18 @@ def init_session(user_data: dict):
 def check_session_timeout(token: str = None):
     if "auth" in st.session_state:
         last = st.session_state["auth"]["last_active"]
-        # Если время вышло - выходим
-        if datetime.now() - last > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
-            '''logout_user()
-            # st.warning здесь не сработает, так как logout_user делает st.rerun(),
-            # лучше передать флаг в session_state, если нужно показать сообщение
-            st.rerun()'''
+        
+        # 🟢 ИСПРАВЛЕНО: Вызываем функцию для получения актуального таймаута
+        timeout_limit = get_session_timeout()
+        
+        if datetime.now() - last > timedelta(minutes=timeout_limit):
             from config.session_store import destroy_session
             if token:
                 destroy_session(token)
             logout_user()
             st.rerun()
         else:
-            # При любом действии пользователя в интерфейсе
-            # обновляем таймер, чтобы 30 минут отсчитывались заново
             st.session_state["auth"]["last_active"] = datetime.now()
-
-            # ✅ Синхронизируем с диском, чтобы F5 не вылогинил пользователя
             if token:
                 from config.session_store import sync_session_to_disk
                 sync_session_to_disk(token, st.session_state["auth"])

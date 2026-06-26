@@ -492,18 +492,28 @@ def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, i
             st.error(f"Ошибка БД: {e}"); session.rollback()
 
 def _delete_item_logic(session, supplier_id, item_row):
-    """Вынесенная логика удаления, чтобы не дублировать код"""
-    has_stages = query_db("SELECT 1 FROM item_stages WHERE item_id = :id LIMIT 1", {"id": int(item_row['item_id'])})
+    """Вынесенная логика удаления, адаптированная под JSONB в project_stages"""
+    item_id = int(item_row['item_id'])
+    
+    # 🟢 ОБНОВЛЕНО: Проверка наличия технологических этапов в единой таблице
+    # Используем оператор @> для поиска ID набора внутри JSONB-массива
+    check_stages_query = """
+        SELECT 1 FROM project_stages 
+        WHERE affected_item_ids @> CAST(:id_json AS JSONB) 
+        LIMIT 1
+    """
+    has_stages = query_db(check_stages_query, {"id_json": f"[{item_id}]"})
+    
     has_surveys = query_db("""
         SELECT 1 FROM surveys s JOIN survey_info_types sit ON s.survey_id = sit.survey_id
         WHERE s.supplier_id = :sid AND sit.info_id = :iid LIMIT 1
     """, {"sid": int(supplier_id), "iid": int(item_row['info_id'])})
     
     if not has_stages.empty or not has_surveys.empty:
-        st.error("Удаление заблокировано: по этой связи есть история в базе.")
+        st.error("Удаление заблокировано: по этой связи есть история (этапы или опросники) в базе.")
     else:
-        session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": int(item_row['item_id'])})
-        session.commit(); clear_cache(); st.success("Удалено!"); st.rerun()  
+        session.execute(text("DELETE FROM project_items WHERE item_id = :id"), {"id": item_id})
+        session.commit(); clear_cache(); st.success("Удалено!"); st.rerun()
 
 # ==========================================
 # 👤 КОНТАКТЫ (3 КОЛОНКИ)

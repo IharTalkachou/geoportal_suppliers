@@ -321,8 +321,8 @@ def _render_lifecycle_management(session):
             to_del = st.selectbox("Выберите этап для удаления:", track_stages['stage_name'].tolist())
             if st.button("❌ Удалить безвозвратно", type="secondary"):
                 sid = int(track_stages[track_stages['stage_name'] == to_del]['stage_id'].iloc[0])
-                # Проверка использования в проектах
-                in_use = session.execute(text("SELECT 1 FROM project_stages WHERE stage_id=:id UNION SELECT 1 FROM item_stages WHERE stage_id=:id"), {"id": sid}).scalar()
+                # 🟢 ОБНОВЛЕНО: Проверка только в единой таблице project_stages
+                in_use = session.execute(text("SELECT 1 FROM project_stages WHERE stage_id=:id LIMIT 1"), {"id": sid}).scalar()
                 if in_use: st.error("❌ Нельзя удалить: этап используется в проектах!")
                 else:
                     session.execute(text("DELETE FROM stages WHERE stage_id=:id"), {"id": sid})

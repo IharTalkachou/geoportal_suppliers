@@ -331,7 +331,7 @@ def render_monthly_report_tab(session):
 
     # --- 2. ИНИЦИАЛИЗАЦИЯ ЧЕРНОВИКА ---
     if report_res.empty:
-        if st.button("➕ Создать структуру черновика", use_container_width=True):
+        if st.button("➕ Создать структуру черновика", width='stretch'):
             session.execute(text("INSERT INTO reports_monthly (report_month, sections_data, created_by) VALUES (:d, :data, :uid)"),
                             {"d": report_date, "data": json.dumps(DEFAULT_SECTIONS, ensure_ascii=False), "uid": st.session_state.auth["user_id"]})
             session.commit(); clear_cache(); st.rerun()
@@ -394,7 +394,7 @@ def render_monthly_report_tab(session):
 
     # --- 4. ЕДИНАЯ КНОПКА СБОРА ДАННЫХ ---
     if not is_fixed:
-        if st.button("✨ Собрать данные для отчёта из базы", use_container_width=True, type="secondary"):
+        if st.button("✨ Собрать данные для отчёта из базы", width='stretch', type="secondary"):
             # А. Получаем данные из базы
             new_users, totals = fetch_registration_stats(start_p, end_p)
 
@@ -662,7 +662,7 @@ def render_monthly_report_tab(session):
     
     with col1:
         if not is_fixed:
-            if st.button("💾 Сохранить черновик", use_container_width=True, type="primary"):
+            if st.button("💾 Сохранить черновик", width='stretch', type="primary"):
                 try:
                     # 1. Сохраняем текст
                     session.execute(
@@ -693,7 +693,7 @@ def render_monthly_report_tab(session):
     
     with col2:
         if not is_fixed:
-            if st.button("🔒 Зафиксировать", use_container_width=True, help="Отключает редактирование навсегда"):
+            if st.button("🔒 Зафиксировать", width='stretch', help="Отключает редактирование навсегда"):
                 try:
                     session.execute(
                         text("UPDATE reports_monthly SET fixed_at=NOW(), sections_data=:d WHERE report_id=:id"),
@@ -714,7 +714,7 @@ def render_monthly_report_tab(session):
             data=buf,
             file_name=f"Report_NIPD_{s_year}_{s_month}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True
+            width='stretch'
         )
 
 def fetch_provision_stats(start_t, end_t):
