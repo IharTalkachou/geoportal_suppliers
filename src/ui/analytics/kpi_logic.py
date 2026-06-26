@@ -3,14 +3,18 @@ import pandas as pd
 from datetime import datetime, timedelta
 from ui.analytics.data_provider import get_analytics_snapshot
 
-# --- ЛОКАЛЬНЫЕ ХЕЛПЕРЫ ---
+# ==========================================
+# 🔧 ГЛОБАЛЬНЫЕ ХЕЛПЕРЫ (Доступны для импорта)
+# ==========================================
+
+TODAY = datetime.now().date()
+
 def format_date_ru_local(d):
     if not d: return "—"
     months = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
     return f"{d.day} {months[d.month-1]} {d.year}"
 
 def badge_html(text, bg_color="#E0E0E0", text_color="#333", icon=""):
-    # Добавлена поддержка иконки перед текстом
     prefix = f"{icon} " if icon else ""
     return (f'<span style="background-color:{bg_color};color:{text_color};'
             f'padding:2px 10px;border-radius:4px;font-size:0.7rem;font-weight:700;'
@@ -20,7 +24,10 @@ def badge_html(text, bg_color="#E0E0E0", text_color="#333", icon=""):
 def get_proximity_color(target_date, mode="deadline"):
     if pd.isna(target_date): return "#BDC3C7", "#333"
     today = datetime.now().date()
-    diff = (target_date.date() - today).days
+    # Приводим к date если пришел Timestamp
+    d_val = target_date.date() if hasattr(target_date, 'date') else target_date
+    diff = (d_val - today).days
+    
     if mode == "deadline":
         if diff <= 0: return "#E74C3C", "white"
         if diff <= 3: return "#E67E22", "white"
@@ -32,6 +39,28 @@ def get_proximity_color(target_date, mode="deadline"):
         if diff <= 30: return "#1E8449", "white"
         return "#145A32", "white"
 
+def check_sla_alert(row):
+    """Централизованная логика проверки просрочек SLA"""
+    status, code = row['status'], row['stage_code']
+    p_end = row['planned_end'].date() if pd.notna(row['planned_end']) else None
+    a_start = row['actual_start'].date() if pd.notna(row['actual_start']) else None
+    
+    if status == 'В работе': 
+        return bool(p_end and TODAY >= p_end)
+    if status == 'Ожидание':
+        if not a_start: return False
+        # Матрица SLA
+        if code in ['TECH_REG_PROC', 'META_REJECT', 'DATA_REJECT']: sla = 2
+        elif code in ['META_CHECK', 'DATA_CHECK']: sla = 10
+        elif code in ['TECH_REG_WAIT', 'META_FIX', 'DATA_FIX']: sla = 5
+        else: sla = 7
+        return (TODAY - a_start).days >= sla
+    return status == 'Просрочено'
+
+# ==========================================
+# 🎯 ОСНОВНОЙ РЕНДЕР KPI
+# ==========================================
+
 def render_kpi_tab():
     raw_df = get_analytics_snapshot()
     if raw_df.empty:
@@ -41,6 +70,9 @@ def render_kpi_tab():
     raw_df['uid'] = raw_df.apply(lambda x: f"{x['project_id']}_{x['track_type']}_{x['stage_code']}_{x['iteration_count']}", axis=1)
     df_unique = raw_df.drop_duplicates(subset=['uid']).copy()
     active_df = df_unique[~df_unique['status'].isin(['Выполнено', 'Отменено'])].copy()
+    
+    # 🟢 Используем внешнюю функцию
+    active_df['has_alert'] = active_df.apply(check_sla_alert, axis=1)
 
     # Распределение
     g_work = active_df[active_df['status'].isin(['В работе', 'Просрочено'])].copy()

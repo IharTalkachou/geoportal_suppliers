@@ -3,122 +3,152 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from ui.analytics.data_provider import get_analytics_snapshot
+from ui.analytics.kpi_logic import format_date_ru_local # Используем общий хелпер
 
 TODAY = pd.Timestamp.today().normalize()
 
 def render_heatmap_tab():
-    st.subheader("🌡️ Матрицы рисков (Дни отклонения от плана)")
+    st.subheader("🌡️ Матрицы рисков (Анализ задержек)")
     
     # 1. Загрузка данных
     df = get_analytics_snapshot()
     if df.empty:
-        st.info("Нет данных для построения тепловых карт.")
-        return
+        st.info("Нет данных для анализа."); return
 
-    # 2. Глобальные фильтры для карт
-    with st.expander("🔍 Фильтры тепловых карт", expanded=True):
-        c1, c2 = st.columns([2, 1])
+    # Добавляем UID для идентификации конкретных записей этапов
+    df['uid'] = df.apply(lambda x: f"{x['project_id']}_{x['track_type']}_{x['stage_code']}_{x['iteration_count']}", axis=1)
+
+    # 2. Глобальные фильтры
+    with st.expander("🔍 Настройка фильтров", expanded=True):
+        c1, c2, c3 = st.columns([1.5, 1, 1])
         with c1:
             all_sups = sorted(df['supplier_name'].unique())
-            sel_sups = st.multiselect("Выберите поставщиков:", ["Все"] + all_sups, default="Все", key="hm_sups")
+            sel_sups = st.multiselect("Поставщики:", ["Все"] + all_sups, default="Все")
         with c2:
-            st.write("<br>", unsafe_allow_html=True)
-            only_mand = st.checkbox("⭐ Только ОНПД", value=False, key="hm_mand")
+            st.write("")
+            only_mand = st.checkbox("⭐ Только ОНПД")
+        with c3:
+            min_delay = st.number_input("Задержка более (дн.):", min_value=0, value=0)
 
-    # Применение фильтрации
-    filtered_df = df.copy()
+    # Применение первичных фильтров
+    f_df = df.copy()
     if "Все" not in sel_sups and sel_sups:
-        filtered_df = filtered_df[filtered_df['supplier_name'].isin(sel_sups)]
+        f_df = f_df[f_df['supplier_name'].isin(sel_sups)]
     if only_mand:
-        filtered_df = filtered_df[filtered_df['is_mandatory'] == True]
+        f_df = f_df[f_df['is_mandatory'] == True]
 
-    if filtered_df.empty:
-        st.warning("Нет данных по выбранным критериям.")
-        return
+    # Выбор трека
+    modes = ["⚖️ Юридический трек (📄)", "⚙️ Технический трек (💻)"]
+    mode = st.radio("Срез анализа:", modes, horizontal=True)
+    track = "bureaucracy" if "Юридический" in mode else "tech"
 
-    # 3. Выбор режима отображения
-    modes = ["⚖️ Юридический трек (Бюрократия)", "⚙️ Технический трек (Технология)"]
-    mode = st.radio("Выберите срез анализа:", modes, horizontal=True, key="hm_mode_radio")
-
-    if mode == modes[0]:
-        _draw_heatmap(filtered_df, "bureaucracy", "Reds")
-    else:
-        _draw_heatmap(filtered_df, "tech", "Greens")
-
-def _draw_heatmap(df, track_type, color_scale):
-    """Внутренняя функция отрисовки карты для конкретного трека"""
-    # Фильтруем трек и записи с плановыми датами
-    data = df[(df['track_type'] == track_type) & (df['planned_end'].notna())].copy()
+    # 3. РАСЧЕТ ОТКЛОНЕНИЙ (Logic 2.0)
+    # Фильтруем по треку и наличию плана
+    data = f_df[(f_df['track_type'] == track) & (f_df['planned_end'].notna())].copy()
     
     if data.empty:
-        st.info(f"Нет данных по треку {track_type}")
-        return
+        st.info("В выбранном срезе нет запланированных этапов."); return
 
-    # Расчет отклонения
-    def calc_dev(row):
-        # Если завершено - считаем по факту, если нет - по сегодняшней дате
-        finish = row['actual_end'] if pd.notna(row['actual_end']) else TODAY
-        diff = (finish - row['planned_end']).days
+    def calc_deviation(row):
+        # Если этап выполнен — считаем задержку на момент финиша
+        # Если в работе — считаем задержку на текущий день
+        finish_point = row['actual_end'] if pd.notna(row['actual_end']) else TODAY
+        diff = (finish_point - row['planned_end']).days
         return max(0, diff)
 
-    data['deviation'] = data.apply(calc_dev, axis=1)
-    data['is_active'] = data['actual_end'].isna()
+    data['delay'] = data.apply(calc_deviation, axis=1)
     
-    # Формируем подпись для оси Y
-    data['y_label'] = data['supplier_name'] + "<br><i>" + data['project_name'] + "</i>"
-
-    # Агрегация итераций ( Islands Logic )
-    grouped = data.groupby(['y_label', 'stage_name', 'stage_order']).agg({
-        'deviation': 'sum',
-        'iteration_count': 'count',
-        'is_active': 'any'
-    }).reset_index()
-
-    # Текст внутри ячейки
-    def get_cell_text(row):
-        val = int(row['deviation'])
-        if val == 0: return ""
-        suffix = "⚡" if row['is_active'] else ""
-        return f"{val}{suffix}"
-
-    grouped['cell_text'] = grouped.apply(get_cell_text, axis=1)
-
-    # Подготовка матриц
-    stages_order = grouped[['stage_name', 'stage_order']].drop_duplicates().sort_values('stage_order')
-    unique_stages = stages_order['stage_name'].tolist()
+    # 4. АГРЕГАЦИЯ (Исключаем искажение от количества наборов)
+    # Группируем по UID, чтобы взять максимальное отклонение и собрать инфо
+    agg_logic = {
+        'delay': 'max',             # Берем худший случай по задержке
+        'supplier_name': 'first',
+        'project_name': 'first',
+        'stage_name': 'first',
+        'stage_order': 'first',
+        'responsible_name': 'first',
+        'comments': 'first',
+        'info_name': lambda x: ", ".join([v for v in x.unique() if v != '—']), # Список наборов
+        'actual_end': 'first'
+    }
     
-    pivot_val = grouped.pivot(index="y_label", columns="stage_name", values="deviation")
-    pivot_txt = grouped.pivot(index="y_label", columns="stage_name", values="cell_text")
-    
-    # Синхронизация колонок по порядку этапов
-    cols = [c for c in unique_stages if c in pivot_val.columns]
-    pivot_val = pivot_val.reindex(columns=cols)
-    pivot_txt = pivot_txt.reindex(columns=cols).fillna("")
+    grouped = data.groupby('uid').agg(agg_logic).reset_index()
 
-    # Отрисовка Plotly
+    # Фильтр по минимальной задержке
+    if min_delay > 0:
+        # Оставляем проекты, у которых ХОТЯ БЫ ОДИН этап превысил порог
+        projs_with_risks = grouped[grouped['delay'] >= min_delay]['project_name'].unique()
+        grouped = grouped[grouped['project_name'].isin(projs_with_risks)]
+
+    if grouped.empty:
+        st.warning(f"Задержек более {min_delay} дней не обнаружено."); return
+
+    # 5. ПОСТРОЕНИЕ МАТРИЦЫ
+    # Ось Y: Поставщик + Проект
+    grouped['y_axis'] = "<b>" + grouped['supplier_name'] + "</b><br>" + grouped['project_name']
+    
+    # Сортировка этапов по системному порядку
+    stages_order_ref = grouped[['stage_name', 'stage_order']].drop_duplicates().sort_values('stage_order')
+    
+    # 🟢 ИСПРАВЛЕНИЕ: Используем pivot_table вместо pivot. 
+    # Если есть несколько итераций одного этапа, aggfunc='max' возьмет самую большую задержку.
+    pivot_delay = pd.pivot_table(
+        grouped, 
+        index='y_axis', 
+        columns='stage_name', 
+        values='delay', 
+        aggfunc='max'
+    )
+    
+    # Синхронизация колонок по системному порядку (из справочника stages)
+    cols_ordered = [c for c in stages_order_ref['stage_name'] if c in pivot_delay.columns]
+    pivot_delay = pivot_delay.reindex(columns=cols_ordered)
+    
+    def format_cell(val, uid_list):
+        # В этой упрощенной версии Plotly pivot сложно прокинуть активные статусы в текст ячейки
+        # Поэтому просто выводим число, если оно > 0
+        return int(val) if val > 0 else ""
+
+    # 6. ОТРИСОВКА PLOTLY
+    colorscale = "Reds" if track == "bureaucracy" else "Oranges"
+    
     fig = go.Figure(data=go.Heatmap(
-        z=pivot_val.values,
-        x=pivot_val.columns,
-        y=pivot_val.index,
-        text=pivot_txt.values,
-        texttemplate="%{text}",
-        colorscale=color_scale,
-        zmin=0, 
-        zmax=max(15, pivot_val.max().max() if not pivot_val.empty else 15),
-        xgap=2, ygap=2,
-        hovertemplate="<b>%{y}</b><br>Этап: %{x}<br>Отклонение: %{z} дн.<extra></extra>"
+        z=pivot_delay.values,
+        x=pivot_delay.columns,
+        y=pivot_delay.index,
+        colorscale=colorscale,
+        xgap=3, ygap=3,
+        zmin=0, zmax=max(20, pivot_delay.max().max() if not pivot_delay.empty else 20),
+        colorbar=dict(title="Дни"),
+        hovertemplate=(
+            "<b>%{y}</b><br>" +
+            "Этап: %{x}<br>" +
+            "Задержка: <b>%{z} дн.</b><br>" +
+            "<extra></extra>"
+        )
     ))
 
-    # Динамическая высота (чтобы не было сплюснуто)
-    h = max(400, len(pivot_val.index) * 50 + 150)
-    
+    # Настройка внешнего вида
+    h = max(400, len(pivot_delay.index) * 60 + 100)
     fig.update_layout(
         height=h,
         xaxis_showgrid=False,
         yaxis_autorange='reversed',
-        margin=dict(l=10, r=10, t=10, b=10),
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)'
+        margin=dict(l=20, r=10, t=10, b=10),
+        plot_bgcolor='white'
     )
     
+    fig.update_xaxes(side="top", tickangle=-30)
+
     st.plotly_chart(fig, width='stretch')
+
+    # 7. СПИСОК «ГОРЯЧИХ» КОММЕНТАРИЕВ
+    if not grouped[grouped['delay'] > 0].empty:
+        st.markdown("---")
+        st.markdown("##### 💬 Причины задержек по текущим этапам")
+        risks = grouped[(grouped['delay'] > 0) & (grouped['actual_end'].isna())].sort_values('delay', ascending=False)
+        for _, r in risks.head(5).iterrows():
+            with st.container(border=True):
+                st.markdown(f"**{r['project_name']}** → {r['stage_name']} (🚩 {int(r['delay'])} дн.)")
+                if r['info_name']: st.caption(f"📦 Наборы: {r['info_name']}")
+                st.write(f"_{r['comments'] or 'Комментарий отсутствует'}_")
