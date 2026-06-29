@@ -46,13 +46,19 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     is_edit = existing_data is not None
     st_names, ms_names = list(stage_map.keys()), list(micro_map.keys())
     
+    staff_df = query_db("SELECT user_id, display_name FROM users WHERE show_in_staff=True AND is_active=True ORDER BY display_name")
+    staff_map = dict(zip(staff_df["display_name"], staff_df["user_id"]))
+    staff_options = ["Не назначен"] + list(staff_map.keys())
+
     col1, col2 = st.columns(2)
     with col1:
         def on_p_start_change():
             dur = stage_map.get(st.session_state.d_stage, {}).get("duration", 0)
             st.session_state.d_p_end = st.session_state.d_p_start + timedelta(days=dur)
+        def_resp = existing_data['responsible_name'] if (is_edit and existing_data.get('responsible_name')) else "Не назначен"
         st.selectbox("Этап *", st_names, key="d_stage", index=st_names.index(existing_data['stage_name']) if is_edit else 0, on_change=on_p_start_change)
         st.selectbox("Статус", ms_names, key="d_ms", index=ms_names.index(existing_data['micro_status_name']) if is_edit else 0)
+        st.selectbox("👤 Ответственный", staff_options, key="d_resp", index=staff_options.index(def_resp) if def_resp in staff_options else 0)
     with col2:
         st.date_input("🗓️ План. начало", key="d_p_start", value=existing_data['planned_start'] if is_edit else date.today(), on_change=on_p_start_change)
         st.date_input("🎯 Дедлайн", key="d_p_end", value=existing_data['planned_end'] if is_edit else (date.today() + timedelta(days=stage_map[st_names[0]]['duration'])))
@@ -82,17 +88,19 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
 
     if st.button("💾 Сохранить", type="primary", width='stretch'):
         try:
+            r_id = staff_map.get(st.session_state.d_resp) if st.session_state.d_resp != "Не назначен" else None
             params = {
                 "pid": project_id, "sid": stage_map[st.session_state.d_stage]["id"],
                 "mst": micro_map[st.session_state.d_ms], "ps": st.session_state.d_p_start,
                 "pe": st.session_state.d_p_end, "as": st.session_state.d_a_start,
-                "ae": st.session_state.d_a_end, "comm": st.session_state.d_comm
+                "ae": st.session_state.d_a_end, "comm": st.session_state.d_comm,
+                "rid": r_id
             }
             if is_edit:
                 params["id"] = int(existing_data['stage_progress_id'])
-                session.execute(text("UPDATE project_stages SET stage_id=:sid, micro_status=:mst, planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm WHERE stage_progress_id=:id"), params)
+                session.execute(text("UPDATE project_stages SET stage_id=:sid, micro_status=:mst, planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm, responsible_id=:rid WHERE stage_progress_id=:id"), params)
             else:
-                session.execute(text("INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count, planned_start, planned_end, actual_start, actual_end, comments) VALUES (:pid, :sid, :mst, 1, :ps, :pe, :as, :ae, :comm)"), params)
+                session.execute(text("INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count, planned_start, planned_end, actual_start, actual_end, comments, responsible_id) VALUES (:pid, :sid, :mst, 1, :ps, :pe, :as, :ae, :comm, :rid)"), params)
             session.commit(); _resync_buro_iterations(session, project_id); session.commit()
             from utils.project_utils import sync_project_status
             sync_project_status(session, project_id)

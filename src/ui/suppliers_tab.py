@@ -5,6 +5,8 @@ from datetime import date, timedelta
 from config.cache import query_db, clear_cache
 from config.auth import log_action
 
+from ui.shared_components import render_survey_viewer
+
 # 🔤 Маппинг для отображения
 RU_LABELS = {
     "supplier_name": "Наименование", "supplier_address": "Адрес",
