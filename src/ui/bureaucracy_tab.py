@@ -45,6 +45,17 @@ def custom_badge(text, bg_color="#E0E0E0", text_color="#333", bold=True):
 def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=None):
     is_edit = existing_data is not None
     st_names, ms_names = list(stage_map.keys()), list(micro_map.keys())
+
+    # ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ (Фикс конфликта Session State)
+    if "d_p_start" not in st.session_state:
+        st.session_state.d_p_start = existing_data['planned_start'] if is_edit else date.today()
+    
+    if "d_p_end" not in st.session_state:
+        if is_edit:
+            st.session_state.d_p_end = existing_data['planned_end']
+        else:
+            dur = stage_map[st_names[0]]['duration']
+            st.session_state.d_p_end = st.session_state.d_p_start + timedelta(days=dur)
     
     staff_df = query_db("SELECT user_id, display_name FROM users WHERE show_in_staff=True AND is_active=True ORDER BY display_name")
     staff_map = dict(zip(staff_df["display_name"], staff_df["user_id"]))
@@ -60,8 +71,8 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
         st.selectbox("Статус", ms_names, key="d_ms", index=ms_names.index(existing_data['micro_status_name']) if is_edit else 0)
         st.selectbox("👤 Ответственный", staff_options, key="d_resp", index=staff_options.index(def_resp) if def_resp in staff_options else 0)
     with col2:
-        st.date_input("🗓️ План. начало", key="d_p_start", value=existing_data['planned_start'] if is_edit else date.today(), on_change=on_p_start_change)
-        st.date_input("🎯 Дедлайн", key="d_p_end", value=existing_data['planned_end'] if is_edit else (date.today() + timedelta(days=stage_map[st_names[0]]['duration'])))
+        st.date_input("🗓️ План. начало", key="d_p_start", on_change=on_p_start_change)
+        st.date_input("🎯 Дедлайн", key="d_p_end")
     
     st.divider()
     c3, c4 = st.columns(2)
@@ -149,6 +160,8 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
     h_col1.subheader("📜 Бюрократический трек")
     if not is_readonly:
         if h_col2.button("➕ Добавить этап", width='stretch', type="primary"):
+            for k in ["d_stage", "d_ms", "d_p_start", "d_p_end", "d_comm", "d_resp", "d_a_start", "d_a_end"]:
+                if k in st.session_state: del st.session_state[k]
             stage_mgmt_dialog(session, project_id, stage_map, micro_map)
 
     # Распределение

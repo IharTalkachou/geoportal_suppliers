@@ -26,7 +26,7 @@ def render_staff_tab():
     df_unique = df_raw.drop_duplicates(subset=['uid']).copy()
 
     # 2. ВЕРХНЯЯ ПАНЕЛЬ МЕТРИК (СВОДКА)
-    active_mask = df_unique['status'].isin(['В работе', 'Ожидание', 'Просрочено'])
+    active_mask = df_unique['status'].isin(['В работе', 'Ожидание', 'Планируется', 'Отложено'])
     active_tasks = df_unique[active_mask]
     
     m1, m2, m3 = st.columns(3)
@@ -54,7 +54,7 @@ def render_staff_tab():
 
 def _render_active_load_section(active_tasks, df_raw):
     """Блок анализа текущей нагрузки с фильтрами"""
-    c1, c2 = st.columns([0.4, 0.6])
+    c1, c2, c3 = st.columns([1, 1, 1])
     
     with c1:
         # Фильтр по сотрудникам
@@ -62,14 +62,22 @@ def _render_active_load_section(active_tasks, df_raw):
         sel_staff = st.multiselect("Исполнители:", staff_list, placeholder="Все сотрудники")
     
     with c2:
-        # Фильтр по проектам для быстрого поиска
+        # 🟢 НОВЫЙ ФИЛЬТР: Микростатусы
+        status_list = ["В работе", "Ожидание", "Планируется", "Отложено"]
+        sel_statuses = st.multiselect("Статусы:", status_list, placeholder="Все статусы")
+
+    with c3:
         proj_list = sorted(active_tasks['project_name'].unique())
         sel_projs = st.multiselect("Проекты:", proj_list, placeholder="Все проекты")
 
     # Применение фильтров
     disp_df = active_tasks.copy()
-    if sel_staff: disp_df = disp_df[disp_df['responsible_name'].isin(sel_staff)]
-    if sel_projs: disp_df = disp_df[disp_df['project_name'].isin(sel_projs)]
+    if sel_staff: 
+        disp_df = disp_df[disp_df['responsible_name'].isin(sel_staff)]
+    if sel_statuses: 
+        disp_df = disp_df[disp_df['status'].isin(sel_statuses)]
+    if sel_projs: 
+        disp_df = disp_df[disp_df['project_name'].isin(sel_projs)]
 
     if disp_df.empty:
         st.info("Задачи не найдены."); return
@@ -137,7 +145,7 @@ def _render_staff_task_grid(disp_df, raw_all, key_prefix):
             t_icon = "📄" if row['track_type'] == 'bureaucracy' else "💻"
             
             p_name = row['project_name']
-            p_display = (p_name[:25] + '..') if len(p_name) > 28 else p_name
+            p_display = (p_name[:50] + '..') if len(p_name) > 28 else p_name
             
             s_color = row.get('stage_color') or "#BDC3C7"
             s_txt_color = "white" if s_color.lower() in ["#3498db", "#e74c3c", "#27ae60"] else "#333"
