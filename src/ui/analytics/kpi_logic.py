@@ -143,34 +143,40 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
 
         with c_det:
             if st.session_state[state_key]:
-                # ВЫРАВНИВАНИЕ: Создаем пустой блок, высота которого зависит от индекса строки
-                # Примерная высота строки списка с учетом разделителя ~52px
-                offset = selected_index * 52
-                st.markdown(f"<div style='height: {offset}px;'></div>", unsafe_allow_html=True)
-
-                # Сами детали
-                selected_row = df_group[df_group['uid'] == st.session_state[state_key]].iloc[0]
-                s_color = selected_row.get('stage_color') or "#BDC3C7"
-                related_items = raw_all[raw_all['uid'] == selected_row['uid']]['info_name'].unique().tolist()
-                items_str = ", ".join([str(i) for i in related_items if i != '—'])
-
-                with st.container(border=True):
-                    st.markdown(f"### 🏢 {selected_row['supplier_name']}")
-                    st.caption(f"Проект: {selected_row['project_name']}")
+                # 🟢 ИСПРАВЛЕНИЕ: Безопасный поиск выбранной записи
+                selection_match = df_group[df_group['uid'] == st.session_state[state_key]]
+                
+                if not selection_match.empty:
+                    selected_row = selection_match.iloc[0]
                     
-                    if not is_planned:
-                        val = format_date_ru_local(selected_row['actual_start']) if pd.notna(selected_row['actual_start']) else "не начато"
-                        st.write(f"🚀 **Фактическое начало:** {val}")
-                    else:
-                        val = format_date_ru_local(selected_row['planned_end']) if pd.notna(selected_row['planned_end']) else "—"
-                        st.write(f"🎯 **Плановое завершение:** {val}")
-                    
-                    st.divider()
-                    st.write(f"👤 **Ответственный:** {selected_row['responsible_name'] or '—'}")
-                    if items_str: st.caption(f"📦 Состав: {items_str}")
-                    st.markdown(f'<div style="margin-top:10px; padding:10px; background:#f9f9f9; border-left:4px solid {s_color};">'
-                                f'<b>💬 Комментарий:</b><br>{selected_row["comments"] or "—"}</div>', 
-                                unsafe_allow_html=True)
+                    # Выравнивание (offset вычисляется в блоке c_list)
+                    st.markdown(f"<div style='height: {selected_index * 52}px;'></div>", unsafe_allow_html=True)
+
+                    s_color = selected_row.get('stage_color') or "#BDC3C7"
+                    related_items = raw_all[raw_all['uid'] == selected_row['uid']]['info_name'].unique().tolist()
+                    items_str = ", ".join([str(i) for i in related_items if i != '—'])
+
+                    with st.container(border=True):
+                        st.markdown(f"### 🏢 {selected_row['supplier_name']}")
+                        st.caption(f"Проект: {selected_row['project_name']}")
+                        
+                        if not is_planned:
+                            val = format_date_ru_local(selected_row['actual_start']) if pd.notna(selected_row['actual_start']) else "не начато"
+                            st.write(f"🚀 **Фактическое начало:** {val}")
+                        else:
+                            val = format_date_ru_local(selected_row['planned_end']) if pd.notna(selected_row['planned_end']) else "—"
+                            st.write(f"🎯 **Плановое завершение:** {val}")
+                        
+                        st.divider()
+                        st.write(f"👤 **Ответственный:** {selected_row['responsible_name'] or '—'}")
+                        if items_str: st.caption(f"📦 Состав: {items_str}")
+                        st.markdown(f'<div style="margin-top:10px; padding:10px; background:#f9f9f9; border-left:4px solid {s_color};">'
+                                    f'<b>💬 Комментарий:</b><br>{selected_row["comments"] or "—"}</div>', 
+                                    unsafe_allow_html=True)
+                else:
+                    # 🟢 ИСПРАВЛЕНИЕ: Если проект исчез из списка (отфильтрован), сбрасываем выбор
+                    st.session_state[state_key] = None
+                    st.rerun()
             else:
                 st.info("Выберите ➡️ для просмотра деталей")
 
