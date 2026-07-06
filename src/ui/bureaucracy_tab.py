@@ -98,7 +98,7 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 st.rerun()
         
         # 2. Добавление нового
-        with st.popover("📎 Добавить документ", use_container_width=True):
+        with st.popover("📎 Добавить документ", width='stretch'):
             new_n = st.text_input("Название (напр. Письмо №...)")
             new_u = st.text_input("URL-ссылка")
             if st.button("Сохранить ссылку", key="btn_save_new_doc_buro"):

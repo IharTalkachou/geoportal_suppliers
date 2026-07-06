@@ -7,205 +7,194 @@ from datetime import datetime
 TODAY = pd.Timestamp.today().normalize()
 
 def calculate_project_progress(df_project):
-    """
-    Математическое ядро расчета прогресса.
-    """
     if df_project.empty: return None
 
-    def get_track_progress(df_track, track_type):
-        # 1. Инициализация дебага (сортируем этапы по старту для наглядности)
-        stages_history = []
-        if not df_track.empty:
-            sorted_history = df_track.sort_values(['actual_start', 'stage_order'], ascending=[True, True])
-            stages_history = sorted_history['stage_order'].tolist()
-
-        debug = {
-            "stages_in_db": stages_history,
-            "max_order": 0,
-            "passed_count": 0,
-            "current_status": "Нет данных",
-            "is_active_visible": False
-        }
-
-        if df_track.empty:
-            return 0.0, "Не начато", 0.0, 0.0, debug
-
-        # 2. Определение модели (сетки) этапов
-        if track_type == 'bureaucracy':
-            is_finished = any((df_track['stage_order'] == 8) & (df_track['status'] == 'Выполнено'))
-            # Бюрократия: либо 1-7 (если есть заявка), либо 2-7. Этап 8 - финиш, в % не входит.
-            has_app = any(df_track['stage_order'] == 1)
-            model_orders = [1, 2, 3, 4, 5, 6, 7] if has_app else [2, 3, 4, 5, 6, 7]
-        else:
-            is_finished = any((df_track['stage_name'] == 'Публикация набора') & (df_track['status'] == 'Выполнено'))
-            model_orders = [1, 2, 3, 4, 5]
-
-        if is_finished:
-            return 100.0, "Завершено", 100.0, 0.0, debug
-
-        num_stages = len(model_orders)
-        stage_weight = 100.0 / num_stages
-
-        # 3. ПОИСК ТЕКУЩЕГО ЭТАПА (Логика: Самый старший НЕ выполненный)
-        active_candidates = df_track[df_track['stage_order'].isin(model_orders)]
-        if active_candidates.empty:
-            return 0.0, "Инициация", 0.0, 0.0, debug
-
-        # Ищем те, что в работе/ожидании/плане
-        not_done = active_candidates[active_candidates['status'] != 'Выполнено']
+    # --- 1. БЮРОКРАТИЯ (Макс: 50.0) ---
+    def get_buro_score(df):
+        # Цепочка этапов
+        model = ['NEGOTIATIONS', 'PROTOCOL_NEGOTIATIONS', 'SET_APPOINTMENT', 'VERIFICATION', 'DOCUMENT_APPROVAL', 'CONTRACT_SIGNED']
+        weight_per_step = 50.0 / len(model) # ~8.33% за шаг
         
-        if not not_done.empty:
-            # Если есть незавершенные - берем самый старший из них
-            current_stage = not_done.sort_values(['stage_order', 'iteration_count'], ascending=[False, False]).iloc[0]
+        if df.empty: return 0.0, 0.0, "Не начато"
+        
+        # Находим самый "дальний" заведенный этап (по порядку в модели)
+        active_stages = df[df['stage_code'].isin(model)].copy()
+        if active_stages.empty: return 0.0, 0.0, "Инициация"
+
+        latest = active_stages.sort_values('stage_order', ascending=False).iloc[0]
+        curr_idx = model.index(latest['stage_code'])
+        
+        passed = 0.0
+        active = 0.0
+        
+        # Считаем вес всех этапов ДО текущего, которые имеют статус 'Выполнено' в базе
+        # или просто считаем их пройденными, так как мы на более позднем этапе
+        passed = curr_idx * weight_per_step
+        
+        if latest['status'] == 'Выполнено':
+            passed += weight_per_step
         else:
-            # Если все заведенные выполнены - берем самый старший выполненный
-            current_stage = active_candidates.sort_values(['stage_order', 'iteration_count'], ascending=[False, False]).iloc[0]
+            # Расчет активной части (в работе / ожидании / отложено)
+            readiness = 0.05 # Базовый "хвостик" для Планируется/Отложено
+            if latest['status'] in ['В работе', 'Ожидание']:
+                if pd.notna(latest['actual_start']):
+                    days = (TODAY - latest['actual_start']).days
+                    norm = latest['norm_days'] if latest['norm_days'] > 0 else 10
+                    readiness = min(0.9, max(0.1, days / norm))
+                    # Штраф за просрочку
+                    if pd.notna(latest['planned_end']) and TODAY > latest['planned_end']:
+                        readiness = min(readiness, 0.5)
+                else:
+                    readiness = 0.1
+            active = readiness * weight_per_step
+            
+        return passed, active, latest['stage_name']
 
-        current_order = current_stage['stage_order']
-        debug["max_order"] = current_order
-        debug["current_status"] = current_stage['status']
-
-        # 4. РАСЧЕТ ПРОЙДЕННОГО ПУТИ (Абсолютный порядок)
-        # Все этапы из модели, которые МЕНЬШЕ текущего — пройдены на 100%
-        passed_stages_in_model = [o for o in model_orders if o < current_order]
-        debug["passed_count"] = len(passed_stages_in_model)
-        total_track_pct = len(passed_stages_in_model) * stage_weight
-
-        # 5. ВКЛАД ТЕКУЩЕГО ЭТАПА
-        current_task_readiness = 0.0
-        current_task_contribution = 0.0
-
-        if current_stage['status'] == 'Выполнено':
-            # Если самый старший этап в БД выполнен - он дает свой вес в общую копилку
-            current_task_readiness = 100.0
-            current_task_contribution = stage_weight
-            total_track_pct += stage_weight
+    # --- 2. ТЕХНОЛОГИЯ (Макс: 50.0) ---
+    def get_tech_item_score(df_item):
+        if df_item.empty: return 0.0, 0.0, "Не начато", 0, 0, 0
+        
+        # Динамическое распределение весов
+        # Проверяем, какие блоки вообще присутствуют в истории этого набора
+        has_prep_tasks = df_item['stage_code'].isin(['TESTING', 'TECH_REG_PROC']).any()
+        
+        # Если подготовки нет в базе, отдаем её 5% в пользу Метаданных и Данных
+        if has_prep_tasks:
+            w_prep, w_meta, w_data = 5.0, 22.5, 22.5
         else:
-            # Если этап активен (В работе, Ожидание, Отложено, Планируется)
-            debug["is_active_visible"] = True
-            
-            # Базовая готовность (даже если только начали или отложили)
-            # Это гарантирует появление полоски на графике
-            current_task_readiness = 10.0 
-            
-            if current_stage['status'] in ['В работе', 'Ожидание'] and pd.notna(current_stage['actual_start']):
-                days_spent = (TODAY - current_stage['actual_start']).days
-                norm = current_stage['norm_days'] if current_stage['norm_days'] > 0 else 14
-                # Формула насыщения (растет со временем)
-                current_task_readiness = (1 - (0.9 / (1 + (max(0, days_spent) / norm)))) * 100
-            
-            current_task_contribution = (current_task_readiness / 100) * stage_weight
-            total_track_pct += current_task_contribution
+            w_prep, w_meta, w_data = 0.0, 25.0, 25.0
 
-        return total_track_pct, current_stage['stage_name'], current_task_readiness, current_task_contribution, debug
+        # А. Расчет подготовки (если есть)
+        p_passed, p_active = 0.0, 0.0
+        if w_prep > 0:
+            for code in ['TESTING', 'TECH_REG_PROC']:
+                row = df_item[df_item['stage_code'] == code]
+                if not row.empty:
+                    if row.iloc[0]['status'] == 'Выполнено': p_passed += 2.5
+                    else: p_active += 0.05 * 2.5
 
-    # Сбор итогов
-    b_total, b_name, b_ready, b_contrib, b_debug = get_track_progress(
-        df_project[df_project['track_type'] == 'bureaucracy'], 'bureaucracy'
-    )
+        # Б. Циклы
+        def calc_loop(codes, total_weight):
+            loop_df = df_item[df_item['stage_code'].isin(codes)]
+            if loop_df.empty: return 0.0, 0.0
+            
+            # Финальный успех в цикле
+            if any((df_item['stage_code'] == codes[-1]) & (df_item['status'] == 'Выполнено')):
+                return total_weight, 0.0
 
-    tech_data = df_project[df_project['track_type'] == 'tech']
-    t_total, t_ready, t_contrib, t_name = 0.0, 0.0, 0.0, "Не начато"
-    t_debug_list = []
+            latest = loop_df.sort_values('stage_order', ascending=False).iloc[0]
+            idx = codes.index(latest['stage_code'])
+            step_w = total_weight / len(codes)
+            
+            pw = idx * step_w
+            ac = 0.0
+            
+            if latest['status'] == 'Выполнено':
+                pw += step_w
+            else:
+                readiness = 0.05
+                if latest['status'] in ['В работе', 'Ожидание']:
+                    days = (TODAY - latest['actual_start']).days if pd.notna(latest['actual_start']) else 0
+                    readiness = min(0.9, max(0.1, days / (latest['norm_days'] or 10)))
+                    if pd.notna(latest['planned_end']) and TODAY > latest['planned_end']:
+                        readiness = min(readiness, 0.5)
+                ac = readiness * step_w
+            return pw, ac
+
+        m_p, m_a = calc_loop(['META_WAIT', 'META_CHECK', 'META_REJECT', 'META_FIX', 'META_PUB'], w_meta)
+        d_p, d_a = calc_loop(['DATA_WAIT', 'DATA_CHECK', 'DATA_REJECT', 'DATA_FIX', 'DATA_PUB'], w_data)
+        
+        item_name = df_item.sort_values('stage_order', ascending=False).iloc[0]['stage_name']
+        return (p_passed + m_p + d_p), (p_active + m_a + d_a), item_name, p_passed, m_p, d_p
+
+    # --- СБОРКА ---
+    b_p, b_a, b_name = get_buro_score(df_project[df_project['track_type'] == 'bureaucracy'])
     
-    if not tech_data.empty:
-        items = tech_data.groupby('info_name')
-        results = [get_track_progress(idf, 'tech') for _, idf in items]
-        t_total = sum(r[0] for r in results) / len(results)
-        t_ready = sum(r[2] for r in results) / len(results)
-        t_contrib = sum(r[3] for r in results) / len(results)
-        t_name = next((r[1] for r in results if r[1] != "Завершен"), results[0][1])
-        t_debug_list = [r[4] for r in results]
-
-    final_total = (b_total * 0.5) + (t_total * 0.5)
-    final_active_part = (b_contrib * 0.5) + (t_contrib * 0.5)
+    t_data = df_project[df_project['track_type'] == 'tech']
+    t_p, t_a, t_name = 0.0, 0.0, "Не начато"
+    debug_tech = {"prep": 0, "meta": 0, "data": 0}
     
+    if not t_data.empty:
+        item_groups = t_data.groupby('info_name')
+        res = [get_tech_item_score(idf) for _, idf in item_groups]
+        t_p = sum(r[0] for r in res) / len(res)
+        t_a = sum(r[1] for r in res) / len(res)
+        t_name = res[0][2]
+        debug_tech = {"prep": sum(r[3] for r in res)/len(res), "meta": sum(r[4] for r in res)/len(res), "data": sum(r[5] for r in res)/len(res)}
+
+    total = b_p + t_p + b_a + t_a
     return {
         "project_name": df_project['project_name'].iloc[0],
         "supplier": df_project['supplier_name'].iloc[0],
-        "total": round(final_total, 1),
-        "passed_part": round(max(0, final_total - final_active_part), 1),
-        "active_part": round(final_active_part, 1),
-        "active_task_readiness": round((b_ready + t_ready) / 2, 1),
+        "passed_part": round(b_p + t_p, 2),
+        "active_part": round(b_a + t_a, 2),
+        "total": round(min(100.0, total), 1),
         "status_text": f"📜 {b_name} | ⚙️ {t_name}",
-        "debug": {"buro": b_debug, "tech": t_debug_list}
+        "debug_vals": {"buro": b_p, "prep": debug_tech['prep'], "meta": debug_tech['meta'], "data": debug_tech['data'], "buro_active": b_a}
     }
 
 def render_traffic_light_chart(df):
-    """Отрисовка Светофора"""
     st.subheader("🚦 Светофор прогресса")
     
     c1, c2, c3 = st.columns([2, 0.7, 0.7])
-    with c2:
-        show_finished = st.checkbox("Показать завершенные", value=False)
-    with c3:
-        do_debug = st.toggle("🔍 Отладка", value=False)
-    
-    all_sups = sorted(df['supplier_name'].unique())
-    with c1:
-        selected_sups = st.multiselect("Фильтр по поставщикам:", ["Все"] + all_sups, default="Все")
+    all_sups = sorted(df['supplier_name'].unique().tolist())
+    with c1: selected_sups = st.multiselect("Фильтр по поставщикам:", ["Все"] + all_sups, default="Все", key="tl_sup_filter")
+    with c2: show_finished = st.checkbox("Показать 100%", value=False, key="tl_show_fin")
+    with c3: do_debug = st.toggle("🔍 Отладка", value=False, key="tl_debug_toggle")
     
     results = []
-    # Важно: учитываем все проекты, даже если по ним еще нет этапов
     for pid in df['project_id'].unique():
-        proj_df = df[df['project_id'] == pid]
-        proj_res = calculate_project_progress(proj_df)
-        
+        proj_res = calculate_project_progress(df[df['project_id'] == pid])
         if proj_res:
-            # Фильтрация по статусу 5 (Завершено)
-            # В snapshot у нас есть поле p.is_agreement_project, но p.status мы не всегда тянем.
-            # Поэтому фильтруем по расчетным 99%+
-            if not show_finished and proj_res['total'] >= 99.0:
-                continue
-            
+            if not show_finished and proj_res['total'] >= 99.9: continue
             if "Все" in selected_sups or proj_res['supplier'] in selected_sups:
                 results.append(proj_res)
     
     if not results:
-        st.info("Нет данных для отображения.")
-        return
+        st.info("Нет данных."); return
 
     res_df = pd.DataFrame(results).sort_values('total', ascending=False)
 
     fig = go.Figure()
-    # 1. Пройденный путь (серый)
     fig.add_trace(go.Bar(
         y=res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>",
-        x=res_df['passed_part'], name='Завершено', orientation='h',
+        x=res_df['passed_part'], name='Пройдено', orientation='h',
         marker=dict(color='#BDC3C7'), hoverinfo='skip'
     ))
 
-    # 2. Текущая стадия (синий со штриховкой)
+    # Штриховка всегда видна (минимум 1.5%), если есть активная часть
+    x_active_viz = res_df['active_part'].apply(lambda x: max(x, 1.5) if x > 0 else 0)
+    
     fig.add_trace(go.Bar(
         y=res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>",
-        x=res_df['active_part'], name='В работе', orientation='h',
+        x=x_active_viz, name='В работе', orientation='h',
         marker=dict(color='#3498DB', pattern_shape="/"),
-        customdata=np.stack((res_df['status_text'], res_df['active_task_readiness'], res_df['total']), axis=-1),
-        hovertemplate="<b>%{y}</b><br>Статус: %{customdata[0]}<br>Готовность задачи: <b>%{customdata[1]}%</b><br>Общий прогресс: <b>%{customdata[2]}%</b><extra></extra>"
+        customdata=np.stack((res_df['status_text'], res_df['total']), axis=-1),
+        hovertemplate="<b>%{y}</b><br>Статус: %{customdata[0]}<br>Прогресс: <b>%{customdata[1]}%</b><extra></extra>"
     ))
 
     fig.update_layout(
-        barmode='stack', height=max(400, len(res_df) * 60), 
-        xaxis=dict(title="Процент готовности (%)", range=[0, 100]), 
-        yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
-        showlegend=False, margin=dict(l=20, r=20, t=20, b=20),
-        plot_bgcolor='rgba(0,0,0,0)'
+        barmode='stack', height=max(400, len(res_df) * 60),
+        xaxis=dict(title="Готовность %", range=[0, 100]),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=10)),
+        showlegend=False, margin=dict(l=20, r=20, t=20, b=20), plot_bgcolor='rgba(0,0,0,0)'
     )
 
     st.plotly_chart(fig, width='stretch')
 
     if do_debug:
         st.write("---")
-        st.markdown("#### ⚙️ Аудит расчетов (Бюрократия)")
-        debug_list = []
+        st.markdown("#### ⚙️ Детализация баллов")
+        dbg_data = []
         for r in results:
-            d = r['debug']['buro']
-            debug_list.append({
-                "Проект": r['project_name'], "Общий %": r['total'],
-                "Цепочка этапов (по старту)": d['stages_in_db'], 
-                "Текущий Order": d['max_order'],
-                "Статус текущего": d['current_status'], 
-                "Пройдено (модель)": d['passed_count'],
-                "Видна полоса?": "Да" if d['is_active_visible'] else "Нет"
+            v = r['debug_vals']
+            dbg_data.append({
+                "Проект": r['project_name'],
+                "Итого %": r['total'],
+                "Бюро (зав)": v['buro'],
+                "Бюро (раб)": round(v['buro_active'], 2),
+                "Тех-Подг": v['prep'],
+                "Метаданные": v['meta'],
+                "Данные": v['data']
             })
-        st.table(debug_list)
+        st.table(dbg_data)

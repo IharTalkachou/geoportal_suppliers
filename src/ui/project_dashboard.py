@@ -149,7 +149,7 @@ def render_project_dashboard(session, user_role="user"):
     # 5. ПОД-НАВИГАЦИЯ
     sub_nav = st.segmented_control(
         "Разделы проекта",
-        options=["📄 Паспорт", "📦 Состав", "📈 Этапы"],
+        options=["📄 Паспорт", "📦 Состав", "📜 Согласование документов", "⚙️ Техническая проработка"],
         default="📄 Паспорт",
         key=f"project_nav_{proj_id_int}",
         label_visibility="collapsed"
@@ -160,12 +160,10 @@ def render_project_dashboard(session, user_role="user"):
         render_passport_subtab(session, proj_id_int, is_readonly, proj_data)
     elif sub_nav == "📦 Состав":
         render_composition_subtab(session, proj_id_int, is_readonly, proj_data)
-    elif sub_nav == "📈 Этапы":
-        track_tabs = st.tabs(["📜 Бюрократия", "⚙️ Технология"])
-        with track_tabs[0]:
-            render_bureaucracy_tab(session, proj_id_int, user_role=user_role)
-        with track_tabs[1]:
-            render_technology_tab(session, proj_id_int, user_role=user_role)
+    elif sub_nav == "📜 Согласование документов":
+        render_bureaucracy_tab(session, proj_id_int, user_role=user_role)
+    elif sub_nav == "⚙️ Техническая проработка":
+        render_technology_tab(session, proj_id_int, user_role=user_role)
 
 # ==========================================
 # 🛠️ ПОД-ФУНКЦИИ (КОМПОНЕНТЫ)
@@ -236,9 +234,9 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
             st.info(f"📝 {proj_data['notes'] or 'Нет примечаний'}")
             
             # SLA Справка
-            with st.expander("⏳ Параметры SLA"):
-                st.caption(f"Метаданные: {proj_data.get('meta_days', 10)} дн. ({proj_data.get('meta_method', '—')})")
-                st.caption(f"Данные: {proj_data.get('data_days', 10)} дн. ({proj_data.get('data_method', '—')})")
+            #with st.expander("⏳ Параметры SLA"):
+            #    st.caption(f"Метаданные: {proj_data.get('meta_days', 10)} дн. ({proj_data.get('meta_method', '—')})")
+            #    st.caption(f"Данные: {proj_data.get('data_days', 10)} дн. ({proj_data.get('data_method', '—')})")
 
     if not is_readonly:
         c1, c2 = st.columns(2)
@@ -323,7 +321,9 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
             pi.item_id, d.dataset_name, i.info_name, 
             i.format, i.update,
             c.full_name as tech_contact,
-            pi.provision_right
+            pi.provision_right,
+            pi.meta_days, pi.data_days,
+            pi.meta_method, pi.data_method
         FROM project_items pi
         JOIN datasets d ON pi.dataset_id = d.dataset_id
         JOIN info_types i ON pi.info_id = i.info_id
@@ -332,7 +332,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
         ORDER BY d.dataset_name, i.info_name
     """, {"pid": proj_id_int})
 
-    st.dataframe(items_df[["dataset_name", "info_name", "tech_contact", "provision_right", "format", "update"]], 
+    st.dataframe(items_df[["dataset_name", "info_name", "tech_contact", "provision_right", "format", "update", "data_method"]], 
                     width='stretch', hide_index=True,
                     column_config={
                         "dataset_name": "Набор данных", 
@@ -340,7 +340,8 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                         "tech_contact": "Технический контакт",
                         "provision_right": "Право предоставления набора",
                         "format": "Формат предоставления набора",
-                        "update": "Срок обновления набора"
+                        "update": "Срок обновления набора",
+                        "data_method": "Способ предоставления набора"
                     })
 
     if not is_readonly:
@@ -368,16 +369,27 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
             # Логика подстановки значений
             if st.session_state.get("crud_item_sel_prev") != sel_item:
                 if is_editing:
+                    # Извлекаем данные один раз здесь
                     curr = items_df[items_df["item_id"] == item_ids_map[sel_item]].iloc[0]
+                    
                     st.session_state["crud_ds_in"] = curr["dataset_name"]
                     st.session_state["crud_info_in"] = curr["info_name"]
                     st.session_state["crud_cont_in"] = curr["tech_contact"] if pd.notna(curr["tech_contact"]) else "Не выбран"
                     st.session_state["crud_prov_in"] = curr["provision_right"] if pd.notna(curr["provision_right"]) else prov_options[0]
+                    st.session_state["c_meta_d"] = int(curr["meta_days"])
+                    st.session_state["c_meta_m"] = curr["meta_method"]
+                    st.session_state["c_data_d"] = int(curr["data_days"])
+                    st.session_state["c_data_m"] = curr["data_method"]
                 else:
                     st.session_state["crud_ds_in"] = list(ds_map.keys())[0] if ds_map else ""
                     st.session_state["crud_info_in"] = ""
                     st.session_state["crud_cont_in"] = "Не выбран"
                     st.session_state["crud_prov_in"] = prov_options[0]
+                    st.session_state["c_meta_d"] = 10
+                    st.session_state["c_meta_m"] = "Электронный кабинет"
+                    st.session_state["c_data_d"] = 0
+                    st.session_state["c_data_m"] = "Сервис (WMS/WFS)"
+                
                 st.session_state["crud_item_sel_prev"] = sel_item
 
             # Виджеты
@@ -402,19 +414,29 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
             st.markdown("**⏳ Параметры размещения (ALM/SLA)**")
             csla1, csla2 = st.columns(2)
             with csla1:
-                m_days = st.number_input("Срок метаданных (дн.)", min_value=1, 
-                                        value=int(curr["meta_days"]) if is_editing else 10, key="c_meta_d")
-                m_meth = st.selectbox("Способ (метаданные)", 
-                                    ["Электронный кабинет", "Передача XML", "API", "Другой"], 
-                                    index=0 if not is_editing else ["Электронный кабинет", "Передача XML", "API", "Другой"].index(curr.get("meta_method", "Электронный кабинет")),
-                                    key="c_meta_m")
+                st.number_input("Срок метаданных (дн.)", min_value=1, key="c_meta_d")
+                st.selectbox("Способ (метаданные)", 
+                            ["Электронный кабинет", "Передача XML", "API", "Другой"], 
+                            key="c_meta_m")
             with csla2:
-                d_days = st.number_input("Срок данных (дн.)", min_value=1, 
-                                        value=int(curr["data_days"]) if is_editing else 10, key="c_data_d")
-                d_meth = st.selectbox("Способ (данные)", 
-                                    ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель"], 
-                                    index=0 if not is_editing else ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель"].index(curr.get("data_method", "Сервис (WMS/WFS)")),
-                                    key="c_data_m")
+                is_not_transmitted = (st.session_state.get("c_data_m") == "Не передаются")
+                if is_not_transmitted:
+                    st.session_state["c_data_d"] = 0
+                
+                
+                st.number_input(
+                    "Срок данных (дн.)", 
+                    min_value=0, 
+                    key="c_data_d", 
+                    disabled=is_not_transmitted,
+                    help="Срок не указывается, если данные не передаются" if is_not_transmitted else None
+                )
+                if is_not_transmitted:
+                    st.caption("🚫 **Срок не требуется:** выбран режим без передачи данных")
+                    
+                st.selectbox("Способ (данные)", 
+                            ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель", "Не передаются"], 
+                            key="c_data_m")
 
             c_btn, c_del = st.columns([3, 1])
             with c_btn:
@@ -436,7 +458,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                                         meta_days=:md, data_days=:dd, meta_method=:mm, data_method=:dm
                                     WHERE item_id=:id
                                 """), {"d": d_id, "i": i_id, "c": c_id, "prov": sel_prov, 
-                                    "md": m_days, "dd": d_days, "mm": m_meth, "dm": d_meth, "id": target_item_id})
+                                    "md": st.session_state.c_meta_d, "mm": st.session_state.c_meta_m, "dd": st.session_state.c_data_d, "dm": st.session_state.c_data_m, "id": target_item_id})
                             else:
                                 # Проверка на дубликат перед вставкой
                                 is_dup = not items_df[(items_df["dataset_name"] == sel_ds) & (items_df["info_name"] == sel_info)].empty
@@ -448,7 +470,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                                     INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right, meta_days, data_days, meta_method, data_method) 
                                     VALUES (:p, :d, :i, :c, CAST(:prov AS data_provision_type), :md, :dd, :mm, :dm)
                                 """), {"p": proj_id_int, "d": d_id, "i": i_id, "c": c_id, "prov": sel_prov, 
-                                    "md": m_days, "dd": d_days, "mm": m_meth, "dm": d_meth})
+                                    "md": st.session_state.c_meta_d, "mm": st.session_state.c_meta_m, "dd": st.session_state.c_data_d, "dm": st.session_state.c_data_m})
                             
                             session.commit()
                             clear_cache()
