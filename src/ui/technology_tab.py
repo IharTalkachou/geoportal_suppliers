@@ -54,6 +54,10 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
         st.session_state.td_p_start = existing_data['planned_start'] if is_edit else date.today()
     if "td_affected_ids" not in st.session_state:
         st.session_state.td_affected_ids = existing_data['affected_item_ids'] if (is_edit and existing_data.get('affected_item_ids')) else []
+    if "td_a_start" not in st.session_state:
+        st.session_state.td_a_start = existing_data['actual_start'] if is_edit else None
+    if "td_a_end" not in st.session_state:
+        st.session_state.td_a_end = existing_data['actual_end'] if is_edit else None
 
     # 2. ЛОГИКА АВТОПОДСТАНОВКИ И SLA
     def update_logic_callback():
@@ -93,7 +97,7 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
     col1, col2 = st.columns(2)
     with col1:
         st.selectbox("Технологический этап *", st_names, key="td_stage", on_change=update_logic_callback)
-        st.selectbox("Статус", ms_names, key="td_ms", on_change=update_logic_callback)
+        st.selectbox("Статус", ms_names, key="td_ms")
         
         staff_df = query_db("SELECT user_id, display_name FROM users WHERE show_in_staff=True AND is_active=True ORDER BY display_name")
         staff_map = dict(zip(staff_df["display_name"], staff_df["user_id"]))
@@ -139,8 +143,8 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
 
     st.divider()
     c3, c4 = st.columns(2)
-    c3.date_input("🚀 Факт. начало", key="td_a_start", value=existing_data['actual_start'] if is_edit else st.session_state.get('td_a_start'))
-    c4.date_input("🏁 Факт. конец", key="td_a_end", value=existing_data['actual_end'] if is_edit else st.session_state.get('td_a_end'))
+    c3.date_input("🚀 Факт. начало", key="td_a_start")
+    c4.date_input("🏁 Факт. конец", key="td_a_end")
     
     st.text_area("Комментарий", value=existing_data['comments'] if is_edit else "", key="td_comm")
 

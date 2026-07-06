@@ -82,20 +82,39 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     
     if is_edit:
         st.caption("📂 Документы")
-        docs = query_db("SELECT * FROM stage_documents WHERE project_stage_id = :id", {"id": int(existing_data['stage_progress_id'])})
+        # 1. Загрузка существующих
+        # Используем int() для ID, так как pandas может вернуть numpy.int64
+        curr_ps_id = int(existing_data['stage_progress_id'])
+        docs = query_db("SELECT * FROM stage_documents WHERE project_stage_id = :id", {"id": curr_ps_id})
+        
         for _, d in docs.iterrows():
             dc1, dc2 = st.columns([0.85, 0.15])
             dc1.caption(f"📄 {d['doc_name']}")
-            if dc2.button("🗑", key=f"del_doc_{d['doc_id']}"):
+            # Удаление
+            if dc2.button("🗑", key=f"del_doc_buro_{d['doc_id']}"):
                 session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"), {"id": int(d['doc_id'])})
-                session.commit(); st.rerun()
-        with st.popover("📎 Добавить документ", width='stretch'):
-            n, u = st.text_input("Название"), st.text_input("URL")
-            if st.button("Прикрепить"):
-                if n and u:
-                    session.execute(text("INSERT INTO stage_documents (project_stage_id, doc_name, doc_url) VALUES (:id, :n, :u)"),
-                                    {"id": int(existing_data['stage_progress_id']), "n": n, "u": u})
-                    session.commit(); st.rerun()
+                session.commit()
+                clear_cache()
+                st.rerun()
+        
+        # 2. Добавление нового
+        with st.popover("📎 Добавить документ", use_container_width=True):
+            new_n = st.text_input("Название (напр. Письмо №...)")
+            new_u = st.text_input("URL-ссылка")
+            if st.button("Сохранить ссылку", key="btn_save_new_doc_buro"):
+                if new_n and new_u:
+                    try:
+                        session.execute(text("""
+                            INSERT INTO stage_documents (project_stage_id, doc_name, doc_url) 
+                            VALUES (:id, :n, :u)
+                        """), {"id": curr_ps_id, "n": new_n, "u": new_u})
+                        session.commit()
+                        clear_cache()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}")
+                else:
+                    st.warning("Заполните поля")
 
     if st.button("💾 Сохранить", type="primary", width='stretch'):
         try:
