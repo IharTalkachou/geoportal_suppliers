@@ -246,8 +246,25 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
                 st.rerun()
         with c2:
             if st.button("🗑 Удалить проект", type="secondary", width='stretch'):
-                # ... (логика удаления без изменений) ...
-                pass
+                has_items = session.execute(text("SELECT 1 FROM project_items WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
+                # Проверяем в новой единой таблице
+                has_stages = session.execute(text("SELECT 1 FROM project_stages WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
+                
+                if has_items or has_stages:
+                    st.error("❌ Нельзя удалить проект: в нем уже есть состав или этапы.")
+                else:
+                    try:
+                        log_action(st.session_state["auth"]["user_id"], "DELETE_PROJECT", "projects", proj_id_int, 
+                                   old={"name": proj_data['project_name']})
+                        session.execute(text("DELETE FROM projects WHERE project_id = :pid"), {"pid": proj_id_int})
+                        session.commit()
+                        clear_cache()
+                        st.session_state["selected_project_id"] = None
+                        st.session_state["proj_list_ver"] += 1 
+                        st.success("Проект успешно удален")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка удаления: {e}"); session.rollback()
 
         if st.session_state.get("dash_edit_mode"):  
             # 🟢 ОБНОВЛЕННАЯ ФОРМА РЕДАКТИРОВАНИЯ

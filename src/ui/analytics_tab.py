@@ -33,25 +33,33 @@ def render_analytics_tab(user_role="user"):
     # Используем ключ для сохранения состояния при переключении глобальных вкладок
     choice = st.segmented_control(
         "Разделы аналитики",
-        options=["🎯 KPI", "📅 Календарь", "👥 Сотрудники", "🌡️ Матрицы рисков", "📄 Отчёты"],
-        default="🎯 KPI",
+        options=["🎯 Задачи", "📅 Календарь", "👥 Загрузка сотрудников", "📊 Прогресс проектов", "📄 Отчёты"],
+        default="🎯 Задачи",
         key="analytics_sub_nav",
         label_visibility="collapsed"
     )
     st.markdown("<br>", unsafe_allow_html=True)
 
     # 3. РОУТИНГ (Вызов соответствующих модулей)
-    if choice == "🎯 KPI":
+    if choice == "🎯 Задачи":
         render_kpi_tab()
 
     elif choice == "📅 Календарь":
         render_calendar_tab()
 
-    elif choice == "👥 Сотрудники":
+    elif choice == "👥 Загрузка сотрудников":
         render_staff_tab()
 
-    elif choice == "🌡️ Матрицы рисков":
+    elif choice == "📊 Прогресс проектов":
+        #st.warning('На доработке')
         _render_heatmap_router()
+        #from ui.analytics.progress_math import render_bureaucracy_audit_table
+        #from ui.analytics.progress_math import render_tech_audit_table
+        #from ui.analytics.progress_math import render_project_progress_audit_table
+        #df = get_analytics_snapshot()
+        #render_bureaucracy_audit_table(df)
+        #render_tech_audit_table(df)
+        #render_project_progress_audit_table(df)
 
     elif choice == "📄 Отчёты":
         render_reports_tab()
@@ -60,14 +68,14 @@ def render_analytics_tab(user_role="user"):
 # ВНУТРЕННИЕ ФУНКЦИИ (ВРЕМЕННОЕ ЖИЛЬЕ)
 # ==========================================
 
-def _render_heatmap_router():
+'''def _render_heatmap_router():
     """Роутер для тепловых карт и светофора"""
     st.markdown("### 🌡️ Матрицы рисков и Прогресс")
     
     # Загружаем данные через провайдер для Светофора
     df = get_analytics_snapshot()
     
-    modes = ["🚦 Светофор (Прогресс)", "⚖️ Юридический трек", "⚙️ Технический трек"]
+    modes = ["🚦 Сводный прогресс", "⚖️ Оценка задержек по документарному переделу", "⚙️ Оценка задержек по технологическому переделу"]
     mode = st.radio("Выберите срез анализа:", modes, horizontal=True, key="hm_mode_sel_new")
 
     if mode == modes[0]:
@@ -75,7 +83,7 @@ def _render_heatmap_router():
         render_traffic_light_chart(df)
     else:
         st.info("Разработка детальных тепловых карт в процессе переноса в новую модель...")
-        # Здесь в будущем будет вызов heatmap_logic.render_heatmap(track)
+        # Здесь в будущем будет вызов heatmap_logic.render_heatmap(track)'''
 
 def _sync_overdue_log_internal():
     """Обновленная логика синхронизации просрочек с поддержкой JSONB и единой таблицы этапов"""
@@ -144,8 +152,8 @@ def _render_heatmap_router():
     # Теперь мы используем Segmented Control для переключения ВНУТРИ раздела
     hm_choice = st.segmented_control(
         "Вид матрицы",
-        options=["🚦 Светофор (Прогресс)", "🌡️ Детальные карты задержек"],
-        default="🚦 Светофор (Прогресс)",
+        options=["▰▰▰▱ Сводный прогресс по проектам", "🌡️ Детальные карты задержек"],
+        default="▰▰▰▱ Сводный прогресс по проектам",
         key="hm_internal_nav",
         label_visibility="collapsed"
     )
@@ -153,7 +161,7 @@ def _render_heatmap_router():
 
     df = get_analytics_snapshot()
 
-    if hm_choice == "🚦 Светофор (Прогресс)":
+    if hm_choice == "▰▰▰▱ Сводный прогресс по проектам":
         render_traffic_light_chart(df)
     else:
         # Вызов нашего нового файла

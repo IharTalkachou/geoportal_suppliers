@@ -11,7 +11,7 @@ def get_analytics_snapshot():
     query = """
         -- 1. БЛОК БЮРОКРАТИИ
         SELECT 
-            p.project_id, p.project_name, s.supplier_name, s.is_mandatory,
+            p.project_id, p.project_name, p.supplier_id, s.supplier_name, s.is_mandatory,
             stg.stage_name, stg.stage_order, stg.stage_type, 
             stg.stage_code,
             stg.track_category,
@@ -36,7 +36,7 @@ def get_analytics_snapshot():
         
         -- 2. БЛОК ТЕХНОЛОГИИ (РАЗВЕРНУТЫЙ ИЗ JSONB)
         SELECT 
-            p.project_id, p.project_name, s.supplier_name, s.is_mandatory,
+            p.project_id, p.project_name, p.supplier_id, s.supplier_name, s.is_mandatory,
             stg.stage_name, stg.stage_order, stg.stage_type, 
             stg.stage_code,
             stg.track_category,

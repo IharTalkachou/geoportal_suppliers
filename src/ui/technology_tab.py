@@ -117,29 +117,29 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
     
     # Фильтруем закрытые только для НОВЫХ этапов "Публикация"
     available_items = project_items.copy()
-    if not is_edit:
+    '''if not is_edit:
         closed_q = query_db("""
             SELECT DISTINCT jsonb_array_elements_text(affected_item_ids)::int as item_id
             FROM project_stages WHERE project_id = :pid AND stage_id = :sid AND micro_status = 4
         """, {"pid": project_id, "sid": cur_stage_id})
         closed_ids = closed_q['item_id'].tolist() if not closed_q.empty else []
-        available_items = available_items[~available_items['item_id'].isin(closed_ids)]
+        available_items = available_items[~available_items['item_id'].isin(closed_ids)]'''
     
-    if available_items.empty and not is_edit:
+    '''if available_items.empty and not is_edit:
         st.warning("⚠️ Все наборы уже прошли этот этап."); affected_ids = []
-    else:
-        item_opts = {f"{r['dataset_name']} | {r['info_name']}": int(r['item_id']) for _, r in available_items.iterrows()}
-        
-        def on_items_change():
-            st.session_state.td_affected_ids = [item_opts[l] for l in st.session_state.td_multi_items]
-            update_logic_callback()
+    else:'''
+    item_opts = {f"{r['dataset_name']} | {r['info_name']}": int(r['item_id']) for _, r in available_items.iterrows()}
+    
+    def on_items_change():
+        st.session_state.td_affected_ids = [item_opts[l] for l in st.session_state.td_multi_items]
+        update_logic_callback()
 
-        st.multiselect(
-            "Выберите виды сведений *", options=list(item_opts.keys()), 
-            default=[l for l, iid in item_opts.items() if iid in st.session_state.td_affected_ids],
-            key="td_multi_items", on_change=on_items_change
-        )
-        affected_ids = st.session_state.td_affected_ids
+    st.multiselect(
+        "Выберите виды сведений *", options=list(item_opts.keys()), 
+        default=[l for l, iid in item_opts.items() if iid in st.session_state.td_affected_ids],
+        key="td_multi_items", on_change=on_items_change
+    )
+    affected_ids = st.session_state.td_affected_ids
 
     st.divider()
     c3, c4 = st.columns(2)
@@ -264,8 +264,15 @@ def render_tech_card(session, row, project_id, stage_map, micro_map, project_ite
         # 5. Наборы
         affected_ids = row.get('affected_item_ids', [])
         if affected_ids:
+            import json
+            if isinstance(affected_ids, str):
+                try: affected_ids = json.loads(affected_ids)
+                except: affected_ids = []
+                
             names = project_items[project_items['item_id'].isin(affected_ids)]['info_name'].tolist()
-            st.caption(f"📦 {', '.join(names)}")
+            st.markdown("**📦 Применено к:**")
+            for name in names:
+                st.markdown(f"<div style='font-size:0.8rem; margin: 1px 0; color: #444;'>• {name}</div>", unsafe_allow_html=True)
 
         # 6. Действия
         if not is_readonly:

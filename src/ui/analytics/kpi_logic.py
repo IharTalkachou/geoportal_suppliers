@@ -113,8 +113,8 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
 
                 # 1. Ограничение названия
                 p_name = row['project_name']
-                p_display = (p_name[:27] + '...') if len(p_name) > 30 else p_name
-                
+                # p_display = (p_name[:27] + '...') if len(p_name) > 30 else p_name # пробую убрать ограничения
+                p_display = p_name
                 # 2. Иконка трека
                 track_icon = "📄" if row['track_type'] == 'bureaucracy' else "💻"
                 
@@ -169,8 +169,13 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
                         
                         st.divider()
                         st.write(f"👤 **Ответственный:** {selected_row['responsible_name'] or '—'}")
-                        if items_str: st.caption(f"📦 Состав: {items_str}")
-                        st.markdown(f'<div style="margin-top:10px; padding:10px; background:#f9f9f9; border-left:4px solid {s_color};">'
+                        if items_str: 
+                        #if related_items:
+                            st.markdown("**📦 Состав:**")
+                            for item in related_items:
+                                st.markdown(f"<div style='font-size:0.85rem; margin: 1px 0; color: #444;'>• {item}</div>", unsafe_allow_html=True)
+                        st.write("")
+                        st.markdown(f'<div style="margin-top:15px; padding:10px; background:#f9f9f9; border-left:4px solid {s_color};">'
                                     f'<b>💬 Комментарий:</b><br>{selected_row["comments"] or "—"}</div>', 
                                     unsafe_allow_html=True)
                 else:

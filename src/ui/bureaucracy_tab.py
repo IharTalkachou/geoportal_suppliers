@@ -237,7 +237,7 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
             st.markdown(custom_badge(txt, main_color, "white"), unsafe_allow_html=True)
         
         elif ms == 5: # Отложено
-            txt = f"Отложено до {format_date_ru(row['planned_start'])}"
+            txt = f"Отложено с {format_date_ru(row['planned_start'])}"
             st.markdown(custom_badge(txt, main_color, "white"), unsafe_allow_html=True)
         
         else: # В работе / Ожидание / Просрочено
