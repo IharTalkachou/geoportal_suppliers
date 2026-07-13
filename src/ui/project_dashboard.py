@@ -267,56 +267,55 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
                         st.error(f"Ошибка удаления: {e}"); session.rollback()
 
         if st.session_state.get("dash_edit_mode"):  
+            
+            sup_list = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
+            stat_list = query_db("SELECT status_id, status_name FROM ref_statuses ORDER BY status_name")
+            cont_list = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid ORDER BY full_name", 
+                                {"sid": int(proj_data['supplier_id'])})
+            
+            sup_names = sup_list["supplier_name"].tolist()
+            stat_names = stat_list["status_name"].tolist()
+            cont_names = ["Не указан"] + cont_list["full_name"].tolist()
+            
             # 🟢 ОБНОВЛЕННАЯ ФОРМА РЕДАКТИРОВАНИЯ
             with st.form("edit_proj_form"):
-                st.markdown("#### 📝 Редактирование реквизитов и SLA")
+                st.markdown("#### 📝 Редактирование реквизитов")
                 
-                # Подгружаем доп. данные для формы (SLA поля)
-                curr_full = query_db("SELECT * FROM projects WHERE project_id = :pid", {"pid": proj_id_int}).iloc[0]
-
                 col_f1, col_f2 = st.columns(2)
                 with col_f1:
-                    p_name_in = st.text_input("Название проекта", value=curr_full['project_name'])
-                    p_is_agr = st.checkbox("Проект Соглашения", value=bool(curr_full['is_agreement_project']))
-                    
-                    st.divider()
-                    st.markdown("**SLA Метаданные**")
-                    m_days = st.number_input("Дней на размещение (мета)", value=int(curr_full.get('meta_days', 10)), min_value=1)
-                    m_meth = st.selectbox("Способ (мета)", ["Электронный кабинет", "Передача XML", "API", "Другой"], 
-                                          index=0 if curr_full.get('meta_method') not in ["Передача XML", "API", "Другой"] else ["Электронный кабинет", "Передача XML", "API", "Другой"].index(curr_full.get('meta_method')))
+                    p_name_in = st.text_input("Название проекта", value=proj_data['project_name'])
+                    p_sup_in = st.selectbox("Поставщик", sup_names, index=sup_names.index(proj_data['supplier_name']) if proj_data['supplier_name'] in sup_names else 0)
+                    p_is_agr = st.checkbox("Проект Соглашения", value=bool(proj_data['is_agreement_project']))
+                    p_stat_in = st.selectbox("Статус", stat_names, index=stat_names.index(proj_data['status_name']) if proj_data['status_name'] in stat_names else 0)
                 
                 with col_f2:
-                    stat_list = query_db("SELECT status_id, status_name FROM ref_statuses ORDER BY status_id")
-                    s_names = stat_list["status_name"].tolist()
-                    st.selectbox("Статус", s_names, index=s_names.index(curr_full['status_name']) if curr_full['status_name'] in s_names else 0, key="p_stat_in")
-                    
-                    st.divider()
-                    st.markdown("**SLA Данные и сервисы**")
-                    d_days = st.number_input("Дней на размещение (данные)", value=int(curr_full.get('data_days', 10)), min_value=1)
-                    d_meth = st.selectbox("Способ (данные)", ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель"],
-                                          index=0 if curr_full.get('data_method') not in ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель"] else ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель"].index(curr_full.get('data_method')))
-
-                p_notes_in = st.text_area("Примечание", value=curr_full['notes'] or "")
+                    current_cont = proj_data.get('full_name', 'Не указан')
+                    p_contact_in = st.selectbox("Основной контакт", cont_names, index=cont_names.index(current_cont) if current_cont in cont_names else 0)
+                
+                p_notes_in = st.text_area("Примечание", value=proj_data['notes'] or "")
 
                 if st.form_submit_button("💾 Сохранить изменения", type="primary"):
                     try:
-                        # Получаем ID статуса из выбранного имени
-                        new_stat_id = int(stat_list[stat_list["status_name"]==st.session_state.p_stat_in]["status_id"].iloc[0])
-                        
+                        new_sup_id = int(sup_list[sup_list["supplier_name"]==p_sup_in]["supplier_id"].iloc[0])
+                        new_stat_id = int(stat_list[stat_list["status_name"]==p_stat_in]["status_id"].iloc[0])
+                        new_cont_id = int(cont_list[cont_list["full_name"]==p_contact_in]["contact_id"].iloc[0]) if p_contact_in != "Не указан" else None
+
                         session.execute(text("""
                             UPDATE projects SET 
-                                project_name=:name, is_agreement_project=:is_agr, status=:stat, notes=:notes,
-                                meta_days=:md, data_days=:dd, meta_method=:mm, data_method=:dm
+                                project_name=:name, supplier_id=:sup, main_contact_id=:cont, 
+                                status=:stat, notes=:notes, is_agreement_project=:is_agr 
                             WHERE project_id=:id
                         """), {
-                            "name": p_name_in, "is_agr": p_is_agr, "stat": new_stat_id, "notes": p_notes_in,
-                            "md": m_days, "dd": d_days, "mm": m_meth, "dm": d_meth, "id": proj_id_int
+                            "name": p_name_in, "sup": new_sup_id, "cont": new_cont_id, 
+                            "stat": new_stat_id, "notes": p_notes_in, "is_agr": p_is_agr, "id": proj_id_int
                         })
                         
                         session.commit(); clear_cache()
                         st.session_state.dash_edit_mode = False
                         st.success("✅ Данные проекта обновлены!"); st.rerun()
-                    except Exception as e: st.error(f"Ошибка: {e}"); session.rollback()
+                    except Exception as e: 
+                        st.error(f"Ошибка сохранения: {e}")
+                        session.rollback()
 
 
 def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
