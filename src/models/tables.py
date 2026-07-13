@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, Numeric, ForeignKey, JSON, CheckConstraint, UniqueConstraint, Index, text
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY, ENUM
 from sqlalchemy.orm import relationship
-from src.config.database import Base
+from config.database import Base
 
 # ENUM-типы, уже существующие в БД (создаются вручную SQL, не Alembic'ом)
 ApplicantCategory = ENUM('Физическое лицо', 'Юридическое лицо', name='applicant_category', create_type=False)

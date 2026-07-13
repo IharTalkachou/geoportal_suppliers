@@ -89,3 +89,9 @@ Don't assume these are dead ends to fix; confirm with a repo-wide grep for the m
 Three roles, hierarchical: `user` < `editor` < `admin` (see `config/auth.py::require_role()`). Role gates are enforced per-render-function (e.g. `render_admin_panel` calls `require_role("admin")` at the top), not via a central router — new admin-only screens must call this themselves.
 
 All login/logout and CRUD actions that call `log_action()` write to `audit_log` over a **separate** DB session/connection from the business transaction, so audit writes never roll back with a failed business transaction and never block it on error (failures are swallowed and printed to stderr).
+
+## Текущие доработки
+
+Изменения в `src/ui/analytics/report_docx.py` (конструктор ежемесячного отчёта НИПД, сбор данных из БД по кнопке «Собрать данные»):
+- **Блок 04 (Статистика на конец периода)**: подсчёт юридических лиц (`orgs`) в `fetch_registration_stats()` переведён с `COUNT(*)` на `COUNT(DISTINCT applicant_name)`, чтобы повторные завершённые заявки от одной и той же организации не задваивали статистику.
+- **Блок 03 (Электронные кабинеты)**: `fetch_registration_stats()` теперь дополнительно возвращает `prior_suppliers` — список `applicant_name` поставщиков с более ранней завершённой заявкой (`org_type = 'Поставщик'`, `processed_at < start_p`). Список кабинетов, собираемых за текущий период, фильтруется по этому списку, чтобы ранее зарегистрированный Поставщик не попадал в текст блока повторно при новой заявке.

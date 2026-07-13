@@ -267,12 +267,16 @@ def fetch_registration_stats(start_t, end_t):
         WHERE r.processed_at BETWEEN :s AND :e AND r.status = 'Завершена'
     """, {"s": start_t, "e": end_t})
     total_stats = query_db("""
-        SELECT 
+        SELECT
             COUNT(*) FILTER (WHERE applicant_type = 'Физическое лицо') as phys,
-            COUNT(*) FILTER (WHERE applicant_type = 'Юридическое лицо') as orgs
+            COUNT(DISTINCT applicant_name) FILTER (WHERE applicant_type = 'Юридическое лицо') as orgs
         FROM reg_requests WHERE processed_at <= :e AND status = 'Завершена'
     """, {"e": end_t}).iloc[0]
-    return new_users, total_stats
+    prior_suppliers = query_db("""
+        SELECT DISTINCT applicant_name FROM reg_requests
+        WHERE org_type = 'Поставщик' AND status = 'Завершена' AND processed_at < :s
+    """, {"s": start_t})['applicant_name'].tolist()
+    return new_users, total_stats, prior_suppliers
 
 def generate_docx_file(report_date, sections_data, month_name):
     doc = Document()
@@ -416,7 +420,7 @@ def render_monthly_report_tab(session):
     if not is_fixed:
         if st.button("✨ Собрать данные для отчёта из базы", width='stretch', type="secondary"):
             # А. Получаем данные из базы
-            new_users, totals = fetch_registration_stats(start_p, end_p)
+            new_users, totals, prior_suppliers = fetch_registration_stats(start_p, end_p)
 
             # --- БЛОК 02: РЕГИСТРАЦИЯ ---
             phys = len(new_users[new_users['applicant_type'] == 'Физическое лицо'])
@@ -433,6 +437,7 @@ def render_monthly_report_tab(session):
 
             # --- БЛОК 03: КАБИНЕТЫ ---
             sups = new_users[(new_users['applicant_type'] == 'Юридическое лицо') & (new_users['org_type'] == 'Поставщик')]
+            sups = sups[~sups['applicant_name'].isin(prior_suppliers)]
             if not sups.empty:
                 names = ", ".join(sups['applicant_name'].tolist())
                 st.session_state[f"tx_6.1_03_cabinets_{report_id}"] = f"– созданы и настроены электронные кабинеты, включая настройку ролей, пользователей и шаблонов метаданных для {len(sups)}{'-го Поставщика' if len(sups) == 1 else '-х Поставщиков'}: {names};"
