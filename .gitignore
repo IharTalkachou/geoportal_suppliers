@@ -13,7 +13,7 @@ build/
 app_data/sessions/
 certbot/
 backups/
-*.backup
+db/*.backup
 
 # IDE
 .vscode/settings.json
@@ -30,4 +30,4 @@ credentials.json
 csv_export/
 
 # Text
-.docx
+*.docx
