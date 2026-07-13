@@ -212,6 +212,26 @@ def get_gkf_material_names(material_ids):
     
     return ", ".join(res['material_name'].tolist()) if not res.empty else "не найдены"
 
+@st.dialog("Фиксация отчёта")
+def confirm_fix_dialog(session, report_id, updated_full_data):
+    st.write("Укажите дату и время фиксации отчёта. С этого момента начнётся сбор данных для отчёта за следующий месяц.")
+    fix_date = st.date_input("Дата фиксации", value=date.today(), key="fix_report_date")
+    fix_time = st.time_input("Время фиксации", value=datetime.now().time(), key="fix_report_time")
+
+    if st.button("🔒 Подтвердить фиксацию", type="primary", width='stretch'):
+        fixed_at = datetime.combine(fix_date, fix_time)
+        try:
+            session.execute(
+                text("UPDATE reports_monthly SET fixed_at=:f, sections_data=:d WHERE report_id=:id"),
+                {"f": fixed_at, "d": json.dumps(updated_full_data, ensure_ascii=False), "id": report_id}
+            )
+            session.commit()
+            clear_cache()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка фиксации: {e}")
+            session.rollback()
+
 def get_report_period_bounds(report_month_date):
     prev = query_db("""
         SELECT fixed_at FROM reports_monthly 
@@ -694,17 +714,7 @@ def render_monthly_report_tab(session):
     with col2:
         if not is_fixed:
             if st.button("🔒 Зафиксировать", width='stretch', help="Отключает редактирование навсегда"):
-                try:
-                    session.execute(
-                        text("UPDATE reports_monthly SET fixed_at=NOW(), sections_data=:d WHERE report_id=:id"),
-                        {"d": json.dumps(updated_full_data, ensure_ascii=False), "id": report_id}
-                    )
-                    session.commit()
-                    clear_cache()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка фиксации: {e}")
-                    session.rollback()
+                confirm_fix_dialog(session, report_id, updated_full_data)
                 
     with col3:
         # Генерация файла
