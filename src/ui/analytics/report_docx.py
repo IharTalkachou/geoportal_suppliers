@@ -537,8 +537,26 @@ def render_monthly_report_tab(session):
             st.session_state[f"tx_6.1_05_provision_nipd_{report_id}"] = full_content
             st.session_state[f"t_6.1_05_provision_nipd"] = True
             
-            # --- БЛОКИ 06 - 08: ввод данных из ElasticSearch, модерация и техподдержка
+            # --- БЛОКИ 06 - 07: ввод данных из ElasticSearch
             # нужно проработать
+
+            # --- БЛОК 08: МОДЕРАЦИЯ (консультации Поставщиков) ---
+            mod_sups, mod_comments = fetch_moderation_stats(start_p, end_p)
+            if mod_sups:
+                sups_str = ", ".join(mod_sups)
+                consult_line = (
+                    f"– консультирование Поставщиков ({sups_str}) о:"
+                )
+                if mod_comments:
+                    consult_line += "\n" + "\n".join([f"\t– {c};" for c in mod_comments])
+                st.session_state[f"tx_6.1_08_moderation_{report_id}"] = (
+                    "модерация Национального геопортала (работа с комментариями и сообщениями пользователей), в том числе:\n"
+                    f"{consult_line}\n"
+                    "– информирование пользователей ([Список]) о Национальной инфраструктуре пространственных данных, "
+                    "её типовых компонентах, порядке подачи заявок на регистрацию на Национальном геопортале "
+                    "и перспективных направлениях сотрудничества и обмена информацией;"
+                )
+                st.session_state[f"t_6.1_08_moderation"] = True
 
             # --- БЛОКИ 09 - 16: БЮРОКРАТИЯ 6.1.2 ---
             b_stats = fetch_bureaucracy_logic_stats(start_p, end_p)
@@ -788,6 +806,23 @@ def fetch_provision_stats(start_t, end_t):
         return {"processed": processed, "in_work": in_work, "totals": totals}
 
     return {"NIPD": get_details("НИПД"), "GKF": get_details("Госкартгеофонд")}
+
+def fetch_moderation_stats(start_t, end_t):
+    """Сбор статистики для блока 08 (Модерация): консультации по НГ (NG_CONSULT/TECH_SUPPORT)"""
+    df = query_db("""
+        SELECT s.supplier_name, ps.comments
+        FROM project_stages ps
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        WHERE stg.stage_code IN ('NG_CONSULT', 'TECH_SUPPORT')
+          AND ps.micro_status = 4
+          AND ps.actual_end BETWEEN :s AND :e
+        ORDER BY s.supplier_name
+    """, {"s": start_t, "e": end_t})
+    suppliers = sorted(df['supplier_name'].dropna().unique().tolist())
+    comments = [c.strip() for c in df['comments'].tolist() if c and c.strip()]
+    return suppliers, comments
 
 def fetch_bureaucracy_logic_stats(start_t, end_t):
     """Сбор статистики для подразделов 6.1.2 (блоки 10-16)"""

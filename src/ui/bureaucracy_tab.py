@@ -16,17 +16,23 @@ def format_date_ru(d):
     return f"{d.day} {months[d.month-1]} {d.year}"
 
 def _resync_buro_iterations(session, project_id):
-    """Пересчет итераций на основе хронологии"""
-    rows = query_db("SELECT stage_progress_id, stage_id, micro_status, planned_start, actual_start, actual_end FROM project_stages WHERE project_id = :pid", {"pid": project_id})
+    """Пересчет итераций на основе хронологии (только документарный трек)"""
+    rows = query_db("""
+        SELECT ps.stage_progress_id, ps.stage_id, ps.micro_status, ps.planned_start, ps.actual_start, ps.actual_end
+        FROM project_stages ps
+        JOIN stages s ON ps.stage_id = s.stage_id
+        WHERE ps.project_id = :pid AND s.track_category = '1. Документарный'
+    """, {"pid": project_id})
     if rows.empty: return
     for s_id in rows['stage_id'].unique():
         sub = rows[rows['stage_id'] == s_id].copy()
         def get_sort_key(r):
-            if r['micro_status'] == 4: return r['actual_end'] or date.max
-            if r['micro_status'] == 1: return r['planned_start'] or date.min
-            return r['actual_start'] or r['planned_start'] or date.min
-        sub['sort_date'] = sub.apply(get_sort_key, axis=1)
-        sub = sub.sort_values(by='sort_date')
+            start = r['actual_start'] or r['planned_start'] or date.min
+            if r['micro_status'] == 4: return (r['actual_end'] or date.max, start)
+            if r['micro_status'] == 1: return (r['planned_start'] or date.min, start)
+            return (start, start)
+        sub['sort_key'] = sub.apply(get_sort_key, axis=1)
+        sub = sub.sort_values(by='sort_key')
         for i, (_, row) in enumerate(sub.iterrows(), 1):
             session.execute(text("UPDATE project_stages SET iteration_count = :v WHERE stage_progress_id = :id"),
                             {"v": i, "id": int(row['stage_progress_id'])})
@@ -76,8 +82,12 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     
     st.divider()
     c3, c4 = st.columns(2)
-    c3.date_input("🚀 Факт. начало", key="d_a_start", value=existing_data['actual_start'] if is_edit else None)
-    c4.date_input("🏁 Факт. конец", key="d_a_end", value=existing_data['actual_end'] if is_edit else None)
+    is_not_started = micro_map[st.session_state.d_ms] in (1, 5)  # Планируется / Отложено
+    if is_not_started:
+        st.session_state.d_a_start = None
+        st.session_state.d_a_end = None
+    c3.date_input("🚀 Факт. начало", key="d_a_start", value=existing_data['actual_start'] if is_edit else None, disabled=is_not_started)
+    c4.date_input("🏁 Факт. конец", key="d_a_end", value=existing_data['actual_end'] if is_edit else None, disabled=is_not_started)
     st.text_area("Комментарий", value=existing_data['comments'] if is_edit else "", key="d_comm")
     
     if is_edit:
@@ -268,6 +278,8 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
             st.write("")
             with st.popover("⚙️ Действия"):
                 if st.button("✏️ Редактировать", key=f"ed_{row['stage_progress_id']}", width='stretch'):
+                    for k in ["d_stage", "d_ms", "d_p_start", "d_p_end", "d_comm", "d_resp", "d_a_start", "d_a_end"]:
+                        if k in st.session_state: del st.session_state[k]
                     stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=row)
                 if st.button("🗑 Удалить", key=f"dl_{row['stage_progress_id']}", width='stretch'):
                     confirm_delete_dialog(session, int(row['stage_progress_id']), project_id)

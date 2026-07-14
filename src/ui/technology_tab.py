@@ -27,10 +27,12 @@ def _resync_tech_iterations(session, project_id):
     for s_id in rows['stage_id'].unique():
         sub = rows[rows['stage_id'] == s_id].copy()
         def get_sort_key(r):
-            if r['micro_status'] == 4: return r['actual_end'] or date.max
-            return r['actual_start'] or r['planned_start'] or date.min
-        sub['sort_date'] = sub.apply(get_sort_key, axis=1)
-        sub = sub.sort_values(by='sort_date')
+            start = r['actual_start'] or r['planned_start'] or date.min
+            if r['micro_status'] == 4: return (r['actual_end'] or date.max, start)
+            if r['micro_status'] == 1: return (r['planned_start'] or date.min, start)
+            return (start, start)
+        sub['sort_key'] = sub.apply(get_sort_key, axis=1)
+        sub = sub.sort_values(by='sort_key')
         for i, (_, row) in enumerate(sub.iterrows(), 1):
             session.execute(text("UPDATE project_stages SET iteration_count = :v WHERE stage_progress_id = :id"),
                             {"v": i, "id": int(row['stage_progress_id'])})
@@ -143,8 +145,12 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
 
     st.divider()
     c3, c4 = st.columns(2)
-    c3.date_input("🚀 Факт. начало", key="td_a_start")
-    c4.date_input("🏁 Факт. конец", key="td_a_end")
+    is_not_started = micro_map[st.session_state.td_ms] in (1, 5)  # Планируется / Отложено
+    if is_not_started:
+        st.session_state.td_a_start = None
+        st.session_state.td_a_end = None
+    c3.date_input("🚀 Факт. начало", key="td_a_start", disabled=is_not_started)
+    c4.date_input("🏁 Факт. конец", key="td_a_end", disabled=is_not_started)
     
     st.text_area("Комментарий", value=existing_data['comments'] if is_edit else "", key="td_comm")
 
@@ -278,6 +284,8 @@ def render_tech_card(session, row, project_id, stage_map, micro_map, project_ite
         if not is_readonly:
             with st.popover("⚙️"):
                 if st.button("✏️", key=f"te_{row['stage_progress_id']}", width='stretch'):
+                    for k in ["td_stage", "td_ms", "td_p_start", "td_p_end", "td_affected_ids", "td_multi_items", "td_resp", "td_a_start", "td_a_end"]:
+                        if k in st.session_state: del st.session_state[k]
                     tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, existing_data=row)
                 if st.button("🗑", key=f"td_{row['stage_progress_id']}", width='stretch'):
                     session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"), {"id": int(row['stage_progress_id'])})

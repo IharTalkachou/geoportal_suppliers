@@ -31,3 +31,6 @@ csv_export/
 
 # Text
 *.docx
+
+# Claude
+.claude/
