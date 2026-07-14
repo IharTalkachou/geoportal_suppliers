@@ -9,7 +9,8 @@ from ui.shared_components import render_survey_viewer
 
 # 🔤 Маппинг для отображения
 RU_LABELS = {
-    "supplier_name": "Наименование", "supplier_address": "Адрес",
+    "supplier_name": "Наименование", "full_supplier_name": "Полное наименование поставщика",
+    "supplier_address": "Адрес",
     "supplier_email": "Email", "supplier_phone": "Телефон",
     "supplier_website": "Сайт", "supplier_manager": "Руководитель",
     "supplier_notes": "Примечание",
@@ -118,10 +119,11 @@ def render_supplier_card(session, selected_sup_id, is_readonly):
 
 def render_supplier_form(session, existing_data=None):
     is_editing = existing_data is not None
-    with st.form("supplier_form_main"):
+    with st.form("supplier_form_main", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
             name = st.text_input("Наименование *", value=existing_data['supplier_name'] if is_editing else "")
+            full_name = st.text_input("Полное наименование поставщика", value=existing_data.get('full_supplier_name', "") if is_editing else "")
             addr = st.text_input("Адрес", value=existing_data['supplier_address'] if is_editing else "")
             is_mand = st.checkbox("Поставщик ОНПД", value=bool(existing_data['is_mandatory']) if is_editing else False)
             # 🟢 Новое поле в форме
@@ -141,28 +143,28 @@ def render_supplier_form(session, existing_data=None):
             try:
                 target_id = int(existing_data['supplier_id']) if is_editing else None
                 params = {
-                    "n": name, "a": addr, "p": phone, "m": mgr, "em": email, "w": site, 
+                    "n": name, "fn": full_name, "a": addr, "p": phone, "m": mgr, "em": email, "w": site,
                     "nt": notes, "is_m": is_mand, "is_g": is_gov, "id": target_id
                 }
-                
+
                 if is_editing:
-                    log_action(st.session_state["auth"]["user_id"], "UPDATE_SUPPLIER_REQS", "suppliers", target_id, 
+                    log_action(st.session_state["auth"]["user_id"], "UPDATE_SUPPLIER_REQS", "suppliers", target_id,
                                old={"name": existing_data['supplier_name']}, new={"name": name})
-                    
+
                     session.execute(text("""
-                        UPDATE suppliers SET 
-                            supplier_name=:n, supplier_address=:a, 
-                            supplier_phone=:p, supplier_manager=:m, 
+                        UPDATE suppliers SET
+                            supplier_name=:n, full_supplier_name=:fn, supplier_address=:a,
+                            supplier_phone=:p, supplier_manager=:m,
                             supplier_email=:em, supplier_website=:w, supplier_notes=:nt,
-                            is_mandatory=:is_m, is_gov_agency=:is_g 
+                            is_mandatory=:is_m, is_gov_agency=:is_g
                         WHERE supplier_id=:id
                     """), params)
                 else:
                     res = session.execute(text("""
                         INSERT INTO suppliers (
-                            supplier_name, supplier_address, supplier_phone, supplier_manager, 
+                            supplier_name, full_supplier_name, supplier_address, supplier_phone, supplier_manager,
                             supplier_email, supplier_website, supplier_notes, is_mandatory, is_gov_agency
-                        ) VALUES (:n, :a, :p, :m, :em, :w, :nt, :is_m, :is_g) RETURNING supplier_id
+                        ) VALUES (:n, :fn, :a, :p, :m, :em, :w, :nt, :is_m, :is_g) RETURNING supplier_id
                     """), params)
                     new_id = res.scalar()
                     log_action(st.session_state["auth"]["user_id"], "CREATE_SUPPLIER", "suppliers", int(new_id), new={"name": name})

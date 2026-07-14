@@ -57,6 +57,7 @@ class Supplier(Base):
     
     supplier_id = Column(Integer, primary_key=True, autoincrement=True)
     supplier_name = Column(String(255), nullable=False)
+    full_supplier_name = Column(Text)
     supplier_address = Column(Text)
     supplier_email = Column(String(255))
     supplier_phone = Column(String(50))
