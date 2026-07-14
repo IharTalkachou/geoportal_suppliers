@@ -1,4 +1,5 @@
 # ОБЩИЕ ИМПОРТЫ
+print("[STARTUP] app.py: module start", flush=True)
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -9,12 +10,17 @@ import time
 from datetime import datetime, timedelta
 
 # Импорты ядра
+print("[STARTUP] app.py: before config.database import", flush=True)
 from config.database import engine
+print("[STARTUP] app.py: before config.settings_handler import", flush=True)
 from config.settings_handler import load_settings
+print("[STARTUP] app.py: before config.auth import", flush=True)
 from config.auth import (
     authenticate_user, init_session, check_session_timeout, logout_user, log_action
 )
+print("[STARTUP] app.py: before config.session_store import", flush=True)
 from config.session_store import create_token, restore_session, destroy_session
+print("[STARTUP] app.py: all core config imports done", flush=True)
 
 # Импорты интерфейса
 from ui.suppliers_tab import render_suppliers_tab
