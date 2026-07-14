@@ -7,12 +7,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from config.settings_handler import load_settings
 
-print("[STARTUP] session_store: before SESSION_DIR.mkdir", flush=True)
 SESSION_DIR = Path(os.getenv("SESSION_DIR", "./sessions"))
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-print("[STARTUP] session_store: before load_settings() DB call", flush=True)
 SESSION_TIMEOUT_MINUTES = load_settings().get("session_timeout_minutes", 30)
-print("[STARTUP] session_store: after load_settings() DB call", flush=True)
 
 def _debug(msg: str):
     sys.stderr.write(f"[FP] {msg}\n")

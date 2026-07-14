@@ -15,11 +15,12 @@ DATABASE_URL = (
 @st.cache_resource
 def get_engine():
     return create_engine(
-        DATABASE_URL, 
-        pool_pre_ping=True, 
-        pool_size=10, 
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=10,
         max_overflow=20,
-        pool_recycle=3600
+        pool_recycle=3600,
+        connect_args={"connect_timeout": 10}
     )
 
 engine = get_engine()
