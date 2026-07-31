@@ -313,6 +313,35 @@ class ProvisionHistory(Base):
     responsible_id = Column(Integer, ForeignKey('users.user_id'))
     comments = Column(Text)
 
+class InclusionRequest(Base):
+    """Заявка о включении в НИПД набора пространственных данных (Постановление №32, п.7 Положения о НИПД)"""
+    __tablename__ = 'inclusion_requests'
+    req_id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"))
+    supplier_id = Column(Integer, ForeignKey('suppliers.supplier_id', ondelete='RESTRICT'), nullable=False)
+    project_id = Column(Integer, ForeignKey('projects.project_id', ondelete='SET NULL'))
+    dataset_id = Column(Integer, ForeignKey('datasets.dataset_id', ondelete='RESTRICT'), nullable=False)
+    info_id = Column(Integer, ForeignKey('info_types.info_id', ondelete='RESTRICT'), nullable=False)
+    source_name = Column(Text, comment='Название информационного источника, используемого для создания и обновления набора')
+    data_composition = Column(Text, comment='Состав сведений, включаемых в набор, включая ограничительный гриф (при наличии)')
+    territory = Column(Text, comment='Территория покрытия набора')
+    action_type = Column(Text, nullable=False, comment='Первичное включение или обновление ранее включённого набора')
+    resource_url = Column(Text, comment='Ссылка на ресурс, содержащий включаемый набор и метаданные о нём')
+    access_variant = Column(Text, nullable=False, comment='Общий публичный или защищённый с регистрацией пользователя')
+    status_id = Column(Integer, ForeignKey('stages.stage_id'))
+    previous_request_id = Column(Integer, ForeignKey('inclusion_requests.req_id', ondelete='SET NULL'), comment='Ссылка на предыдущую заявку при повторной подаче после доработки')
+    published_at = Column(DateTime(timezone=True), comment='Дата фактической публикации набора на Национальном геопортале')
+
+class InclusionHistory(Base):
+    __tablename__ = 'inclusion_request_history'
+    history_id = Column(Integer, primary_key=True, autoincrement=True)
+    req_id = Column(Integer, ForeignKey('inclusion_requests.req_id', ondelete='CASCADE'))
+    stage_id = Column(Integer, ForeignKey('stages.stage_id'))
+    actual_start = Column(DateTime(timezone=True))
+    actual_end = Column(DateTime(timezone=True))
+    responsible_id = Column(Integer, ForeignKey('users.user_id'))
+    comments = Column(Text)
+
 class CalendarException(Base):
     __tablename__ = 'ref_calendar_exceptions'
     exception_date = Column(Date, primary_key=True)
@@ -361,6 +390,7 @@ class StageDocument(Base):
     doc_url = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=text("now()"))
     provision_history_id = Column(Integer, ForeignKey('provision_request_history.history_id', ondelete='CASCADE'))
+    inclusion_history_id = Column(Integer, ForeignKey('inclusion_request_history.history_id', ondelete='CASCADE'))
 
 class OverdueLog(Base):
     __tablename__ = 'overdue_log'

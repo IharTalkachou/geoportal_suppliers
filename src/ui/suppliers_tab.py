@@ -294,7 +294,7 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
         st.markdown("##### 📦 Состав наборов")
         if current_proj_id:
             items_df = query_db("""
-                SELECT pi.item_id, d.dataset_name, i.info_name, i.info_id, 
+                SELECT pi.item_id, d.dataset_name, i.info_name, i.info_id,
                        c.full_name as tech_contact, pi.provision_right, p.project_name
                 FROM project_items pi
                 JOIN projects p ON pi.project_id = p.project_id
@@ -303,7 +303,15 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                 LEFT JOIN contacts c ON pi.tech_contact_id = c.contact_id
                 WHERE pi.project_id = :pid ORDER BY d.dataset_name, i.info_name
             """, {"pid": current_proj_id})
-            
+
+            # Заявки на включение в НИПД, связанные с этим проектом
+            incl_df = query_db("""
+                SELECT ir.req_id, ir.info_id, s.stage_name
+                FROM inclusion_requests ir
+                LEFT JOIN stages s ON ir.status_id = s.stage_id
+                WHERE ir.project_id = :pid
+            """, {"pid": current_proj_id})
+
             if items_df.empty: st.info("В проекте нет наборов")
             else:
                 for _, row in items_df.iterrows():
@@ -311,6 +319,23 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                         st.markdown(f"**{row['dataset_name']}**")
                         st.markdown(f"_{row['info_name']}_")
                         st.caption(f"⚖️ {row['provision_right']}")
+
+                        item_reqs = incl_df[incl_df["info_id"] == row["info_id"]]
+                        if not item_reqs.empty:
+                            def go_to_incl_cb(rid):
+                                st.session_state["main_nav"] = "📩 Заявки"
+                                st.session_state["req_main_nav"] = "🗂️ Включение в НИПД"
+                                st.session_state["incl_main_nav"] = "📋 Реестр заявок"
+                                st.session_state["sel_incl_id"] = int(rid)
+                                st.session_state.pop("incl_reg_sel_widget", None)
+
+                            for _, ir_row in item_reqs.iterrows():
+                                st.button(
+                                    f"🗂️ Заявка №{int(ir_row['req_id'])} ({ir_row['stage_name'] or '—'})",
+                                    key=f"go_incl_{row['item_id']}_{ir_row['req_id']}",
+                                    width='stretch', type="secondary",
+                                    on_click=go_to_incl_cb, args=(ir_row['req_id'],)
+                                )
         else:
             st.caption("Выберите проект слева")
 

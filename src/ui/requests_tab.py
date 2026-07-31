@@ -10,25 +10,27 @@ from streamlit_folium import st_folium
 from config.cache import query_db, clear_cache
 from config.auth import log_action
 from utils.date_utils import add_business_days
+from ui.inclusion_requests_tab import render_inclusion_requests_tab
 
 def render_requests_tab(session, user_role="user"):
     st.subheader("📩 Управление входящими заявками")
     is_readonly = (user_role == "user")
-    
+
     # 🟢 ОБНОВЛЕННАЯ НАВИГАЦИЯ
+    if "req_main_nav" not in st.session_state:
+        st.session_state["req_main_nav"] = "➕ Новая заявка"
     choice = st.segmented_control(
         "Навигация",
-        options=["➕ Новая заявка", "📋 Реестр (Регистрация)", "📦 Реестр (Предоставление)"],
-        default="➕ Новая заявка",
+        options=["➕ Новая заявка", "📋 Реестр (Регистрация)", "📦 Реестр (Предоставление)", "🗂️ Включение в НИПД"],
         key="req_main_nav",
         label_visibility="collapsed"
     )
     st.markdown("---")
 
     if choice == "➕ Новая заявка":
-        if is_readonly: 
+        if is_readonly:
             st.warning("Недостаточно прав."); return
-            
+
         # 🟢 ВЫБОР ТИПА ЗАЯВКИ
         req_type = st.radio(
             "Выберите тип оформляемой заявки:",
@@ -42,12 +44,15 @@ def render_requests_tab(session, user_role="user"):
             render_registration_form(session)
         else:
             render_provision_form(session)
-            
+
     elif choice == "📋 Реестр (Регистрация)":
         render_requests_registry(session, user_role)
-        
+
     elif choice == "📦 Реестр (Предоставление)":
         render_provision_registry(session, user_role)
+
+    elif choice == "🗂️ Включение в НИПД":
+        render_inclusion_requests_tab(session, user_role)
 
 def render_registration_form(session):
     st.markdown("### 📝 Оформление новой заявки")
