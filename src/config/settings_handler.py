@@ -8,7 +8,8 @@ DEFAULT_SETTINGS = {
     "maintenance_mode": False,
     "maintenance_warning": False,
     "maintenance_message": "Технические работы скоро начнутся.",
-    "lockout_message": "Система временно недоступна."
+    "lockout_message": "Система временно недоступна.",
+    "total_registered_accounts": 0
 }
 
 def load_settings():

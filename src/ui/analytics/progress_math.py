@@ -183,103 +183,83 @@ def calculate_buro_progress(df):
 
     return 0.0, 0.0, 0.0, "Инициация: 0%"
 
+# Воронка технологического трека — реальный порядок stage_code из справочника stages
+# (track_category = '2. Технологический', отсортировано по stage_order).
+# NG_CONSULT и TECH_SUPPORT сознательно исключены: это повторяющиеся консультационные
+# этапы, не блокирующие и не продвигающие воронку готовности набора.
+TECH_FUNNEL_CODES = [
+    'WAITING_TEST', 'TESTING', 'TECH_CALL', 'PROTOCOL_APPROVAL',
+    'TECH_REG_WAIT', 'TECH_REG_PROC',
+    'META_WAIT', 'META_CHECK', 'META_REJECT', 'META_FIX', 'META_PUB',
+    'DATA_WAIT', 'DATA_CHECK', 'DATA_REJECT', 'DATA_FIX', 'DATA_PUB',
+]
+
 def calculate_tech_progress(df, sid):
     """Сценарии расчета прогресса технологического стека (0-100%)"""
     df = df.copy()
     df['stage_code'] = df['stage_code'].astype(str).str.strip()
-    codes_in_df = df['stage_code'].unique().tolist()
-    
-    # 1. Проверка наличия администратора у поставщика (5% от технологии)
+
+    # affected_item_ids разворачивается в SQL через CROSS JOIN LATERAL, из-за чего
+    # одна итерация этапа, затрагивающая N наборов, попадает в снапшот N одинаковыми
+    # строками. Для расчёта прогресса нужна ровно одна строка на (stage_code, iteration_count).
+    df = df.drop_duplicates(subset=['stage_code', 'iteration_count'])
+
+    # 1. Проверка наличия администратора у поставщика (5% бонусом сверху воронки)
     admin_query = """
-        SELECT 1 
+        SELECT 1
         FROM reg_request_users rru
         JOIN reg_requests rr ON rru.req_id = rr.req_id
-        WHERE rru.is_admin = TRUE 
-          AND rru.is_active = TRUE 
+        WHERE rru.is_admin = TRUE
+          AND rru.is_active = TRUE
           AND rr.result_supplier_id = :sid
         LIMIT 1
     """
     is_admin = not query_db(admin_query, {"sid": sid}).empty
-    
-    # 2. Определение базовой структуры весов
-    has_test = 'TESTING' in codes_in_df
-    
+
     admin_w = 5.0
-    test_w = 5.0 if has_test else 0.0
-    branch_w = (100.0 - admin_w - test_w) / 2.0
-    
+    funnel_w = 100.0 - admin_w
+    step_w = funnel_w / len(TECH_FUNNEL_CODES)
+
     tech_passed = 0.0
     tech_active = 0.0
-    
-    # Добавляем вклад Администратора
+
     if is_admin:
         tech_passed += admin_w
-        
-    # СИНХРОННЫЙ расчет вклада TESTING (Этап 2) с разносом итераций
-    test_contrib = 0.0
-    if has_test:
-        test_df = df[df['stage_code'] == 'TESTING']
-        if not test_df.empty:
-            total_count = len(test_df)
-            done_count = len(test_df[test_df['status'] == 'Выполнено'])
-            test_row = test_df.loc[test_df['iteration_count'].idxmax()]
-            
-            if test_row['status'] == 'Выполнено':
-                tech_passed += test_w
-                test_contrib = test_w
-            else:
-                ratio = get_sla_ratio(test_row)
-                tech_passed += test_w * (done_count / total_count)
-                tech_active += test_w * (ratio / total_count)
-                test_contrib = (test_w * done_count / total_count) + (test_w * ratio / total_count)
-            
-    # Вспомогательная функция для расчета ветки с распределением итераций
-    def calc_branch_score(codes, weight):
-        b_passed = 0.0
-        b_active = 0.0
-        step_w = weight / 5.0
-        
-        for i, code in enumerate(codes):
-            stage_df = df[df['stage_code'] == code]
-            is_row_present = not stage_df.empty
-            
-            # Автозачёт: если этапа нет в базе, но заведены вышестоящие
-            higher = [c for c in codes[i+1:] if not df[df['stage_code'] == c].empty]
-            is_done_via_higher = (not is_row_present and len(higher) > 0)
-            
-            if is_done_via_higher:
-                b_passed += step_w
-                continue
-                
-            if is_row_present:
-                total_count = len(stage_df)
-                done_count = len(stage_df[stage_df['status'] == 'Выполнено'])
-                latest_iter = stage_df.loc[stage_df['iteration_count'].idxmax()]
-                
-                if latest_iter['status'] == 'Выполнено':
-                    b_passed += step_w
-                else:
-                    ratio = get_sla_ratio(latest_iter)
-                    b_passed += step_w * (done_count / total_count)
-                    b_active += step_w * (ratio / total_count)
-                
-        return b_passed, b_active
 
-    m_passed, m_active = calc_branch_score(['META_WAIT', 'META_CHECK', 'META_REJECT', 'META_FIX', 'META_PUB'], branch_w)
-    d_passed, d_active = calc_branch_score(['DATA_WAIT', 'DATA_CHECK', 'DATA_REJECT', 'DATA_FIX', 'DATA_PUB'], branch_w)
-    
-    tech_passed += m_passed + d_passed
-    tech_active += m_active + d_active
+    # Равномерный расчёт по всей реальной воронке этапов, с автозачётом пропущенных
+    # промежуточных шагов (если этапа нет в базе, но заведён более поздний по воронке —
+    # считаем ранний пройденным) и с разносом по итерациям, как раньше.
+    step_descs = []
+    for i, code in enumerate(TECH_FUNNEL_CODES):
+        stage_df = df[df['stage_code'] == code]
+        is_row_present = not stage_df.empty
+
+        higher = [c for c in TECH_FUNNEL_CODES[i + 1:] if not df[df['stage_code'] == c].empty]
+        is_done_via_higher = (not is_row_present and len(higher) > 0)
+
+        if is_done_via_higher:
+            tech_passed += step_w
+            continue
+
+        if is_row_present:
+            total_count = len(stage_df)
+            done_count = len(stage_df[stage_df['status'] == 'Выполнено'])
+            latest_iter = stage_df.loc[stage_df['iteration_count'].idxmax()]
+
+            if latest_iter['status'] == 'Выполнено':
+                tech_passed += step_w
+            else:
+                ratio = get_sla_ratio(latest_iter)
+                tech_passed += step_w * (done_count / total_count)
+                tech_active += step_w * (ratio / total_count)
+                step_descs.append(f"{code}: {done_count}/{total_count} done, ratio={ratio:.2f}")
+
     tech_total = tech_passed + tech_active
-    
-    desc_parts = [
-        f"Meta: {m_passed + m_active:.1f}%",
-        f"Data: {d_passed + d_active:.1f}%",
-        f"Admin: {'5%' if is_admin else '0%'}"
-    ]
-    if has_test:
-        desc_parts.append(f"Testing: {test_contrib:.1f}%")
-        
+
+    desc_parts = [f"Admin: {'5%' if is_admin else '0%'}"]
+    if step_descs:
+        desc_parts.append("Active: " + "; ".join(step_descs))
+
     return tech_total, tech_passed, tech_active, " | ".join(desc_parts)
 
 def calculate_project_progress(df_project):
@@ -536,9 +516,8 @@ def render_tech_audit_table(df):
     st.subheader("📋 Аудит технологических этапов")
     
     t_df = df[df['track_type'] == 'tech']
-    
-    all_stages = ['TESTING', 'META_WAIT', 'META_CHECK', 'META_REJECT', 'META_FIX', 'META_PUB', 
-                  'DATA_WAIT', 'DATA_CHECK', 'DATA_REJECT', 'DATA_FIX', 'DATA_PUB']
+
+    all_stages = TECH_FUNNEL_CODES + ['NG_CONSULT', 'TECH_SUPPORT']
     
     audit_data = []
     

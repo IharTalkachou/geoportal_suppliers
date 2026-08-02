@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from config.database import engine
 
 from config.cache import query_db
+from config.settings_handler import load_settings
 from ui.analytics.data_provider import get_analytics_snapshot
 from ui.shared_components import render_survey_viewer
 from ui.analytics.report_docx import render_monthly_report_tab
@@ -14,12 +15,13 @@ def render_reports_tab():
     st.subheader("📋 Формирование регламентных отчётов")
     
     report_type = st.selectbox("Выберите тип отчёта:", [
-        "1. Реестр подписанных соглашений", 
-        "2. Сводный отчёт о ходе выполнения", 
-        "3. Реестр предоставляемых сведений", 
+        "1. Реестр подписанных соглашений",
+        "2. Сводный отчёт о ходе выполнения",
+        "3. Реестр предоставляемых сведений",
         "4. Реестр протоколов совещаний",
         "5. Просмотр технических опросников",
-        "6. Формирование месячного отчёта НИПД"
+        "6. Формирование месячного отчёта НИПД",
+        "7. Реестр учётных записей пользователей"
     ], key="report_type_sel")
 
     if report_type == "1. Реестр подписанных соглашений":
@@ -34,7 +36,9 @@ def render_reports_tab():
         _render_survey_explorer()
     elif report_type == "6. Формирование месячного отчёта НИПД":
         with Session(engine) as sess:
-            render_monthly_report_tab(sess)   
+            render_monthly_report_tab(sess)
+    elif report_type == "7. Реестр учётных записей пользователей":
+        _render_accounts_registry()
 
 # ==========================================
 # 1. РЕЕСТР СОГЛАШЕНИЙ
@@ -418,3 +422,114 @@ def _render_survey_explorer():
         sel_srv = st.selectbox("Выберите дату:", list(opts.keys()))
         st.divider()
         render_survey_viewer(None, opts[sel_srv], is_readonly=True)
+
+# ==========================================
+# 7. РЕЕСТР УЧЁТНЫХ ЗАПИСЕЙ ПОЛЬЗОВАТЕЛЕЙ
+# ==========================================
+OPERATOR_NAME = 'Государственное предприятие "Белгеодезия"'
+
+def _render_accounts_registry():
+    """
+    Отчёт 7: Реестр учётных записей пользователей.
+    X (общее число) вводится вручную в Админ-панели (app_settings.total_registered_accounts) —
+    уже включает учётную запись(и) Оператора (ГП "Белгеодезия"), т.к. вводится по данным Keycloak.
+    Y (физ. лица) и А (уникальные юр. лица) считаются из reg_requests (status = 'Завершена').
+    Оператор в реестре заявок не фигурирует, поэтому добавляется к А (+1) и к списку
+    поставщиков (первой строкой) вручную — он не участвует в Z, т.к. Z = X - Y и X уже его учитывает.
+    """
+    st.markdown("#### 👤 Реестр учётных записей пользователей")
+
+    total_accounts = int(load_settings().get("total_registered_accounts", 0))
+
+    df = query_db("""
+        SELECT applicant_type, applicant_name, org_type
+        FROM reg_requests
+        WHERE status = 'Завершена'
+        ORDER BY applicant_name
+    """)
+
+    phys_df = df[df['applicant_type'] == 'Физическое лицо']
+    org_df = df[df['applicant_type'] == 'Юридическое лицо']
+
+    y_individuals = len(phys_df)
+    z_org_accounts = total_accounts - y_individuals
+
+    # Группировка юр. лиц по имени — приоритет "Поставщик": если хотя бы одна
+    # завершённая заявка организации имеет org_type = 'Поставщик', она попадает
+    # в список поставщиков, иначе — в список пользователей портала.
+    org_types_by_name = org_df.groupby('applicant_name')['org_type'].apply(set)
+    supplier_names = sorted(n for n, types in org_types_by_name.items() if 'Поставщик' in types)
+    user_org_names = sorted(n for n, types in org_types_by_name.items() if 'Поставщик' not in types)
+    supplier_names = [OPERATOR_NAME] + supplier_names
+    a_legal_entities = len(supplier_names) + len(user_org_names)
+
+    individual_names = sorted(phys_df['applicant_name'].tolist())
+
+    today_str = datetime.now().strftime('%d.%m.%Y')
+
+    if total_accounts <= 0:
+        st.warning("⚠️ Общее число учётных записей (X) не задано. Укажите его в Админ-панели → ⚙️ Настройки.")
+
+    # --- Текстовое представление отчёта ---
+    lines = [
+        f"По состоянию на {today_str} на Национальном геопортале заведено {total_accounts} учётных записей, в частности:",
+        "",
+        f"{z_org_accounts} учётных записей для {a_legal_entities} юридических лиц:",
+        "     - юридические лица - Поставщики пространственных данных:",
+    ]
+    lines += [f"          {name}" for name in supplier_names]
+    lines.append("     - юридические лица - пользователи Национального геопортала:")
+    lines += [f"          {name}" for name in user_org_names] if user_org_names else ["          (нет данных)"]
+    lines.append("")
+    lines.append(f"{y_individuals} учётных записей пользователей - физических лиц:")
+    lines += [f"     {name}" for name in individual_names] if individual_names else ["     (нет данных)"]
+
+    report_text = "\n".join(lines)
+
+    st.text_area("Текст отчёта", value=report_text, height=450, key="accounts_registry_text")
+
+    docx_buffer = _build_accounts_registry_docx(today_str, total_accounts, z_org_accounts, a_legal_entities,
+                                                 supplier_names, user_org_names, y_individuals, individual_names)
+
+    st.download_button(
+        "📥 Скачать реестр (Word)",
+        docx_buffer.getvalue(),
+        f"accounts_registry_{datetime.now().strftime('%d_%m_%Y')}.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
+def _build_accounts_registry_docx(today_str, total_accounts, z_org_accounts, a_legal_entities,
+                                   supplier_names, user_org_names, y_individuals, individual_names):
+    from docx import Document
+    from docx.shared import Pt
+
+    doc = Document()
+    style = doc.styles['Normal']
+    style.font.name = 'Times New Roman'
+    style.font.size = Pt(12)
+
+    doc.add_paragraph(
+        f"По состоянию на {today_str} на Национальном геопортале заведено {total_accounts} "
+        f"учётных записей, в частности:"
+    )
+    doc.add_paragraph(f"{z_org_accounts} учётных записей для {a_legal_entities} юридических лиц:")
+    doc.add_paragraph("- юридические лица - Поставщики пространственных данных:")
+    for name in supplier_names:
+        doc.add_paragraph(name, style='List Bullet')
+    doc.add_paragraph("- юридические лица - пользователи Национального геопортала:")
+    if user_org_names:
+        for name in user_org_names:
+            doc.add_paragraph(name, style='List Bullet')
+    else:
+        doc.add_paragraph("(нет данных)", style='List Bullet')
+    doc.add_paragraph(f"{y_individuals} учётных записей пользователей - физических лиц:")
+    if individual_names:
+        for name in individual_names:
+            doc.add_paragraph(name, style='List Bullet')
+    else:
+        doc.add_paragraph("(нет данных)", style='List Bullet')
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer

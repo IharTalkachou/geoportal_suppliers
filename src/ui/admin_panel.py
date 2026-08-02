@@ -180,14 +180,21 @@ def _render_system_settings(session):
     with col_sys2:
         st.write("<br>", unsafe_allow_html=True)
         new_warn = st.toggle("📢 Показать плашку предупреждения", value=current_cfg.get("maintenance_warning", False))
-    
+
     new_warn_msg = st.text_area("Текст предупреждения", value=current_cfg.get("maintenance_message", ""), height=68)
-    
+
+    new_total_accounts = st.number_input(
+        "👥 Всего учётных записей на Национальном геопортале",
+        value=current_cfg.get("total_registered_accounts", 0), step=1, min_value=0,
+        help="Вводится вручную по данным Keycloak до появления автоматической интеграции. Используется в отчёте «Реестр учётных записей пользователей»."
+    )
+
     if st.button("💾 Сохранить системные настройки", type="primary", width='stretch'):
         updated = {
             "session_timeout_minutes": new_timeout, "maintenance_mode": current_cfg.get("maintenance_mode", False),
             "maintenance_warning": new_warn, "maintenance_message": new_warn_msg,
-            "lockout_message": current_cfg.get("lockout_message", "Техработы")
+            "lockout_message": current_cfg.get("lockout_message", "Техработы"),
+            "total_registered_accounts": new_total_accounts
         }
         if save_settings(updated):
             st.success("✅ Настройки сохранены!"); clear_cache(); st.rerun()
