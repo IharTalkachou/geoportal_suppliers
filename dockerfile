@@ -6,7 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 
 # 2. Устанавливаем зависимости
-RUN pip install --no-cache-dir -r requirements.txt
+# --trusted-host: локальная сборка идёт за TLS-инспекцией Kaspersky (подменяет сертификат pypi.org),
+# из-за чего pip не может проверить цепочку доверия
+RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
 
 # 3. И ТОЛЬКО ПОТОМ копируем весь остальной код
 COPY . .
