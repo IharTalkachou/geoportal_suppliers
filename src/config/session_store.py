@@ -3,13 +3,22 @@ import uuid
 import os
 import re
 import sys
+import streamlit as st
 from datetime import datetime, timedelta
 from pathlib import Path
 from config.settings_handler import load_settings
 
 SESSION_DIR = Path(os.getenv("SESSION_DIR", "./sessions"))
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
-SESSION_TIMEOUT_MINUTES = load_settings().get("session_timeout_minutes", 30)
+
+@st.cache_data(ttl=600)
+def get_session_timeout():
+    """Единый источник таймаута сессии (мин). Кэш на 10 минут, чтобы
+    изменение настройки в админ-панели применялось без перезапуска процесса."""
+    try:
+        return load_settings().get("session_timeout_minutes", 30)
+    except Exception:
+        return 30
 
 def _debug(msg: str):
     sys.stderr.write(f"[FP] {msg}\n")
@@ -71,7 +80,9 @@ def _compute_fingerprint() -> dict:
         return {"fp_key": f"err_{type(e).__name__}", "ip": "unknown"}
 
 def _fingerprints_match(stored: dict, current: dict, strict_ip: bool = True) -> bool:
-    """Сверяет отпечатки. В корпоративной сети strict_ip = True обязателен!"""
+    """Сверяет отпечатки. fp_key (браузер/ОС/язык) проверяется всегда;
+    IP - только если strict_ip=True (по умолчанию выключено в app.py, т.к. IP
+    легитимно меняется на мобильном интернете/VPN)."""
     if stored.get("fp_key") != current.get("fp_key"):
         return False
     if strict_ip and stored.get("ip") != current.get("ip"):
@@ -130,7 +141,7 @@ def restore_session(token: str, strict_ip: bool = True) -> dict | None:
     saved_time_str = data.get("_saved_at", datetime.now().isoformat())
     saved = datetime.fromisoformat(saved_time_str)
     
-    if datetime.now() - saved > timedelta(minutes=SESSION_TIMEOUT_MINUTES):
+    if datetime.now() - saved > timedelta(minutes=get_session_timeout()):
         fp.unlink(missing_ok=True)
         _debug("⏱ Session Expired.")
         return None
@@ -150,8 +161,26 @@ def restore_session(token: str, strict_ip: bool = True) -> dict | None:
         except: pass
         return None
         
+    # Отозванные права/блокировка учётной записи не должны позволять
+    # восстановить сессию по токену (см. auth.py::check_session_timeout
+    # для той же проверки внутри уже открытой вкладки)
+    try:
+        from config.auth import get_current_user_status, ROLE_NAMES, log_action
+        current = get_current_user_status(data.get("user_id"))
+        if current is None or not current["is_active"]:
+            fp.unlink(missing_ok=True)
+            log_action(user_id=data.get("user_id"), action="SESSION_REVOKED",
+                       target_table="auth", new={"reason": "account_deactivated"})
+            _debug("🚫 Account deactivated, session revoked.")
+            return None
+        if current["role"] != data.get("role"):
+            data["role"] = current["role"]
+            data["role_name"] = ROLE_NAMES.get(current["role"], current["role"])
+    except Exception as e:
+        _debug(f"⚠️ Status check skipped: {e}")
+
     # Восстановление прошло успешно
-    
+
     # ПРОДЛЕНИЕ ЖИЗНИ СЕССИИ (Sliding Expiration)
     # Переписываем _saved_at на текущее время, чтобы таймаут 30 мин обновлялся при Ctrl+R
     data["_saved_at"] = datetime.now().isoformat()
@@ -174,10 +203,10 @@ def destroy_session(token: str) -> None:
     _debug(f"🗑 Destroyed: {token[:8]}...")
 
 def cleanup_expired_sessions() -> int:
-    """Удаляет сессии, которые не обновлялись больше SESSION_TIMEOUT_MINUTES.
+    """Удаляет сессии, которые не обновлялись больше текущего таймаута.
     Вызывать эту функцию можно при старте приложения или раз в N запусков."""
     removed = 0
-    cutoff = datetime.now() - timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+    cutoff = datetime.now() - timedelta(minutes=get_session_timeout())
     for p in SESSION_DIR.glob("*.json"):
         try:
             # Читаем json, чтобы узнать точное _saved_at (надежнее, чем время изменения файла)

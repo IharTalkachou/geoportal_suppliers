@@ -4,6 +4,9 @@ import io
 from datetime import datetime
 from sqlalchemy.orm import Session
 from config.database import engine
+from docx import Document
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from config.cache import query_db
 from config.settings_handler import load_settings
@@ -145,38 +148,127 @@ def _render_agreement_registry():
 # ==========================================
 # 2. ХОД ВЫПОЛНЕНИЯ (БЮРОКРАТИЯ)
 # ==========================================
+def _fmt_date(d):
+    return d.strftime('%d.%m.%Y')
+
+def _fmt_date_range(d_start, d_end):
+    if pd.isna(d_start) or d_start == d_end:
+        return _fmt_date(d_end)
+    return f"{_fmt_date(d_start)}–{_fmt_date(d_end)}"
+
 def _render_bureaucracy_progress():
     df_raw = get_analytics_snapshot()
-    df = df_raw[(df_raw['track_type'] == 'bureaucracy') & 
-                (df_raw['is_agreement_project'] == True) & 
-                (df_raw['actual_end'].notna())].copy()
+    df = df_raw[(df_raw['track_type'] == 'bureaucracy') &
+                (df_raw['is_agreement_project'] == True)].copy()
 
     if df.empty:
         st.info("Нет данных о пройденных этапах бюрократии.")
         return
 
+    # Защита от рассогласованных данных: факт. дата учитывается только для
+    # реально завершённых итераций (статус "Выполнено"). Для прочих статусов
+    # actual_end/actual_start игнорируются, даже если в БД что-то проставлено.
+    done_mask = df['status'] == 'Выполнено'
+    df.loc[~done_mask, ['actual_start', 'actual_end']] = pd.NaT
+
+    # Проект считается завершённым только когда "Документ подписан" реально выполнен
+    completed_ids = df[(df['stage_order'] == 8) & done_mask]['project_id'].unique()
+
     show_done = st.checkbox("Показать завершенные проекты", value=False)
-    completed_ids = df[df['stage_order'] == 8]['project_id'].unique()
     if not show_done:
         df = df[~df['project_id'].isin(completed_ids)]
 
-    # Агрегация данных
-    df = df.sort_values(['is_mandatory', 'supplier_name', 'actual_end', 'stage_order'])
+    # Для каждого проекта оставляем: все завершённые итерации + (если проект ещё
+    # не завершён) один "текущий активный" этап без факт. даты - тот, что имеет
+    # наибольший stage_order среди строк без actual_end (может сосуществовать с уже
+    # завершёнными итерациями того же названия этапа - см. например project_id=12,
+    # где 8 итераций "Согласование документа" выполнены, а последняя ещё "Ожидание")
+    finished = df[df['actual_end'].notna()].copy()
+    finished['is_open'] = False
+
+    open_rows = df[df['actual_end'].isna() & ~df['project_id'].isin(completed_ids)]
+    open_last_idx = (open_rows.sort_values('stage_order')
+                               .groupby('project_id')['stage_order']
+                               .idxmax())
+    current_open = df.loc[open_last_idx].copy()
+    current_open['is_open'] = True
+
+    df = pd.concat([finished, current_open], ignore_index=True)
+    if df.empty:
+        st.info("Нет данных о пройденных этапах бюрократии.")
+        return
+
+    # "Начало" для сортировки/отображения: у завершённых итераций - actual_start
+    # (или actual_end, если начало не проставлено), у текущей активной - actual_start/planned_start
+    df['eff_start'] = df['actual_start']
+    df.loc[df['eff_start'].isna() & ~df['is_open'], 'eff_start'] = df['actual_end']
+    df.loc[df['is_open'] & df['eff_start'].isna(), 'eff_start'] = df['planned_start']
+    df['sort_date'] = df['actual_end'].fillna(df['eff_start'])
+
+    # Островная группировка: подряд идущие строки одного поставщика с одним
+    # и тем же названием этапа схлопываются в один "остров". Повторное появление
+    # этапа после другого этапа (например, второй заход "Переговоров" после
+    # "Согласования документа") сознательно даёт отдельный остров - в реальности
+    # это разные по смыслу заходы, разнесённые другим этапом процесса.
+    df = df.sort_values(['is_mandatory', 'supplier_name', 'sort_date', 'stage_order'])
     df['new_grp'] = (df['stage_name'] != df['stage_name'].shift()) | (df['supplier_name'] != df['supplier_name'].shift())
     df['grp_id'] = df['new_grp'].cumsum()
 
-    grouped = df.groupby(['grp_id', 'supplier_name', 'is_mandatory', 'stage_name']).agg({
-        'actual_end': ['min', 'max'],
-        'comments': lambda x: ". ".join([str(c) for c in x if pd.notna(c) and str(c) != 'Нет'])
-    }).reset_index()
-    grouped.columns = ['id', 'supplier', 'is_mand', 'stage', 'd_min', 'd_max', 'comms']
+    def clean_comment(raw):
+        # Комментарии из БД иногда содержат собственные переносы строк -
+        # схлопываем их в пробелы, чтобы не путать со структурными отступами
+        # при построении текста острова (заголовок / строки-итерации).
+        if pd.isna(raw) or str(raw) == 'Нет':
+            return ""
+        return " ".join(str(raw).split())
 
-    grouped['Дата'] = grouped.apply(lambda x: x['d_min'].strftime('%d.%m.%Y') if x['d_min']==x['d_max'] 
-                                    else f"{x['d_min'].strftime('%d.%m.%Y')}–{x['d_max'].strftime('%d.%m.%Y')}", axis=1)
-    grouped['Этап'] = grouped.apply(lambda x: f"{x['stage']} | {x['comms']}" if x['comms'] else x['stage'], axis=1)
+    islands = []
+    for grp_id, isl in df.groupby('grp_id', sort=False):
+        isl = isl.sort_values('sort_date')
+        first = isl.iloc[0]
+        is_milestone = len(isl) == 1 and not first['is_open'] and first['actual_start'] == first['actual_end']
+
+        if is_milestone or (len(isl) == 1 and first['is_open']):
+            row = isl.iloc[0]
+            comment = clean_comment(row['comments'])
+            if row['is_open']:
+                date_txt = f"{_fmt_date(row['eff_start'])} – по настоящее время" if pd.notna(row['eff_start']) else "по настоящее время"
+            else:
+                date_txt = _fmt_date(row['actual_end'])
+            header_line = f"{date_txt}: {row['stage_name']} - {comment}"
+            item_lines = []
+        else:
+            d_min = isl['eff_start'].min()
+            d_max_done = isl.loc[~isl['is_open'], 'actual_end']
+            d_max = d_max_done.max() if not d_max_done.empty else isl['eff_start'].max()
+            has_open = isl['is_open'].any()
+            header_end = "по настоящее время" if has_open else _fmt_date(d_max)
+            header_line = f"{_fmt_date(d_min)}–{header_end} - {first['stage_name']}:"
+
+            item_lines = []
+            for _, row in isl.iterrows():
+                comment = clean_comment(row['comments'])
+                if row['is_open']:
+                    it_date = f"{_fmt_date(row['eff_start'])} – по настоящее время" if pd.notna(row['eff_start']) else "по настоящее время"
+                else:
+                    it_date = _fmt_date_range(row['actual_start'], row['actual_end'])
+                item_lines.append(f"{it_date} - {comment}")
+
+        text = "\n".join([header_line] + [f"    {l}" for l in item_lines])
+
+        islands.append({
+            'supplier': first['supplier_name'],
+            'is_mand': first['is_mandatory'],
+            'sort_date': first['sort_date'],
+            'Этап': text,
+            'header_line': header_line,
+            'item_lines': item_lines,
+        })
+
+    grouped = pd.DataFrame(islands).sort_values(['is_mand', 'supplier', 'sort_date'])
 
     # ОТРИСОВКА В ЭКСПАНДЕРАХ С УМНЫМ РАСЧЕТОМ ВЫСОТЫ
-    for mand_status, title, exp_key, is_exp in [(True, "⭐ Поставщики ОНПД", "exp_mand", True), 
+    for mand_status, title, exp_key, is_exp in [(True, "⭐ Поставщики ОНПД", "exp_mand", True),
                                                 (False, "📂 Прочие поставщики", "exp_other", False)]:
         sub = grouped[grouped['is_mand'] == mand_status].copy()
         with st.expander(title, expanded=is_exp):
@@ -184,54 +276,119 @@ def _render_bureaucracy_progress():
                 disp = sub.copy()
                 disp['Поставщик'] = disp['supplier']
                 disp.loc[disp.duplicated('supplier'), 'Поставщик'] = ""
-                
+
                 # --- УМНЫЙ РАСЧЕТ ВЫСОТЫ ---
-                # 35px на строку + 38px на заголовок + 2px запас
-                calculated_h = (len(disp) * 35) + 40
-                # Ограничиваем: минимум 100 (чтобы не схлопнулось совсем), максимум 600
+                # 35px за строку текста (island-текст может занимать несколько строк) + запас
+                lines_per_row = disp['Этап'].str.count('\n') + 1
+                calculated_h = int((lines_per_row * 35).sum()) + 40
                 final_h = min(600, max(100, calculated_h))
-                
-                st.dataframe(disp[['Поставщик', 'Этап', 'Дата']], 
+
+                st.dataframe(disp[['Поставщик', 'Этап']],
                              width="stretch", hide_index=True, height=final_h)
             else:
                 st.write("Данные отсутствуют")
 
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🚀 Сгенерировать сводный Excel", type="primary"):
-        xlsx = _export_bureaucracy_islands(grouped)
-        st.download_button("📥 Скачать файл", xlsx, f"progress_report_{datetime.now().strftime('%d_%m')}.xlsx")
+    col_tbl, col_txt = st.columns(2)
+    with col_tbl:
+        if st.button("🚀 Сгенерировать (таблица)", type="primary"):
+            docx = _export_bureaucracy_islands_docx_table(grouped)
+            st.download_button("📥 Скачать файл", docx, f"progress_report_{datetime.now().strftime('%d_%m')}.docx")
+    with col_txt:
+        if st.button("📝 Сгенерировать (текст)"):
+            docx = _export_bureaucracy_islands_docx_text(grouped)
+            st.download_button("📥 Скачать файл", docx, f"progress_report_text_{datetime.now().strftime('%d_%m')}.docx")
 
-def _export_bureaucracy_islands(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        ws = workbook.add_worksheet('Ход выполнения')
-        
-        # Стили
-        fmt_head = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1, 'align': 'center'})
-        fmt_cell = workbook.add_format({'border': 1, 'valign': 'vcenter', 'text_wrap': True})
-        
-        headers = ['№ п/п', 'Поставщик', 'Пройденные этапы', 'Дата']
-        for c, h in enumerate(headers): ws.write(0, c, h, fmt_head)
+def _docx_base():
+    doc = Document()
+    style = doc.styles['Normal']
+    style.font.name = 'Times New Roman'
+    style.font.size = Pt(12)
+    for section in doc.sections:
+        section.top_margin, section.bottom_margin = Cm(2), Cm(2)
+        section.left_margin, section.right_margin = Cm(2), Cm(1.5)
 
-        curr_row = 1
-        for i, (name, group) in enumerate(df.groupby('supplier', sort=False)):
-            num_rows = len(group)
-            # Объединяем ячейки для названия и номера
-            if num_rows > 1:
-                ws.merge_range(curr_row, 0, curr_row + num_rows - 1, 0, i + 1, fmt_cell)
-                ws.merge_range(curr_row, 1, curr_row + num_rows - 1, 1, name, fmt_cell)
-            else:
-                ws.write(curr_row, 0, i + 1, fmt_cell)
-                ws.write(curr_row, 1, name, fmt_cell)
-            
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p_title.add_run(f"Сводный отчёт о ходе выполнения на {datetime.now().strftime('%d.%m.%Y')}")
+    run.bold = True
+    return doc
+
+_GROUPS = [(True, "⭐ Поставщики ОНПД"), (False, "📂 Прочие поставщики")]
+
+def _export_bureaucracy_islands_docx_table(df):
+    doc = _docx_base()
+
+    for mand_status, title in _GROUPS:
+        sub = df[df['is_mand'] == mand_status]
+        if sub.empty:
+            continue
+
+        h = doc.add_paragraph()
+        h_run = h.add_run(title)
+        h_run.bold = True
+        h.paragraph_format.space_before = Pt(12)
+        h.paragraph_format.space_after = Pt(6)
+
+        table = doc.add_table(rows=1, cols=3)
+        table.style = 'Table Grid'
+        hdr = table.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text = '№ п/п', 'Поставщик', 'Этап'
+
+        for i, (name, group) in enumerate(sub.groupby('supplier', sort=False)):
+            rows_in_group = list(group.iterrows())
+            first_row_idx = None
+            for j, (_, row) in enumerate(rows_in_group):
+                cells = table.add_row().cells
+                if j == 0:
+                    cells[0].text = str(i + 1)
+                    cells[1].text = name
+                    first_row_idx = len(table.rows) - 1
+                cells[2].text = row['Этап']
+            if len(rows_in_group) > 1:
+                last_row_idx = len(table.rows) - 1
+                table.cell(first_row_idx, 0).merge(table.cell(last_row_idx, 0))
+                table.cell(first_row_idx, 1).merge(table.cell(last_row_idx, 1))
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def _export_bureaucracy_islands_docx_text(df):
+    doc = _docx_base()
+
+    for mand_status, title in _GROUPS:
+        sub = df[df['is_mand'] == mand_status]
+        if sub.empty:
+            continue
+
+        h = doc.add_paragraph()
+        h_run = h.add_run(title)
+        h_run.bold = True
+        h.paragraph_format.space_before = Pt(12)
+        h.paragraph_format.space_after = Pt(6)
+
+        for name, group in sub.groupby('supplier', sort=False):
+            p_sup = doc.add_paragraph()
+            p_sup_run = p_sup.add_run(name)
+            p_sup_run.bold = True
+            p_sup.paragraph_format.space_before = Pt(6)
+            p_sup.paragraph_format.space_after = Pt(2)
+
             for _, row in group.iterrows():
-                ws.write(curr_row, 2, row['Этап'], fmt_cell)
-                ws.write(curr_row, 3, row['Дата'], fmt_cell)
-                curr_row += 1
-        
-        ws.set_column('B:B', 30); ws.set_column('C:C', 60); ws.set_column('D:D', 20)
-    return output.getvalue()
+                p = doc.add_paragraph(style='List Bullet')
+                p.add_run(row['header_line'])
+                p.paragraph_format.space_after = Pt(0)
+                for line in row['item_lines']:
+                    p2 = doc.add_paragraph(style='List Bullet 2')
+                    p2.add_run(line)
+                    p2.paragraph_format.space_after = Pt(0)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 # ==========================================
 # 3. РЕЕСТР СВЕДЕНИЙ

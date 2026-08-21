@@ -14,7 +14,7 @@ from config.settings_handler import load_settings
 from config.auth import (
     authenticate_user, init_session, check_session_timeout, logout_user, log_action
 )
-from config.session_store import create_token, restore_session, destroy_session
+from config.session_store import create_token, restore_session, destroy_session, cleanup_expired_sessions
 
 # Импорты интерфейса
 from ui.suppliers_tab import render_suppliers_tab
@@ -37,6 +37,14 @@ except Exception as e:
     st.error("🔌 Ошибка подключения к базе данных. Пожалуйста, проверьте соединение.")
     st.stop()
 
+@st.cache_resource
+def _startup_session_cleanup():
+    # Выполняется один раз за время жизни процесса (не на каждый rerun) -
+    # удаляет файлы сессий, накопившиеся в SESSION_DIR с истёкшим таймаутом
+    return cleanup_expired_sessions()
+
+_startup_session_cleanup()
+
 # ==========================================
 # 🛡️ 2. РЕЖИМ ОБСЛУЖИВАНИЯ И АВТОРИЗАЦИЯ
 # ==========================================
@@ -49,7 +57,11 @@ if "auth" not in st.session_state:
     # Проверка существующего токена в URL
     token = st.query_params.get("session")
     if token:
-        restored = restore_session(token, strict_ip=True) 
+        # strict_ip=False: IP легитимно меняется на мобильном интернете/VPN/роуминге,
+        # защиту от угона токена обеспечивает fp_key (браузер/ОС/язык), IP-совпадение
+        # больше не обязательно - при несовпадении IP попытка всё равно логируется
+        # как SESSION_HIJACK_ATTEMPT внутри restore_session()
+        restored = restore_session(token, strict_ip=False)
         if restored:
             st.session_state["auth"] = restored
             st.rerun()
