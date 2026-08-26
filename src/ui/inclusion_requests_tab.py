@@ -8,27 +8,6 @@ from config.cache import query_db, clear_cache
 from config.auth import log_action
 from utils.date_utils import add_business_days
 
-def render_inclusion_requests_tab(session, user_role="user"):
-    st.subheader("🗂️ Заявки о включении в НИПД набора пространственных данных")
-    is_readonly = (user_role == "user")
-
-    if "incl_main_nav" not in st.session_state:
-        st.session_state["incl_main_nav"] = "➕ Новая заявка"
-    choice = st.segmented_control(
-        "Навигация",
-        options=["➕ Новая заявка", "📋 Реестр заявок"],
-        key="incl_main_nav",
-        label_visibility="collapsed"
-    )
-    st.markdown("---")
-
-    if choice == "➕ Новая заявка":
-        if is_readonly:
-            st.warning("Недостаточно прав."); return
-        render_inclusion_form(session)
-    else:
-        render_inclusion_registry(session, user_role)
-
 # ==========================================
 # 📝 ФОРМА ПОДАЧИ ЗАЯВКИ
 # ==========================================

@@ -10,7 +10,7 @@ from streamlit_folium import st_folium
 from config.cache import query_db, clear_cache
 from config.auth import log_action
 from utils.date_utils import add_business_days
-from ui.inclusion_requests_tab import render_inclusion_requests_tab
+from ui.inclusion_requests_tab import render_inclusion_form, render_inclusion_registry
 
 def render_requests_tab(session, user_role="user"):
     st.subheader("📩 Управление входящими заявками")
@@ -21,7 +21,7 @@ def render_requests_tab(session, user_role="user"):
         st.session_state["req_main_nav"] = "➕ Новая заявка"
     choice = st.segmented_control(
         "Навигация",
-        options=["➕ Новая заявка", "📋 Реестр (Регистрация)", "📦 Реестр (Предоставление)", "🗂️ Включение в НИПД"],
+        options=["➕ Новая заявка", "📋 Реестр (Регистрация)", "📦 Реестр (Предоставление)", "🗂️ Реестр (Включение в НИПД)"],
         key="req_main_nav",
         label_visibility="collapsed"
     )
@@ -34,7 +34,7 @@ def render_requests_tab(session, user_role="user"):
         # 🟢 ВЫБОР ТИПА ЗАЯВКИ
         req_type = st.radio(
             "Выберите тип оформляемой заявки:",
-            ["Заявка на регистрацию", "Заявка на предоставление набора"],
+            ["Заявка на регистрацию", "Заявка на предоставление набора", "Заявка на включение в НИПД"],
             horizontal=True,
             key="new_req_type_toggle"
         )
@@ -42,8 +42,10 @@ def render_requests_tab(session, user_role="user"):
 
         if req_type == "Заявка на регистрацию":
             render_registration_form(session)
-        else:
+        elif req_type == "Заявка на предоставление набора":
             render_provision_form(session)
+        else:
+            render_inclusion_form(session)
 
     elif choice == "📋 Реестр (Регистрация)":
         render_requests_registry(session, user_role)
@@ -51,8 +53,8 @@ def render_requests_tab(session, user_role="user"):
     elif choice == "📦 Реестр (Предоставление)":
         render_provision_registry(session, user_role)
 
-    elif choice == "🗂️ Включение в НИПД":
-        render_inclusion_requests_tab(session, user_role)
+    elif choice == "🗂️ Реестр (Включение в НИПД)":
+        render_inclusion_registry(session, user_role)
 
 def render_registration_form(session):
     st.markdown("### 📝 Оформление новой заявки")

@@ -70,9 +70,19 @@ def render_kpi_tab():
     raw_df['uid'] = raw_df.apply(lambda x: f"{x['project_id']}_{x['track_type']}_{x['stage_code']}_{x['iteration_count']}", axis=1)
     df_unique = raw_df.drop_duplicates(subset=['uid']).copy()
     active_df = df_unique[~df_unique['status'].isin(['Выполнено', 'Отменено'])].copy()
-    
+
     # 🟢 Используем внешнюю функцию
     active_df['has_alert'] = active_df.apply(check_sla_alert, axis=1)
+
+    mandatory_filter = st.radio(
+        "Фильтр по обязательности наборов:",
+        ["Все", "Только обязательные", "Только необязательные"],
+        horizontal=True, key="kpi_mandatory_filter"
+    )
+    if mandatory_filter == "Только обязательные":
+        active_df = active_df[active_df['is_mandatory'] == True]
+    elif mandatory_filter == "Только необязательные":
+        active_df = active_df[active_df['is_mandatory'] == False]
 
     # Распределение
     g_work = active_df[active_df['status'].isin(['В работе', 'Просрочено'])].copy()
@@ -94,6 +104,12 @@ def render_kpi_tab():
 def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
     if df_group.empty:
         st.caption("Задач нет"); return
+
+    # Сортировка по дате, показанной в строке: для "В работе"/"Ожидание" - по
+    # ближайшему плановому дедлайну (planned_end), для "Отложено/План" - по
+    # ближайшей плановой дате начала (planned_start). Записи без даты - в конец.
+    sort_col = 'planned_start' if is_planned else 'planned_end'
+    df_group = df_group.sort_values(sort_col, na_position='last')
 
     @st.fragment
     def _list_fragment():
@@ -131,7 +147,7 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
 
                 r_info, r_btn = st.columns([0.88, 0.12])
                 with r_info:
-                    st.markdown(f"**{p_display}** {b_stage} {b_date}", unsafe_allow_html=True)
+                    st.markdown(f"**{p_display}**<br>{b_stage} {b_date}", unsafe_allow_html=True)
                 with r_btn:
                     # ПОДСВЕТКА И ЛОГИКА ПЕРЕКЛЮЧЕНИЯ (Toggle)
                     is_active = (st.session_state[state_key] == row['uid'])
@@ -149,8 +165,10 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
                 if not selection_match.empty:
                     selected_row = selection_match.iloc[0]
                     
-                    # Выравнивание (offset вычисляется в блоке c_list)
-                    st.markdown(f"<div style='height: {selected_index * 52}px;'></div>", unsafe_allow_html=True)
+                    # Выравнивание (offset вычисляется в блоке c_list).
+                    # Карточка теперь двухстрочная (название / бейджи этапа+даты),
+                    # поэтому высота строки увеличена вдвое относительно прежней (52px).
+                    st.markdown(f"<div style='height: {selected_index * 96}px;'></div>", unsafe_allow_html=True)
 
                     s_color = selected_row.get('stage_color') or "#BDC3C7"
                     related_items = raw_all[raw_all['uid'] == selected_row['uid']]['info_name'].unique().tolist()

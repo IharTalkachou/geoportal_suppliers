@@ -19,28 +19,31 @@ def render_reports_tab():
     
     report_type = st.selectbox("Выберите тип отчёта:", [
         "1. Реестр подписанных соглашений",
-        "2. Сводный отчёт о ходе выполнения",
-        "3. Реестр предоставляемых сведений",
-        "4. Реестр протоколов совещаний",
-        "5. Просмотр технических опросников",
-        "6. Формирование месячного отчёта НИПД",
-        "7. Реестр учётных записей пользователей"
+        "2. Отчёт о ходе согласования документов",
+        "3. Отчёт о ходе технической работы",
+        "4. Реестр предоставляемых сведений",
+        "5. Реестр протоколов совещаний",
+        "6. Просмотр технических опросников",
+        "7. Формирование месячного отчёта НИПД",
+        "8. Реестр учётных записей пользователей"
     ], key="report_type_sel")
 
     if report_type == "1. Реестр подписанных соглашений":
         _render_agreement_registry()
-    elif report_type == "2. Сводный отчёт о ходе выполнения":
+    elif report_type == "2. Отчёт о ходе согласования документов":
         _render_bureaucracy_progress()
-    elif report_type == "3. Реестр предоставляемых сведений":
+    elif report_type == "3. Отчёт о ходе технической работы":
+        _render_technology_progress()
+    elif report_type == "4. Реестр предоставляемых сведений":
         _render_provided_data_registry()
-    elif report_type == "4. Реестр протоколов совещаний":
+    elif report_type == "5. Реестр протоколов совещаний":
         _render_meeting_minutes_registry() # 👈 ВЫЗОВ НОВОЙ ФУНКЦИИ
-    elif report_type == "5. Просмотр технических опросников":
+    elif report_type == "6. Просмотр технических опросников":
         _render_survey_explorer()
-    elif report_type == "6. Формирование месячного отчёта НИПД":
+    elif report_type == "7. Формирование месячного отчёта НИПД":
         with Session(engine) as sess:
             render_monthly_report_tab(sess)
-    elif report_type == "7. Реестр учётных записей пользователей":
+    elif report_type == "8. Реестр учётных записей пользователей":
         _render_accounts_registry()
 
 # ==========================================
@@ -146,7 +149,7 @@ def _render_agreement_registry():
         st.download_button("📥 Скачать таблицу", buffer.getvalue(), "registry_table.xlsx")
 
 # ==========================================
-# 2. ХОД ВЫПОЛНЕНИЯ (БЮРОКРАТИЯ)
+# 2. ХОД СОГЛАСОВАНИЯ ДОКУМЕНТОВ (БЮРОКРАТИЯ)
 # ==========================================
 def _fmt_date(d):
     return d.strftime('%d.%m.%Y')
@@ -155,6 +158,14 @@ def _fmt_date_range(d_start, d_end):
     if pd.isna(d_start) or d_start == d_end:
         return _fmt_date(d_end)
     return f"{_fmt_date(d_start)}–{_fmt_date(d_end)}"
+
+def clean_comment(raw):
+    # Комментарии из БД иногда содержат собственные переносы строк -
+    # схлопываем их в пробелы, чтобы не путать со структурными отступами
+    # при построении текста острова (заголовок / строки-итерации).
+    if pd.isna(raw) or str(raw) == 'Нет':
+        return ""
+    return " ".join(str(raw).split())
 
 def _render_bureaucracy_progress():
     df_raw = get_analytics_snapshot()
@@ -213,14 +224,6 @@ def _render_bureaucracy_progress():
     df = df.sort_values(['is_mandatory', 'supplier_name', 'sort_date', 'stage_order'])
     df['new_grp'] = (df['stage_name'] != df['stage_name'].shift()) | (df['supplier_name'] != df['supplier_name'].shift())
     df['grp_id'] = df['new_grp'].cumsum()
-
-    def clean_comment(raw):
-        # Комментарии из БД иногда содержат собственные переносы строк -
-        # схлопываем их в пробелы, чтобы не путать со структурными отступами
-        # при построении текста острова (заголовок / строки-итерации).
-        if pd.isna(raw) or str(raw) == 'Нет':
-            return ""
-        return " ".join(str(raw).split())
 
     islands = []
     for grp_id, isl in df.groupby('grp_id', sort=False):
@@ -391,7 +394,250 @@ def _export_bureaucracy_islands_docx_text(df):
     return buffer.getvalue()
 
 # ==========================================
-# 3. РЕЕСТР СВЕДЕНИЙ
+# 3. ХОД ТЕХНИЧЕСКОЙ РАБОТЫ (ТЕХНОЛОГИЯ)
+# ==========================================
+# Финальные шаги воронки TECH_FUNNEL_CODES (progress_math.py) - трек считается
+# пройденным для конкретного набора, когда обе публикации (метаданные и данные) выполнены.
+_TECH_FINAL_CODES = ('META_PUB', 'DATA_PUB')
+
+def _render_technology_progress():
+    df_raw = get_analytics_snapshot()
+    df = df_raw[df_raw['track_type'] == 'tech'].copy()
+
+    if df.empty:
+        st.info("Нет данных о пройденных этапах технической работы.")
+        return
+
+    # Защита от рассогласованных данных: факт. дата учитывается только для
+    # реально завершённых итераций (статус "Выполнено") - см. аналогичный
+    # приём в _render_bureaucracy_progress.
+    done_mask = df['status'] == 'Выполнено'
+    df.loc[~done_mask, ['actual_start', 'actual_end']] = pd.NaT
+
+    # Остров в технологии привязан к паре (поставщик, набор сведений), т.к. одна
+    # итерация этапа может через affected_item_ids затрагивать сразу несколько
+    # наборов - в снапшоте это уже развёрнуто в отдельные строки с разным info_name.
+    df['track_key'] = df['supplier_name'] + " | " + df['info_name']
+
+    # "Набор считается завершённым", когда по нему выполнены оба финальных шага
+    # воронки (публикация метаданных и данных).
+    final_done = (df['stage_code'].isin(_TECH_FINAL_CODES) & done_mask)
+    done_counts = df[final_done].groupby('track_key')['stage_code'].nunique()
+    completed_keys = done_counts[done_counts >= len(_TECH_FINAL_CODES)].index
+
+    show_done = st.checkbox("Показать завершенные наборы", value=False, key="tech_show_done")
+    if not show_done:
+        df = df[~df['track_key'].isin(completed_keys)]
+
+    # Для каждого набора оставляем: все завершённые итерации + (если набор ещё
+    # не завершён) один "текущий активный" этап без факт. даты - тот, что имеет
+    # наибольший stage_order среди строк без actual_end.
+    finished = df[df['actual_end'].notna()].copy()
+    finished['is_open'] = False
+
+    open_rows = df[df['actual_end'].isna() & ~df['track_key'].isin(completed_keys)]
+    open_last_idx = (open_rows.sort_values('stage_order')
+                               .groupby('track_key')['stage_order']
+                               .idxmax())
+    current_open = df.loc[open_last_idx].copy()
+    current_open['is_open'] = True
+
+    df = pd.concat([finished, current_open], ignore_index=True)
+    if df.empty:
+        st.info("Нет данных о пройденных этапах технической работы.")
+        return
+
+    # "Начало" для сортировки/отображения: у завершённых итераций - actual_start
+    # (или actual_end, если начало не проставлено), у текущей активной - actual_start/planned_start
+    df['eff_start'] = df['actual_start']
+    df.loc[df['eff_start'].isna() & ~df['is_open'], 'eff_start'] = df['actual_end']
+    df.loc[df['is_open'] & df['eff_start'].isna(), 'eff_start'] = df['planned_start']
+    df['sort_date'] = df['actual_end'].fillna(df['eff_start'])
+
+    # Островная группировка: подряд идущие строки одного набора с одним и тем же
+    # названием этапа схлопываются в один "остров" - см. пояснение в
+    # _render_bureaucracy_progress про повторное появление этапа как отдельный остров.
+    df = df.sort_values(['is_mandatory', 'supplier_name', 'info_name', 'sort_date', 'stage_order'])
+    df['new_grp'] = (df['stage_name'] != df['stage_name'].shift()) | (df['track_key'] != df['track_key'].shift())
+    df['grp_id'] = df['new_grp'].cumsum()
+
+    islands = []
+    for grp_id, isl in df.groupby('grp_id', sort=False):
+        isl = isl.sort_values('sort_date')
+        first = isl.iloc[0]
+        is_milestone = len(isl) == 1 and not first['is_open'] and first['actual_start'] == first['actual_end']
+
+        if is_milestone or (len(isl) == 1 and first['is_open']):
+            row = isl.iloc[0]
+            comment = clean_comment(row['comments'])
+            if row['is_open']:
+                date_txt = f"{_fmt_date(row['eff_start'])} – по настоящее время" if pd.notna(row['eff_start']) else "по настоящее время"
+            else:
+                date_txt = _fmt_date(row['actual_end'])
+            header_line = f"{date_txt}: {row['stage_name']} - {comment}"
+            item_lines = []
+        else:
+            d_min = isl['eff_start'].min()
+            d_max_done = isl.loc[~isl['is_open'], 'actual_end']
+            d_max = d_max_done.max() if not d_max_done.empty else isl['eff_start'].max()
+            has_open = isl['is_open'].any()
+            header_end = "по настоящее время" if has_open else _fmt_date(d_max)
+            header_line = f"{_fmt_date(d_min)}–{header_end} - {first['stage_name']}:"
+
+            item_lines = []
+            for _, row in isl.iterrows():
+                comment = clean_comment(row['comments'])
+                if row['is_open']:
+                    it_date = f"{_fmt_date(row['eff_start'])} – по настоящее время" if pd.notna(row['eff_start']) else "по настоящее время"
+                else:
+                    it_date = _fmt_date_range(row['actual_start'], row['actual_end'])
+                item_lines.append(f"{it_date} - {comment}")
+
+        text = "\n".join([header_line] + [f"    {l}" for l in item_lines])
+
+        islands.append({
+            'supplier': first['supplier_name'],
+            'info_name': first['info_name'],
+            'is_mand': first['is_mandatory'],
+            'sort_date': first['sort_date'],
+            'Этап': text,
+            'header_line': header_line,
+            'item_lines': item_lines,
+        })
+
+    grouped = pd.DataFrame(islands).sort_values(['is_mand', 'supplier', 'info_name', 'sort_date'])
+
+    for mand_status, title, exp_key, is_exp in [(True, "⭐ Поставщики ОНПД", "tech_exp_mand", True),
+                                                (False, "📂 Прочие поставщики", "tech_exp_other", False)]:
+        sub = grouped[grouped['is_mand'] == mand_status].copy()
+        with st.expander(title, expanded=is_exp):
+            if not sub.empty:
+                disp = sub.copy()
+                disp['Поставщик'] = disp['supplier']
+                disp.loc[disp.duplicated('supplier'), 'Поставщик'] = ""
+                disp['Набор'] = disp['info_name']
+
+                lines_per_row = disp['Этап'].str.count('\n') + 1
+                calculated_h = int((lines_per_row * 35).sum()) + 40
+                final_h = min(600, max(100, calculated_h))
+
+                st.dataframe(disp[['Поставщик', 'Набор', 'Этап']],
+                             width="stretch", hide_index=True, height=final_h)
+            else:
+                st.write("Данные отсутствуют")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_tbl, col_txt = st.columns(2)
+    with col_tbl:
+        if st.button("🚀 Сгенерировать (таблица)", type="primary", key="tech_gen_table"):
+            docx = _export_technology_islands_docx_table(grouped)
+            st.download_button("📥 Скачать файл", docx, f"tech_progress_report_{datetime.now().strftime('%d_%m')}.docx", key="tech_dl_table")
+    with col_txt:
+        if st.button("📝 Сгенерировать (текст)", key="tech_gen_text"):
+            docx = _export_technology_islands_docx_text(grouped)
+            st.download_button("📥 Скачать файл", docx, f"tech_progress_report_text_{datetime.now().strftime('%d_%m')}.docx", key="tech_dl_text")
+
+def _tech_docx_base():
+    doc = Document()
+    style = doc.styles['Normal']
+    style.font.name = 'Times New Roman'
+    style.font.size = Pt(12)
+    for section in doc.sections:
+        section.top_margin, section.bottom_margin = Cm(2), Cm(2)
+        section.left_margin, section.right_margin = Cm(2), Cm(1.5)
+
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p_title.add_run(f"Отчёт о ходе технической работы на {datetime.now().strftime('%d.%m.%Y')}")
+    run.bold = True
+    return doc
+
+def _export_technology_islands_docx_table(df):
+    doc = _tech_docx_base()
+
+    for mand_status, title in _GROUPS:
+        sub = df[df['is_mand'] == mand_status]
+        if sub.empty:
+            continue
+
+        h = doc.add_paragraph()
+        h_run = h.add_run(title)
+        h_run.bold = True
+        h.paragraph_format.space_before = Pt(12)
+        h.paragraph_format.space_after = Pt(6)
+
+        table = doc.add_table(rows=1, cols=4)
+        table.style = 'Table Grid'
+        hdr = table.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = '№ п/п', 'Поставщик', 'Набор', 'Этап'
+
+        for i, (name, group) in enumerate(sub.groupby('supplier', sort=False)):
+            rows_in_group = list(group.iterrows())
+            first_row_idx = None
+            for j, (_, row) in enumerate(rows_in_group):
+                cells = table.add_row().cells
+                if j == 0:
+                    cells[0].text = str(i + 1)
+                    cells[1].text = name
+                    first_row_idx = len(table.rows) - 1
+                cells[2].text = row['info_name']
+                cells[3].text = row['Этап']
+            if len(rows_in_group) > 1:
+                last_row_idx = len(table.rows) - 1
+                table.cell(first_row_idx, 0).merge(table.cell(last_row_idx, 0))
+                table.cell(first_row_idx, 1).merge(table.cell(last_row_idx, 1))
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def _export_technology_islands_docx_text(df):
+    doc = _tech_docx_base()
+
+    for mand_status, title in _GROUPS:
+        sub = df[df['is_mand'] == mand_status]
+        if sub.empty:
+            continue
+
+        h = doc.add_paragraph()
+        h_run = h.add_run(title)
+        h_run.bold = True
+        h.paragraph_format.space_before = Pt(12)
+        h.paragraph_format.space_after = Pt(6)
+
+        for name, group in sub.groupby('supplier', sort=False):
+            p_sup = doc.add_paragraph()
+            p_sup_run = p_sup.add_run(name)
+            p_sup_run.bold = True
+            p_sup.paragraph_format.space_before = Pt(6)
+            p_sup.paragraph_format.space_after = Pt(2)
+
+            for info_name, info_group in group.groupby('info_name', sort=False):
+                p_info = doc.add_paragraph()
+                p_info_run = p_info.add_run(info_name)
+                p_info_run.italic = True
+                p_info.paragraph_format.left_indent = Cm(0.5)
+                p_info.paragraph_format.space_after = Pt(2)
+
+                for _, row in info_group.iterrows():
+                    p = doc.add_paragraph(style='List Bullet')
+                    p.paragraph_format.left_indent = Cm(1)
+                    p.add_run(row['header_line'])
+                    p.paragraph_format.space_after = Pt(0)
+                    for line in row['item_lines']:
+                        p2 = doc.add_paragraph(style='List Bullet 2')
+                        p2.paragraph_format.left_indent = Cm(1.5)
+                        p2.add_run(line)
+                        p2.paragraph_format.space_after = Pt(0)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# ==========================================
+# 4. РЕЕСТР СВЕДЕНИЙ
 # ==========================================
 def _render_provided_data_registry():
     # 🟢 1. ЗАПРОС С ФОРМАТАМИ И ФИЛЬТРОМ ПРАВ
@@ -481,7 +727,7 @@ def _export_registry_to_excel_internal(df, writer):
     ws.set_column('A:A', 30); ws.set_column('B:B', 40); ws.set_column('C:C', 30); ws.set_column('D:D', 20)
 
 # ==========================================
-# 4. РЕЕСТР ПРОТОКОЛОВ СОВЕЩАНИЙ
+# 5. РЕЕСТР ПРОТОКОЛОВ СОВЕЩАНИЙ
 # ==========================================
 
 def _render_meeting_minutes_registry():
@@ -550,7 +796,7 @@ def _render_meeting_minutes_registry():
                         st.link_button(label, doc['doc_url'], width='stretch')
 
 # ==========================================
-# 5. ПРОВОДНИК ОПРОСНИКОВ
+# 6. ПРОВОДНИК ОПРОСНИКОВ
 # ==========================================
 def _render_survey_explorer():
     st.markdown("#### 🔍 Проводник по опросникам")
@@ -581,7 +827,7 @@ def _render_survey_explorer():
         render_survey_viewer(None, opts[sel_srv], is_readonly=True)
 
 # ==========================================
-# 7. РЕЕСТР УЧЁТНЫХ ЗАПИСЕЙ ПОЛЬЗОВАТЕЛЕЙ
+# 8. РЕЕСТР УЧЁТНЫХ ЗАПИСЕЙ ПОЛЬЗОВАТЕЛЕЙ
 # ==========================================
 OPERATOR_NAME = 'Государственное предприятие "Белгеодезия"'
 

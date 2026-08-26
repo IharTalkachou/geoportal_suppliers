@@ -324,8 +324,7 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                         if not item_reqs.empty:
                             def go_to_incl_cb(rid):
                                 st.session_state["main_nav"] = "📩 Заявки"
-                                st.session_state["req_main_nav"] = "🗂️ Включение в НИПД"
-                                st.session_state["incl_main_nav"] = "📋 Реестр заявок"
+                                st.session_state["req_main_nav"] = "🗂️ Реестр (Включение в НИПД)"
                                 st.session_state["sel_incl_id"] = int(rid)
                                 st.session_state.pop("incl_reg_sel_widget", None)
 
