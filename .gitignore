@@ -30,7 +30,11 @@ credentials.json
 csv_export/
 
 # Text
+# Исходники-документы (образцы форм отчётов и т.п.) в репозиторий не коммитим:
+# кодом они не используются, а Hugging Face Spaces отклоняет push с бинарниками
+# (требует Xet/LFS) - см. https://huggingface.co/docs/hub/xet
 *.docx
+*.pdf
 
 # Claude
 .claude/

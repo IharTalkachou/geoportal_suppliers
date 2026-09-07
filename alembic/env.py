@@ -1,7 +1,18 @@
+import os
+import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool, create_engine
 from alembic import context
+
+# Alembic запускается из корня проекта и импортирует модели как src.models.tables,
+# но сам tables.py использует bare-импорты (from config.database import Base) -
+# так его видит Streamlit, который стартует с src/ в качестве корня sys.path.
+# Чтобы работали оба стиля сразу, добавляем src/ в sys.path до импорта моделей.
+# Без этого alembic падает с ModuleNotFoundError: No module named 'config'.
+_SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
 
 # импорт моих зависимостей
 from src.config.database import DATABASE_URL    # URL базы данных
