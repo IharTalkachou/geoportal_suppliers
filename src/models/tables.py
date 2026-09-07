@@ -214,11 +214,83 @@ class ProjectStage(Base):
     document_url = Column(Text)
     responsible_id = Column(Integer, ForeignKey('users.user_id'), comment='Ответственный сотрудник за конкретный документарный этап')
     affected_item_ids = Column(JSONB, server_default=text("'[]'::jsonb"))
+    document_id = Column(Integer, ForeignKey('project_documents.doc_id', ondelete='SET NULL'), comment='Документ проекта (соглашение/протокол), к подписанию которого относится этап')
 
     __table_args__ = (
         Index('idx_pstages_project', 'project_id'),
         Index('idx_pstages_stage', 'stage_id'),
+        Index('idx_pstages_document', 'document_id'),
     )
+
+class ProjectDocument(Base):
+    """Документ проекта: соглашение (не более одного) либо один из протоколов.
+
+    Заменяет допущение "соглашение и протоколы подписываются синхронно": раньше
+    факт подписания выражался единственным этапом CONTRACT_SIGNED, а вид документа
+    определялся флагом projects.is_agreement_project. Теперь документов в проекте
+    может быть несколько, и каждый подписывается независимо.
+    """
+    __tablename__ = 'project_documents'
+    __table_args__ = (
+        CheckConstraint("doc_kind = ANY (ARRAY['Соглашение'::text, 'Протокол'::text])", name='project_documents_kind_check'),
+        Index('idx_pdocs_project', 'project_id'),
+        # В проекте допустимо не более одного соглашения; протоколов - сколько угодно
+        Index('idx_pdocs_one_agreement', 'project_id', unique=True,
+              postgresql_where=text("doc_kind = 'Соглашение'")),
+        {'comment': 'Документы проекта: соглашение и протоколы, подписываемые независимо друг от друга'},
+    )
+
+    doc_id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(Integer, ForeignKey('projects.project_id', ondelete='CASCADE'), nullable=False)
+    doc_kind = Column(Text, nullable=False, comment='Вид документа: Соглашение или Протокол')
+    doc_number = Column(Text, comment='Номер или наименование документа')
+    doc_url = Column(Text, comment='Ссылка на скан подписанного документа')
+    signed_date = Column(Date, comment='Дата подписания; NULL пока документ не подписан')
+    is_signed = Column(Boolean, server_default=text("false"), comment='Признак подписанного документа')
+    notes = Column(Text)
+    sort_order = Column(Integer)
+    created_at = Column(DateTime, server_default=text("now()"))
+
+class ProjectItemPart(Base):
+    """Часть вида сведений внутри проекта (редкий сценарий).
+
+    Нужна, когда один вид сведений передаётся не одним протоколом, а несколькими
+    (напр. УИВП Минобороны, Национальное агентство по туризму). Живёт на уровне
+    состава конкретного проекта, а не в глобальном справочнике info_types:
+    дробление - свойство договорной работы конкретного поставщика.
+    Если частей нет, документ покрывает вид сведений целиком.
+    """
+    __tablename__ = 'project_item_parts'
+    __table_args__ = (
+        UniqueConstraint('item_id', 'part_name', name='unique_item_part_name'),
+        Index('idx_item_parts_item', 'item_id'),
+        {'comment': 'Части вида сведений в составе проекта, передаваемые отдельными протоколами'},
+    )
+
+    part_id = Column(Integer, primary_key=True, autoincrement=True)
+    item_id = Column(Integer, ForeignKey('project_items.item_id', ondelete='CASCADE'), nullable=False)
+    part_name = Column(Text, nullable=False)
+    sort_order = Column(Integer)
+
+class ProjectDocumentItem(Base):
+    """Охват документа: какие виды сведений (или их части) покрывает документ.
+
+    Пустой охват у документа означает "весь проект" - это обычный случай,
+    заполнять его вручную не требуется.
+    """
+    __tablename__ = 'project_document_items'
+    __table_args__ = (
+        UniqueConstraint('doc_id', 'item_id', 'part_id', name='unique_document_item_part'),
+        Index('idx_pdoc_items_doc', 'doc_id'),
+        Index('idx_pdoc_items_item', 'item_id'),
+        {'comment': 'Связь документа проекта с видами сведений (или их частями), которые он покрывает'},
+    )
+
+    link_id = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id = Column(Integer, ForeignKey('project_documents.doc_id', ondelete='CASCADE'), nullable=False)
+    item_id = Column(Integer, ForeignKey('project_items.item_id', ondelete='CASCADE'), nullable=False)
+    part_id = Column(Integer, ForeignKey('project_item_parts.part_id', ondelete='CASCADE'),
+                     comment='NULL - документ покрывает вид сведений целиком')
 
 class AppSetting(Base):
     __tablename__ = 'app_settings'

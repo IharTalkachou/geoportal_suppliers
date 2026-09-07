@@ -37,6 +37,63 @@ def _resync_buro_iterations(session, project_id):
             session.execute(text("UPDATE project_stages SET iteration_count = :v WHERE stage_progress_id = :id"),
                             {"v": i, "id": int(row['stage_progress_id'])})
 
+def load_project_documents(project_id):
+    """Документы проекта (соглашение + протоколы) вместе с охватом.
+
+    Пустой охват = документ покрывает весь проект (обычный случай).
+    """
+    docs = query_db("""
+        SELECT doc_id, project_id, doc_kind, doc_number, doc_url,
+               signed_date, is_signed, notes, sort_order
+        FROM project_documents
+        WHERE project_id = :pid
+        ORDER BY CASE WHEN doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                 sort_order NULLS LAST, doc_id
+    """, {"pid": project_id})
+    return docs
+
+def load_document_coverage(project_id):
+    """Охват всех документов проекта: одна строка на связь документ-набор(-часть)."""
+    return query_db("""
+        SELECT pdi.link_id, pdi.doc_id, pdi.item_id, pdi.part_id,
+               d.dataset_name, i.info_name, pip.part_name
+        FROM project_document_items pdi
+        JOIN project_documents pd ON pdi.doc_id = pd.doc_id
+        JOIN project_items pi ON pdi.item_id = pi.item_id
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        LEFT JOIN project_item_parts pip ON pdi.part_id = pip.part_id
+        WHERE pd.project_id = :pid
+        ORDER BY d.dataset_name, i.info_name, pip.sort_order NULLS LAST
+    """, {"pid": project_id})
+
+def build_coverage_options(project_id):
+    """Строит варианты охвата для мультиселекта: {подпись: (item_id, part_id)}.
+
+    Вид сведений с частями раскрывается построчно на свои части; без частей -
+    одна строка на вид сведений (part_id = None).
+    """
+    rows = query_db("""
+        SELECT pi.item_id, d.dataset_name, i.info_name,
+               pip.part_id, pip.part_name
+        FROM project_items pi
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        LEFT JOIN project_item_parts pip ON pip.item_id = pi.item_id
+        WHERE pi.project_id = :pid
+        ORDER BY d.dataset_name, i.info_name, pip.sort_order NULLS LAST, pip.part_id
+    """, {"pid": project_id})
+
+    opts = {}
+    for _, r in rows.iterrows():
+        base = f"{r['dataset_name']} | {r['info_name']}"
+        if pd.notna(r['part_id']):
+            label = f"{base} → {r['part_name']}"
+            opts[label] = (int(r['item_id']), int(r['part_id']))
+        else:
+            opts[base] = (int(r['item_id']), None)
+    return opts
+
 def custom_badge(text, bg_color="#E0E0E0", text_color="#333", bold=True):
     fw = "700" if bold else "500"
     return (f'<span style="background-color:{bg_color};color:{text_color};padding:2px 10px;'
@@ -46,6 +103,198 @@ def custom_badge(text, bg_color="#E0E0E0", text_color="#333", bold=True):
 # ==========================================
 # 💬 ДИАЛОГОВЫЕ ОКНА (CRUD)
 # ==========================================
+
+DOC_FORM_KEYS = ["doc_kind", "doc_number", "doc_url", "doc_signed", "doc_date", "doc_notes", "doc_coverage"]
+
+def clear_doc_form_state():
+    """Сброс ключей формы документа.
+
+    Виджеты диалога используют статичные key=, поэтому Streamlit не переприменит
+    value= для уже существующего в session_state ключа - без очистки поля залипают
+    от предыдущего открытия (тот же паттерн, что у d_*/td_*).
+    """
+    for k in DOC_FORM_KEYS:
+        st.session_state.pop(k, None)
+
+@st.dialog("Документ проекта")
+def document_mgmt_dialog(session, project_id, allow_agreement, existing_data=None):
+    is_edit = existing_data is not None
+
+    kinds = ["Протокол"]
+    if allow_agreement or (is_edit and existing_data['doc_kind'] == 'Соглашение'):
+        kinds = ["Соглашение", "Протокол"]
+
+    def_kind = existing_data['doc_kind'] if is_edit else kinds[0]
+    c1, c2 = st.columns(2)
+    c1.selectbox("Вид документа *", kinds, key="doc_kind",
+                 index=kinds.index(def_kind) if def_kind in kinds else 0)
+    c2.text_input("Номер / наименование", key="doc_number",
+                  value=(existing_data['doc_number'] or "") if is_edit else "")
+
+    st.text_input("🔗 Ссылка на скан", key="doc_url",
+                  value=(existing_data['doc_url'] or "") if is_edit else "")
+
+    c3, c4 = st.columns(2)
+    is_signed = c3.checkbox("✅ Подписан", key="doc_signed",
+                            value=bool(existing_data['is_signed']) if is_edit else False)
+    # Дата подписания имеет смысл только у подписанного документа
+    if not is_signed:
+        st.session_state.doc_date = None
+    c4.date_input("🖋 Дата подписания", key="doc_date",
+                  value=existing_data['signed_date'] if is_edit else None,
+                  disabled=not is_signed)
+
+    st.text_area("Примечание", key="doc_notes",
+                 value=(existing_data['notes'] or "") if is_edit else "")
+
+    # Охват - редкий сценарий, поэтому свёрнут по умолчанию
+    cov_opts = build_coverage_options(project_id)
+    default_cov = []
+    if is_edit:
+        cov_df = load_document_coverage(project_id)
+        mine = cov_df[cov_df['doc_id'] == int(existing_data['doc_id'])]
+        current = {(int(r['item_id']), int(r['part_id']) if pd.notna(r['part_id']) else None)
+                   for _, r in mine.iterrows()}
+        default_cov = [lbl for lbl, val in cov_opts.items() if val in current]
+
+    with st.expander("📎 Охват документа (по умолчанию — весь проект)"):
+        if not cov_opts:
+            st.caption("В проекте пока нет состава наборов.")
+        else:
+            st.caption("Оставьте пустым, если документ покрывает проект целиком. "
+                       "Заполняйте, только когда виды сведений разнесены по разным протоколам.")
+        st.multiselect("Покрываемые виды сведений", options=list(cov_opts.keys()),
+                       default=default_cov, key="doc_coverage")
+
+    if st.button("💾 Сохранить", type="primary", width='stretch'):
+        try:
+            params = {
+                "pid": project_id,
+                "kind": st.session_state.doc_kind,
+                "num": (st.session_state.doc_number or "").strip() or None,
+                "url": (st.session_state.doc_url or "").strip() or None,
+                "signed": bool(st.session_state.doc_signed),
+                "sdate": st.session_state.doc_date if st.session_state.doc_signed else None,
+                "notes": (st.session_state.doc_notes or "").strip() or None,
+            }
+            if is_edit:
+                params["id"] = int(existing_data['doc_id'])
+                session.execute(text("""
+                    UPDATE project_documents
+                    SET doc_kind=:kind, doc_number=:num, doc_url=:url,
+                        is_signed=:signed, signed_date=:sdate, notes=:notes
+                    WHERE doc_id=:id
+                """), params)
+                doc_id = params["id"]
+            else:
+                next_order = session.execute(text(
+                    "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_documents WHERE project_id = :pid"
+                ), {"pid": project_id}).scalar()
+                params["ord"] = next_order
+                doc_id = session.execute(text("""
+                    INSERT INTO project_documents
+                        (project_id, doc_kind, doc_number, doc_url, is_signed, signed_date, notes, sort_order)
+                    VALUES (:pid, :kind, :num, :url, :signed, :sdate, :notes, :ord)
+                    RETURNING doc_id
+                """), params).scalar()
+
+            # Охват переписываем целиком - проще и надёжнее вычисления дельты
+            session.execute(text("DELETE FROM project_document_items WHERE doc_id = :id"), {"id": int(doc_id)})
+            for label in st.session_state.doc_coverage:
+                item_id, part_id = cov_opts[label]
+                session.execute(text("""
+                    INSERT INTO project_document_items (doc_id, item_id, part_id)
+                    VALUES (:d, :i, :p)
+                """), {"d": int(doc_id), "i": item_id, "p": part_id})
+
+            session.commit()
+            from utils.project_utils import sync_project_status
+            sync_project_status(session, project_id)
+            clear_cache()
+            st.session_state.buro_toast = "✅ Документ сохранён"
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка: {e}")
+            session.rollback()
+
+@st.dialog("Удаление документа")
+def confirm_delete_document_dialog(session, doc_id, project_id):
+    st.warning("Удалить этот документ? Этапы, связанные с ним, останутся, но потеряют привязку.")
+    if st.button("❌ Да, удалить", type="primary", width='stretch'):
+        try:
+            session.execute(text("DELETE FROM project_documents WHERE doc_id = :id"), {"id": int(doc_id)})
+            session.commit()
+            from utils.project_utils import sync_project_status
+            sync_project_status(session, project_id)
+            clear_cache()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Ошибка: {e}")
+            session.rollback()
+
+def render_documents_block(session, project_id, is_agreement_project, is_readonly):
+    """Блок документов проекта над колонками этапов."""
+    docs = load_project_documents(project_id)
+    cov_df = load_document_coverage(project_id)
+
+    has_agreement = (not docs.empty) and (docs['doc_kind'] == 'Соглашение').any()
+    allow_agreement = bool(is_agreement_project) and not has_agreement
+
+    h1, h2 = st.columns([0.8, 0.2])
+    signed_n = int(docs['is_signed'].sum()) if not docs.empty else 0
+    total_n = len(docs)
+    h1.markdown(f"##### 📄 Документы проекта ({signed_n}/{total_n} подписано)" if total_n
+                else "##### 📄 Документы проекта")
+    if not is_readonly:
+        if h2.button("➕ Добавить документ", width='stretch'):
+            clear_doc_form_state()
+            document_mgmt_dialog(session, project_id, allow_agreement)
+
+    if docs.empty:
+        st.caption("Документы не заведены — бюрократический прогресс считается по этапам, как раньше.")
+        st.divider()
+        return
+
+    cols = st.columns(min(3, len(docs)))
+    for idx, (_, doc) in enumerate(docs.iterrows()):
+        with cols[idx % len(cols)]:
+            with st.container(border=True):
+                if doc['is_signed']:
+                    badge = custom_badge(f"Подписан {format_date_ru(doc['signed_date'])}", "#27AE60", "white")
+                else:
+                    badge = custom_badge("В работе", "#F39C12", "white")
+                st.markdown(badge, unsafe_allow_html=True)
+
+                title = doc['doc_number'] or doc['doc_kind']
+                st.markdown(f"**{doc['doc_kind']}**")
+                if doc['doc_number']:
+                    st.caption(title)
+
+                mine = cov_df[cov_df['doc_id'] == doc['doc_id']]
+                if mine.empty:
+                    st.caption("📦 Охват: весь проект")
+                else:
+                    names = [f"{r['info_name']} → {r['part_name']}" if pd.notna(r['part_name']) else r['info_name']
+                             for _, r in mine.iterrows()]
+                    st.caption("📦 " + "; ".join(names))
+
+                if doc['doc_url']:
+                    st.markdown(
+                        f'<a href="{doc["doc_url"]}" target="_blank" style="text-decoration:none;font-size:0.8rem;">📄 Открыть скан</a>',
+                        unsafe_allow_html=True)
+
+                if doc['notes']:
+                    st.caption(f"💬 {doc['notes']}")
+
+                if not is_readonly:
+                    b1, b2 = st.columns(2)
+                    if b1.button("✏️", key=f"ed_doc_{doc['doc_id']}", width='stretch', help="Редактировать"):
+                        clear_doc_form_state()
+                        document_mgmt_dialog(session, project_id, allow_agreement, existing_data=doc)
+                    if b2.button("🗑", key=f"dl_doc_{doc['doc_id']}", width='stretch', help="Удалить"):
+                        confirm_delete_document_dialog(session, int(doc['doc_id']), project_id)
+
+    st.divider()
 
 @st.dialog("Управление этапом")
 def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=None):
@@ -89,7 +338,32 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     c3.date_input("🚀 Факт. начало", key="d_a_start", value=existing_data['actual_start'] if is_edit else None, disabled=is_not_started)
     c4.date_input("🏁 Факт. конец", key="d_a_end", value=existing_data['actual_end'] if is_edit else None, disabled=is_not_started)
     st.text_area("Комментарий", value=existing_data['comments'] if is_edit else "", key="d_comm")
-    
+
+    # Привязка этапа подписания к конкретному документу проекта:
+    # соглашение и протоколы подписываются независимо, поэтому этап должен
+    # указывать, какой именно документ он закрывает.
+    doc_id_to_save = None
+    is_signing_stage = stage_map.get(st.session_state.d_stage, {}).get("code") == 'CONTRACT_SIGNED'
+    if is_signing_stage:
+        pdocs = load_project_documents(project_id)
+        if pdocs.empty:
+            st.info("ℹ️ В проекте нет документов. Заведите соглашение или протокол в блоке «Документы проекта».")
+        else:
+            doc_opts = {"Не указан": None}
+            for _, d in pdocs.iterrows():
+                label = f"{d['doc_kind']}" + (f" — {d['doc_number']}" if d['doc_number'] else "")
+                doc_opts[label] = int(d['doc_id'])
+            cur_doc = existing_data.get('document_id') if is_edit else None
+            def_label = next((l for l, v in doc_opts.items() if v is not None and cur_doc is not None and v == int(cur_doc)),
+                             "Не указан")
+            sel_doc = st.selectbox("📄 Подписываемый документ", list(doc_opts.keys()),
+                                   index=list(doc_opts.keys()).index(def_label), key="d_doc")
+            doc_id_to_save = doc_opts[sel_doc]
+    elif is_edit:
+        # Этап сменил вид - привязку к документу не тащим за собой
+        doc_id_to_save = None
+
+
     if is_edit:
         st.caption("📂 Документы")
         # 1. Загрузка существующих
@@ -134,13 +408,22 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 "mst": micro_map[st.session_state.d_ms], "ps": st.session_state.d_p_start,
                 "pe": st.session_state.d_p_end, "as": st.session_state.d_a_start,
                 "ae": st.session_state.d_a_end, "comm": st.session_state.d_comm,
-                "rid": r_id
+                "rid": r_id, "doc": doc_id_to_save
             }
             if is_edit:
                 params["id"] = int(existing_data['stage_progress_id'])
-                session.execute(text("UPDATE project_stages SET stage_id=:sid, micro_status=:mst, planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm, responsible_id=:rid WHERE stage_progress_id=:id"), params)
+                session.execute(text("UPDATE project_stages SET stage_id=:sid, micro_status=:mst, planned_start=:ps, planned_end=:pe, actual_start=:as, actual_end=:ae, comments=:comm, responsible_id=:rid, document_id=:doc WHERE stage_progress_id=:id"), params)
             else:
-                session.execute(text("INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count, planned_start, planned_end, actual_start, actual_end, comments, responsible_id) VALUES (:pid, :sid, :mst, 1, :ps, :pe, :as, :ae, :comm, :rid)"), params)
+                session.execute(text("INSERT INTO project_stages (project_id, stage_id, micro_status, iteration_count, planned_start, planned_end, actual_start, actual_end, comments, responsible_id, document_id) VALUES (:pid, :sid, :mst, 1, :ps, :pe, :as, :ae, :comm, :rid, :doc)"), params)
+
+            # Закрытый этап подписания автоматически помечает свой документ подписанным
+            if doc_id_to_save and micro_map[st.session_state.d_ms] == 4:
+                session.execute(text("""
+                    UPDATE project_documents
+                    SET is_signed = true, signed_date = COALESCE(:ae, signed_date)
+                    WHERE doc_id = :doc
+                """), {"ae": st.session_state.d_a_end, "doc": doc_id_to_save})
+
             session.commit(); _resync_buro_iterations(session, project_id); session.commit()
             from utils.project_utils import sync_project_status
             sync_project_status(session, project_id)
@@ -162,10 +445,15 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
     is_readonly = (user_role == "user")
     
     # 1. Справочники
-    s_ref = query_db("SELECT stage_id, stage_name, duration_days FROM stages WHERE track_category = '1. Документарный' ORDER BY stage_order")
+    s_ref = query_db("SELECT stage_id, stage_name, duration_days, stage_code FROM stages WHERE track_category = '1. Документарный' ORDER BY stage_order")
     m_ref = query_db("SELECT micro_status_id, micro_status_name FROM ref_micro_statuses")
-    stage_map = {r['stage_name']: {"id": int(r['stage_id']), "duration": int(r['duration_days'] or 0)} for _, r in s_ref.iterrows()}
+    stage_map = {r['stage_name']: {"id": int(r['stage_id']), "duration": int(r['duration_days'] or 0),
+                                   "code": r['stage_code']} for _, r in s_ref.iterrows()}
     micro_map = {r['micro_status_name']: int(r['micro_status_id']) for _, r in m_ref.iterrows()}
+
+    is_agreement_project = bool(query_db(
+        "SELECT is_agreement_project FROM projects WHERE project_id = :pid", {"pid": project_id}
+    ).iloc[0]['is_agreement_project'])
 
     # 2. Данные
     df = query_db("""
@@ -189,9 +477,11 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
     h_col1.subheader("📜 Бюрократический трек")
     if not is_readonly:
         if h_col2.button("➕ Добавить этап", width='stretch', type="primary"):
-            for k in ["d_stage", "d_ms", "d_p_start", "d_p_end", "d_comm", "d_resp", "d_a_start", "d_a_end"]:
+            for k in ["d_stage", "d_ms", "d_p_start", "d_p_end", "d_comm", "d_resp", "d_a_start", "d_a_end", "d_doc"]:
                 if k in st.session_state: del st.session_state[k]
             stage_mgmt_dialog(session, project_id, stage_map, micro_map)
+
+    render_documents_block(session, project_id, is_agreement_project, is_readonly)
 
     # Распределение
     work_df = df[df['micro_status'].isin([2, 3, 6])]
@@ -278,7 +568,7 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
             st.write("")
             with st.popover("⚙️ Действия"):
                 if st.button("✏️ Редактировать", key=f"ed_{row['stage_progress_id']}", width='stretch'):
-                    for k in ["d_stage", "d_ms", "d_p_start", "d_p_end", "d_comm", "d_resp", "d_a_start", "d_a_end"]:
+                    for k in ["d_stage", "d_ms", "d_p_start", "d_p_end", "d_comm", "d_resp", "d_a_start", "d_a_end", "d_doc"]:
                         if k in st.session_state: del st.session_state[k]
                     stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=row)
                 if st.button("🗑 Удалить", key=f"dl_{row['stage_progress_id']}", width='stretch'):

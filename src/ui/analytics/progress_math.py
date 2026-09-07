@@ -37,6 +37,21 @@ def get_sla_ratio(row):
     
     return min(0.9, max(0.2, days / norm))
 
+def _get_doc_counts(df):
+    """Число документов проекта и сколько из них подписано.
+
+    Значения приходят из get_analytics_snapshot одинаковыми для всех строк проекта
+    (скалярные подзапросы), поэтому достаточно взять первое непустое.
+    Возвращает (0, 0), если документы у проекта не заведены.
+    """
+    if 'docs_total' not in df.columns:
+        return 0, 0
+    totals = df['docs_total'].dropna()
+    if totals.empty:
+        return 0, 0
+    signed = df['docs_signed'].dropna()
+    return int(totals.iloc[0]), int(signed.iloc[0]) if not signed.empty else 0
+
 def calculate_buro_progress(df):
     """Сценарии расчета прогресса бюрократического стека (0-100%)"""
     df = df.copy()
@@ -84,11 +99,20 @@ def calculate_buro_progress(df):
         return min(100.0, progress), (90.0 + passed_cp + passed_aa), (active_cp + active_aa), f"Ext: 90% + CP({passed_cp:.1f}% passed + {active_cp:.1f}% active) + AA({passed_aa:.1f}% passed + {active_aa:.1f}% active)"
 
     # --- БЛОК А (Проекты без CHANGES_PROTOCOL и ADDITIONAL_AGREEMENT) ---
-    
+
     # А.1. CONTRACT_SIGNED
+    # Соглашение и протоколы проекта подписываются независимо друг от друга,
+    # поэтому 100% даётся не за первый закрытый этап подписания, а только когда
+    # подписаны ВСЕ документы проекта (project_documents, см. data_provider).
+    # Проекты без заведённых документов считаются по-прежнему - обратная совместимость.
     if 'CONTRACT_SIGNED' in codes_in_df:
         cs_rows = df[df['stage_code'] == 'CONTRACT_SIGNED']
         if not cs_rows.empty and (cs_rows['status'] == 'Выполнено').any():
+            docs_total, docs_signed = _get_doc_counts(df)
+            if docs_total > 0:
+                progress = 100.0 * docs_signed / docs_total
+                return (progress, progress, 0.0,
+                        f"Docs signed: {docs_signed}/{docs_total} = {progress:.1f}%")
             return 100.0, 100.0, 0.0, "Contract Signed: 100%"
 
     # А.2. DOCUMENT_APPROVAL

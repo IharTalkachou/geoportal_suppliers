@@ -23,7 +23,11 @@ def get_analytics_snapshot():
             'bureaucracy' as track_type,
             '—' as info_name,
             stg.stage_color,
-            p.is_agreement_project
+            p.is_agreement_project,
+            -- Документы проекта (соглашение + протоколы): бюро-трек закрыт,
+            -- только когда подписаны все. Читается в calculate_buro_progress.
+            (SELECT COUNT(*) FROM project_documents pd WHERE pd.project_id = p.project_id) as docs_total,
+            (SELECT COUNT(*) FROM project_documents pd WHERE pd.project_id = p.project_id AND pd.is_signed) as docs_signed
         FROM project_stages ps
         JOIN projects p ON ps.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id 
@@ -48,7 +52,9 @@ def get_analytics_snapshot():
             'tech' as track_type,
             it.info_name,
             stg.stage_color,
-            p.is_agreement_project
+            p.is_agreement_project,
+            NULL::bigint as docs_total,
+            NULL::bigint as docs_signed
         FROM project_stages ps
         CROSS JOIN LATERAL jsonb_array_elements_text(ps.affected_item_ids) AS item_id_str
         JOIN project_items pi ON pi.item_id = item_id_str::int

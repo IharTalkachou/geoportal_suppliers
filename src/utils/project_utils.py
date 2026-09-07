@@ -26,7 +26,20 @@ def sync_project_status(session, project_id: int):
     
     # Ключевые маркеры
     has_application = any(df['stage_name'] == 'Заявка на размещение НПД')
-    is_signed = any((done_stages['stage_name'] == 'Документ подписан') | (done_stages['stage_code'] == 'CONTRACT_SIGNED'))
+
+    # Бюрократия проекта завершена, только когда подписаны ВСЕ его документы
+    # (соглашение + протоколы). Раньше хватало одного закрытого CONTRACT_SIGNED,
+    # из-за чего проект с подписанным соглашением и незакрытыми протоколами
+    # считался завершённым. Проекты без заведённых документов - по-прежнему.
+    doc_counts = session.execute(text("""
+        SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_signed) AS signed
+        FROM project_documents WHERE project_id = :pid
+    """), {"pid": project_id}).mappings().first()
+
+    if doc_counts and doc_counts['total'] > 0:
+        is_signed = (doc_counts['signed'] == doc_counts['total'])
+    else:
+        is_signed = any((done_stages['stage_name'] == 'Документ подписан') | (done_stages['stage_code'] == 'CONTRACT_SIGNED'))
     
     # --- РАСЧЕТ ЗАВЕРШЕННОСТИ ТЕХНОЛОГИИ ---
     # Сколько всего наборов в проекте

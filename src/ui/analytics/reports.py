@@ -27,7 +27,7 @@ def render_reports_tab():
         "6. Просмотр технических опросников",
         "7. Формирование месячного отчёта НИПД",
         "8. Реестр учётных записей пользователей",
-        "9. Сводная таблица по поставщикам и проектам"
+        "9. Сводный отчёт о Поставщиках Национального геопортала"
     ], key="report_type_sel")
 
     if report_type == "1. Реестр подписанных соглашений":
@@ -47,7 +47,7 @@ def render_reports_tab():
             render_monthly_report_tab(sess)
     elif report_type == "8. Реестр учётных записей пользователей":
         _render_accounts_registry()
-    elif report_type == "9. Сводная таблица по поставщикам и проектам":
+    elif report_type == "9. Сводный отчёт о Поставщиках Национального геопортала":
         _render_supplier_projects_summary()
 
 # ==========================================
@@ -942,142 +942,224 @@ def _build_accounts_registry_docx(today_str, total_accounts, z_org_accounts, a_l
     return buffer
 
 # ==========================================
-# 9. СВОДНАЯ ТАБЛИЦА ПО ПОСТАВЩИКАМ И ПРОЕКТАМ
+# 9. СВОДНЫЙ ОТЧЁТ О ПОСТАВЩИКАХ НАЦИОНАЛЬНОГО ГЕОПОРТАЛА
 # ==========================================
-# "Соглашение подписано" / "Протокол подписан" - один и тот же бюрократический
-# этап CONTRACT_SIGNED ("Документ подписан"), различается только флагом проекта
-# is_agreement_project (см. Блок 12/13 report_docx.py::fetch_bureaucracy_logic_stats -
-# та же логика уже используется для месячного отчёта НИПД).
+# Форма отчёта: строка = вид сведений (а при разбиении - его часть), а не проект.
+#
+# "Соглашение" - у поставщика есть подписанный документ project_documents
+# с doc_kind = 'Соглашение' (по любому его проекту).
+# "Протокол"   - вид сведений (или его часть) покрыт подписанным документом
+# с doc_kind = 'Протокол'. Документ с ПУСТЫМ охватом покрывает весь проект -
+# это обычный случай; охват заполняется только когда виды сведений одного набора
+# разнесены по разным протоколам (напр. УИВП Минобороны).
+#
 # "Данные/Метаданные получены" = этапы DATA_WAIT/META_WAIT ("Размещение наборов" /
 # "Размещение метаданных Поставщиком", см. комментарий в technology_tab.py) выполнены -
-# т.е. поставщик передал материал. "...опубликованы" = финальные DATA_PUB/META_PUB выполнены.
+# т.е. поставщик передал материал. "...опубликованы" = финальные DATA_PUB/META_PUB.
+# Эти флаги берутся ПО НАБОРУ (через affected_item_ids), а не по проекту целиком.
 _SUMMARY_GREEN = RGBColor(0x27, 0xAE, 0x60)
 _SUMMARY_RED = RGBColor(0xE7, 0x4C, 0x3C)
 
-def _render_supplier_projects_summary():
-    st.markdown("#### 📊 Сводная таблица по поставщикам и проектам")
+_SUMMARY_HEADERS = [
+    '№ п/п', 'Поставщик', 'Соглашение', 'Набор', 'Обязательный', 'Вид сведений',
+    'Протокол', 'Данные получены', 'Данные опубликованы',
+    'Метаданные получены', 'Метаданные опубликованы', 'Примечание',
+]
 
-    suppliers_df = query_db("""
-        SELECT supplier_id, supplier_name, is_mandatory
-        FROM suppliers
-        ORDER BY is_mandatory DESC, supplier_name
+
+def _fetch_summary_rows():
+    """Собирает плоскую таблицу отчёта: одна строка на вид сведений (или его часть)."""
+
+    # Состав всех проектов: набор -> вид сведений, с разворотом на части.
+    # LEFT JOIN на части: если частей нет, остаётся одна строка с part_id = NULL.
+    items_df = query_db("""
+        SELECT s.supplier_id, s.supplier_name, s.is_mandatory AS supplier_mandatory,
+               p.project_id, p.project_name, p.notes AS project_notes,
+               pi.item_id, d.dataset_name, d.is_mandatory AS dataset_mandatory,
+               i.info_name,
+               pip.part_id, pip.part_name
+        FROM project_items pi
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN suppliers s ON p.supplier_id = s.supplier_id
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        LEFT JOIN project_item_parts pip ON pip.item_id = pi.item_id
+        ORDER BY s.is_mandatory DESC, s.supplier_name, d.dataset_name,
+                 i.info_name, pip.sort_order NULLS LAST, pip.part_id
     """)
-    if suppliers_df.empty:
-        st.info("Поставщики не найдены.")
-        return
 
-    # Рабочие проекты (не сам договор-соглашение) - у них есть свой протокол и,
-    # при наличии наборов, технологический прогресс.
-    projects_df = query_db("""
-        SELECT project_id, project_name, supplier_id
-        FROM projects
-        WHERE is_agreement_project = FALSE
-        ORDER BY project_name
-    """)
-
-    agreement_signed_ids = set(query_db("""
+    # Поставщики с подписанным соглашением
+    agreement_ids = set(query_db("""
         SELECT DISTINCT p.supplier_id
-        FROM project_stages ps
-        JOIN projects p ON ps.project_id = p.project_id
-        JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE stg.stage_code = 'CONTRACT_SIGNED'
-          AND ms.micro_status_name = 'Выполнено'
-          AND p.is_agreement_project = TRUE
+        FROM project_documents pd
+        JOIN projects p ON pd.project_id = p.project_id
+        WHERE pd.doc_kind = 'Соглашение' AND pd.is_signed
     """)['supplier_id'].tolist())
 
-    # Все нужные флаги по проекту одним запросом: "выполнен хотя бы раз" -
-    # т.е. один раз пройденный этап считается пройденным навсегда (не зависит от
-    # текущей активной итерации).
-    flags_df = query_db("""
-        SELECT DISTINCT ps.project_id, stg.stage_code
+    # Подписанные протоколы: проекты, где протокол покрывает ВЕСЬ проект (пустой охват)
+    proto_whole_projects = set(query_db("""
+        SELECT DISTINCT pd.project_id
+        FROM project_documents pd
+        WHERE pd.doc_kind = 'Протокол' AND pd.is_signed
+          AND NOT EXISTS (SELECT 1 FROM project_document_items pdi WHERE pdi.doc_id = pd.doc_id)
+    """)['project_id'].tolist())
+
+    # Подписанные протоколы с явным охватом: пары (item_id, part_id)
+    proto_cov = query_db("""
+        SELECT DISTINCT pdi.item_id, pdi.part_id
+        FROM project_document_items pdi
+        JOIN project_documents pd ON pdi.doc_id = pd.doc_id
+        WHERE pd.doc_kind = 'Протокол' AND pd.is_signed
+    """)
+    # Охват на весь вид сведений (part_id IS NULL) покрывает и все его части
+    proto_items_whole = set(proto_cov[proto_cov['part_id'].isna()]['item_id'].tolist())
+    proto_parts = {(int(r['item_id']), int(r['part_id']))
+                   for _, r in proto_cov[proto_cov['part_id'].notna()].iterrows()}
+
+    # Технологические флаги ПО НАБОРУ: разворачиваем affected_item_ids.
+    # DISTINCT обязателен - один этап на N наборов даёт N строк.
+    tech_df = query_db("""
+        SELECT DISTINCT jsonb_array_elements_text(ps.affected_item_ids)::int AS item_id,
+               stg.stage_code
         FROM project_stages ps
         JOIN stages stg ON ps.stage_id = stg.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE stg.stage_code IN ('CONTRACT_SIGNED', 'DATA_WAIT', 'DATA_PUB', 'META_WAIT', 'META_PUB')
+        WHERE stg.stage_code IN ('DATA_WAIT', 'DATA_PUB', 'META_WAIT', 'META_PUB')
           AND ms.micro_status_name = 'Выполнено'
     """)
-    done_pairs = set(zip(flags_df['project_id'], flags_df['stage_code']))
+    tech_pairs = set(zip(tech_df['item_id'], tech_df['stage_code'])) if not tech_df.empty else set()
 
-    def is_done(pid, code):
-        return (pid, code) in done_pairs
+    # Примечание: projects.notes как основа + свежие комментарии незакрытых этапов
+    notes_df = query_db("""
+        SELECT ps.project_id, ps.comments,
+               COALESCE(ps.actual_start, ps.planned_start) AS ref_date
+        FROM project_stages ps
+        WHERE ps.micro_status <> 4
+          AND ps.comments IS NOT NULL AND btrim(ps.comments) <> ''
+        ORDER BY ps.project_id, COALESCE(ps.actual_start, ps.planned_start) DESC NULLS LAST
+    """)
+
+    notes_by_project = {}
+    for pid, group in notes_df.groupby('project_id'):
+        lines = []
+        for _, r in group.iterrows():
+            prefix = f"{r['ref_date'].strftime('%d.%m.%Y')}: " if pd.notna(r['ref_date']) else ""
+            lines.append(f"{prefix}{r['comments'].strip()}")
+        notes_by_project[pid] = lines
 
     rows = []
-    for _, sup in suppliers_df.iterrows():
-        sid = int(sup['supplier_id'])
-        sup_projects = projects_df[projects_df['supplier_id'] == sid]
-        agreement_ok = sid in agreement_signed_ids
+    for _, r in items_df.iterrows():
+        item_id = int(r['item_id'])
+        pid = int(r['project_id'])
+        has_part = pd.notna(r['part_id'])
+        part_id = int(r['part_id']) if has_part else None
 
-        if sup_projects.empty:
-            rows.append({
-                'supplier_id': sid, 'supplier_name': sup['supplier_name'], 'is_mandatory': bool(sup['is_mandatory']),
-                'agreement_signed': agreement_ok, 'project_name': '—',
-                'protocol_signed': None, 'data_received': None, 'data_published': None,
-                'meta_received': None, 'meta_published': None,
-            })
+        if has_part:
+            protocol_ok = (pid in proto_whole_projects
+                           or item_id in proto_items_whole
+                           or (item_id, part_id) in proto_parts)
+            info_label = f"{r['info_name']} — {r['part_name']}"
         else:
-            for _, proj in sup_projects.iterrows():
-                pid = int(proj['project_id'])
-                rows.append({
-                    'supplier_id': sid, 'supplier_name': sup['supplier_name'], 'is_mandatory': bool(sup['is_mandatory']),
-                    'agreement_signed': agreement_ok, 'project_name': proj['project_name'],
-                    'protocol_signed': is_done(pid, 'CONTRACT_SIGNED'),
-                    'data_received': is_done(pid, 'DATA_WAIT'),
-                    'data_published': is_done(pid, 'DATA_PUB'),
-                    'meta_received': is_done(pid, 'META_WAIT'),
-                    'meta_published': is_done(pid, 'META_PUB'),
-                })
+            protocol_ok = (pid in proto_whole_projects or item_id in proto_items_whole)
+            info_label = r['info_name']
 
-    df = pd.DataFrame(rows)
+        note_parts = []
+        if pd.notna(r['project_notes']) and str(r['project_notes']).strip():
+            note_parts.append(str(r['project_notes']).strip())
+        note_parts.extend(notes_by_project.get(pid, []))
+
+        rows.append({
+            'supplier_id': int(r['supplier_id']),
+            'supplier_name': r['supplier_name'],
+            'agreement_signed': int(r['supplier_id']) in agreement_ids,
+            'dataset_name': r['dataset_name'],
+            'dataset_mandatory': bool(r['dataset_mandatory']),
+            'info_label': info_label,
+            'protocol_signed': protocol_ok,
+            'data_received': (item_id, 'DATA_WAIT') in tech_pairs,
+            'data_published': (item_id, 'DATA_PUB') in tech_pairs,
+            'meta_received': (item_id, 'META_WAIT') in tech_pairs,
+            'meta_published': (item_id, 'META_PUB') in tech_pairs,
+            'note': "\n".join(note_parts),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _render_supplier_projects_summary():
+    st.markdown("#### 📊 Сводный отчёт о Поставщиках Национального геопортала")
+
+    df = _fetch_summary_rows()
+    if df.empty:
+        st.info("Нет данных: ни в одном проекте не заведён состав наборов.")
+        return
 
     def yn(v):
-        if v is None:
-            return "—"
         return "Да" if v else "Нет"
 
-    disp = df.copy()
-    disp['Поставщик'] = disp['supplier_name']
-    disp['Обязательный'] = disp['is_mandatory'].apply(lambda x: "Да" if x else "Нет")
-    disp['Соглашение подписано'] = disp['agreement_signed'].apply(lambda x: "Да" if x else "Нет")
-    dup_mask = disp.duplicated('supplier_id')
-    disp.loc[dup_mask, ['Поставщик', 'Обязательный', 'Соглашение подписано']] = ""
-    disp['Проект'] = disp['project_name']
-    disp['Протокол подписан'] = disp['protocol_signed'].apply(yn)
-    disp['Данные получены'] = disp['data_received'].apply(yn)
-    disp['Данные опубликованы'] = disp['data_published'].apply(yn)
-    disp['Метаданные получены'] = disp['meta_received'].apply(yn)
-    disp['Метаданные опубликованы'] = disp['meta_published'].apply(yn)
+    disp = pd.DataFrame()
+    disp['№ п/п'] = range(1, len(df) + 1)
+    disp['Поставщик'] = df['supplier_name']
+    disp['Соглашение'] = df['agreement_signed'].apply(yn)
+    disp['Набор'] = df['dataset_name']
+    disp['Обязательный'] = df['dataset_mandatory'].apply(yn)
+    disp['Вид сведений'] = df['info_label']
+    disp['Протокол'] = df['protocol_signed'].apply(yn)
+    disp['Данные получены'] = df['data_received'].apply(yn)
+    disp['Данные опубликованы'] = df['data_published'].apply(yn)
+    disp['Метаданные получены'] = df['meta_received'].apply(yn)
+    disp['Метаданные опубликованы'] = df['meta_published'].apply(yn)
+    disp['Примечание'] = df['note']
 
-    cols = ['Поставщик', 'Обязательный', 'Соглашение подписано', 'Проект', 'Протокол подписан',
-            'Данные получены', 'Данные опубликованы', 'Метаданные получены', 'Метаданные опубликованы']
+    # Повторяющиеся значения гасим - в форме отчёта они объединены в одну ячейку
+    dup_sup = df.duplicated('supplier_id')
+    disp.loc[dup_sup, ['Поставщик', 'Соглашение']] = ""
+    dup_ds = df.duplicated(['supplier_id', 'dataset_name'])
+    disp.loc[dup_ds, ['Набор', 'Обязательный']] = ""
 
     calc_h = (len(disp) * 35) + 45
-    final_h = min(700, max(150, calc_h))
-    st.dataframe(disp[cols], width="stretch", hide_index=True, height=final_h)
+    st.dataframe(disp, width="stretch", hide_index=True, height=min(700, max(150, calc_h)))
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚀 Сгенерировать (Word)", type="primary", key="summary_gen_docx"):
         docx = _export_supplier_projects_summary_docx(df)
-        st.download_button("📥 Скачать файл", docx, f"supplier_projects_summary_{datetime.now().strftime('%d_%m')}.docx",
-                            key="summary_dl_docx")
+        st.download_button("📥 Скачать файл", docx,
+                           f"suppliers_summary_{datetime.now().strftime('%d_%m_%Y')}.docx",
+                           key="summary_dl_docx")
+
 
 def _write_summary_flag_cell(cell, value):
-    """Пишет в ячейку зелёный/красный кружок (или '—', если значение неприменимо)."""
+    """Пишет в ячейку зелёное «Да» / красное «Нет» (или '—', если неприменимо)."""
     cell.text = ""
     p = cell.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if value is None:
         p.add_run("—")
         return
-    run = p.add_run("●")
+    run = p.add_run("Да" if value else "Нет")
     run.font.color.rgb = _SUMMARY_GREEN if value else _SUMMARY_RED
-    run.font.size = Pt(14)
+
+
+def _merge_column_runs(table, col_idx, start_row, keys):
+    """Объединяет вертикально соседние ячейки колонки с одинаковым ключом.
+
+    keys - список ключей по строкам данных (той же длины, что и строки таблицы
+    начиная со start_row). Возвращать ничего не нужно - таблица меняется на месте.
+    """
+    run_start = 0
+    for i in range(1, len(keys) + 1):
+        if i == len(keys) or keys[i] != keys[run_start]:
+            if i - run_start > 1:
+                table.cell(start_row + run_start, col_idx).merge(
+                    table.cell(start_row + i - 1, col_idx))
+            run_start = i
+
 
 def _export_supplier_projects_summary_docx(df):
     doc = Document()
     style = doc.styles['Normal']
     style.font.name = 'Times New Roman'
-    style.font.size = Pt(10)
+    style.font.size = Pt(9)
 
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
@@ -1087,22 +1169,12 @@ def _export_supplier_projects_summary_docx(df):
 
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p_title.add_run(f"Сводная таблица по поставщикам и проектам на {datetime.now().strftime('%d.%m.%Y')}")
+    run = p_title.add_run("Сводный отчет о Поставщиках Национального геопортала")
     run.bold = True
 
-    p_legend = doc.add_paragraph()
-    p_legend.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r_g = p_legend.add_run("●"); r_g.font.color.rgb = _SUMMARY_GREEN
-    p_legend.add_run(" — Да      ")
-    r_r = p_legend.add_run("●"); r_r.font.color.rgb = _SUMMARY_RED
-    p_legend.add_run(" — Нет")
-
-    headers = ['Поставщик', 'Обязательный', 'Соглашение подписано', 'Проект', 'Протокол подписан',
-               'Данные получены', 'Данные опубликованы', 'Метаданные получены', 'Метаданные опубликованы']
-
-    table = doc.add_table(rows=1, cols=len(headers))
+    table = doc.add_table(rows=1, cols=len(_SUMMARY_HEADERS))
     table.style = 'Table Grid'
-    for i, h in enumerate(headers):
+    for i, h in enumerate(_SUMMARY_HEADERS):
         cell = table.rows[0].cells[i]
         cell.text = ""
         p = cell.paragraphs[0]
@@ -1110,27 +1182,29 @@ def _export_supplier_projects_summary_docx(df):
         hrun = p.add_run(h)
         hrun.bold = True
 
-    for sup_id, group in df.groupby('supplier_id', sort=False):
-        rows_in_group = list(group.iterrows())
-        first_row_idx = None
-        for j, (_, row) in enumerate(rows_in_group):
-            cells = table.add_row().cells
-            if j == 0:
-                cells[0].text = row['supplier_name']
-                _write_summary_flag_cell(cells[1], row['is_mandatory'])
-                _write_summary_flag_cell(cells[2], row['agreement_signed'])
-                first_row_idx = len(table.rows) - 1
-            cells[3].text = row['project_name']
-            _write_summary_flag_cell(cells[4], row['protocol_signed'])
-            _write_summary_flag_cell(cells[5], row['data_received'])
-            _write_summary_flag_cell(cells[6], row['data_published'])
-            _write_summary_flag_cell(cells[7], row['meta_received'])
-            _write_summary_flag_cell(cells[8], row['meta_published'])
-        if len(rows_in_group) > 1:
-            last_row_idx = len(table.rows) - 1
-            table.cell(first_row_idx, 0).merge(table.cell(last_row_idx, 0))
-            table.cell(first_row_idx, 1).merge(table.cell(last_row_idx, 1))
-            table.cell(first_row_idx, 2).merge(table.cell(last_row_idx, 2))
+    for n, (_, row) in enumerate(df.iterrows(), 1):
+        cells = table.add_row().cells
+        cells[0].text = str(n)
+        cells[1].text = row['supplier_name']
+        _write_summary_flag_cell(cells[2], row['agreement_signed'])
+        cells[3].text = row['dataset_name']
+        _write_summary_flag_cell(cells[4], row['dataset_mandatory'])
+        cells[5].text = row['info_label']
+        _write_summary_flag_cell(cells[6], row['protocol_signed'])
+        _write_summary_flag_cell(cells[7], row['data_received'])
+        _write_summary_flag_cell(cells[8], row['data_published'])
+        _write_summary_flag_cell(cells[9], row['meta_received'])
+        _write_summary_flag_cell(cells[10], row['meta_published'])
+        cells[11].text = row['note'] or ""
+
+    # Объединение ячеек: поставщик/соглашение - по поставщику,
+    # набор/обязательный - по набору внутри поставщика (как в форме отчёта)
+    sup_keys = df['supplier_id'].tolist()
+    ds_keys = list(zip(df['supplier_id'], df['dataset_name']))
+    for col in (1, 2):
+        _merge_column_runs(table, col, 1, sup_keys)
+    for col in (3, 4):
+        _merge_column_runs(table, col, 1, ds_keys)
 
     buffer = io.BytesIO()
     doc.save(buffer)

@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from config.cache import query_db, clear_cache
 from config.auth import log_action
 
-from ui.shared_components import render_survey_viewer
+from ui.shared_components import render_survey_viewer, render_project_documents
 
 # 🔤 Маппинг для отображения
 RU_LABELS = {
@@ -433,6 +433,10 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                         if sel and st.button("❌ Подтвердить удаление", width='stretch'):
                             _delete_item_logic(session, selected_sup_id, opts[sel])
         else: st.info("Режим просмотра")
+
+        if current_proj_id:
+            with st.container(border=True):
+                render_project_documents(current_proj_id, compact=True)
 
 def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, is_edit=False):
     """Оптимизированная форма создания и редактирования"""

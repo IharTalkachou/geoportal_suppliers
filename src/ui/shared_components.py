@@ -91,3 +91,61 @@ def render_survey_viewer(session, survey_id, is_readonly=True):
         if "survey_view_id" in st.session_state: st.session_state["survey_view_id"] = None
         if "an_survey_view_id" in st.session_state: st.session_state["an_survey_view_id"] = None
         st.rerun()'''
+
+def render_project_documents(project_id, compact=False):
+    """Все ссылки на документы проекта в одном месте (общий компонент).
+
+    Объединяет два источника:
+      - project_documents - соглашение и протоколы проекта;
+      - stage_documents   - файлы, приложенные к этапам обоих треков.
+    Вызывается из паспорта проекта и из карточки поставщика.
+    """
+    docs = query_db("""
+        SELECT doc_kind AS title,
+               COALESCE(doc_number, doc_kind) AS doc_name,
+               doc_url,
+               signed_date AS doc_date,
+               is_signed
+        FROM project_documents
+        WHERE project_id = :pid AND doc_url IS NOT NULL AND doc_url <> ''
+        ORDER BY CASE WHEN doc_kind = 'Соглашение' THEN 0 ELSE 1 END, sort_order NULLS LAST, doc_id
+    """, {"pid": project_id})
+
+    stage_docs = query_db("""
+        SELECT s.stage_name AS title,
+               sd.doc_name,
+               sd.doc_url,
+               ps.actual_end AS doc_date,
+               ps.iteration_count,
+               s.track_category
+        FROM stage_documents sd
+        JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
+        JOIN stages s ON ps.stage_id = s.stage_id
+        WHERE ps.project_id = :pid
+        ORDER BY s.track_category, s.stage_order, ps.iteration_count
+    """, {"pid": project_id})
+
+    if docs.empty and stage_docs.empty:
+        if not compact:
+            st.caption("📂 Документы по проекту пока не загружены.")
+        return
+
+    st.markdown("##### 📂 Документы проекта" if not compact else "**📂 Документы**")
+
+    def _link(url, name):
+        return (f'<a href="{url}" target="_blank" style="text-decoration:none;">📄 {name}</a>')
+
+    if not docs.empty:
+        for _, d in docs.iterrows():
+            mark = "✅" if d['is_signed'] else "⏳"
+            date_txt = f" от {d['doc_date'].strftime('%d.%m.%Y')}" if pd.notna(d['doc_date']) else ""
+            st.markdown(f"{mark} **{d['title']}**{date_txt} — {_link(d['doc_url'], d['doc_name'])}",
+                        unsafe_allow_html=True)
+
+    if not stage_docs.empty:
+        for track, group in stage_docs.groupby('track_category', sort=True):
+            st.caption(track)
+            for _, d in group.iterrows():
+                it = f" (ит. {int(d['iteration_count'])})" if pd.notna(d['iteration_count']) else ""
+                st.markdown(f"• {d['title']}{it} — {_link(d['doc_url'], d['doc_name'])}",
+                            unsafe_allow_html=True)

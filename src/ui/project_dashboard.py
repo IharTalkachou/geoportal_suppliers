@@ -4,6 +4,7 @@ from sqlalchemy import text
 from config.cache import query_db, clear_cache
 from ui.bureaucracy_tab import render_bureaucracy_tab
 from ui.technology_tab import render_technology_tab
+from ui.shared_components import render_project_documents
 from config.auth import log_action
 
 def render_project_dashboard(session, user_role="user"):
@@ -238,6 +239,9 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
             #    st.caption(f"Метаданные: {proj_data.get('meta_days', 10)} дн. ({proj_data.get('meta_method', '—')})")
             #    st.caption(f"Данные: {proj_data.get('data_days', 10)} дн. ({proj_data.get('data_method', '—')})")
 
+    with st.container(border=True):
+        render_project_documents(proj_id_int)
+
     if not is_readonly:
         c1, c2 = st.columns(2)
         with c1:
@@ -318,6 +322,68 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
                         session.rollback()
 
 
+def render_item_parts_manager(session, proj_id_int, items_df):
+    """Разбиение вида сведений на части (редкий сценарий).
+
+    Нужно, когда один вид сведений передаётся не одним протоколом, а несколькими
+    (напр. УИВП Минобороны). По умолчанию частей нет и всё работает как раньше,
+    поэтому блок свёрнут и не мешает обычной работе.
+    """
+    if items_df.empty:
+        return
+
+    parts_df = query_db("""
+        SELECT pip.part_id, pip.item_id, pip.part_name, pip.sort_order
+        FROM project_item_parts pip
+        JOIN project_items pi ON pip.item_id = pi.item_id
+        WHERE pi.project_id = :pid
+        ORDER BY pip.item_id, pip.sort_order NULLS LAST, pip.part_id
+    """, {"pid": proj_id_int})
+
+    total = len(parts_df)
+    label = f"✂️ Разбиение видов сведений на части ({total})" if total else "✂️ Разбиение видов сведений на части"
+    with st.expander(label, expanded=False):
+        st.caption("Нужно только если один вид сведений передаётся несколькими протоколами. "
+                   "Если частей нет — протокол покрывает вид сведений целиком.")
+
+        opts = {f"{r['dataset_name']} → {r['info_name']}": int(r['item_id']) for _, r in items_df.iterrows()}
+        sel = st.selectbox("Вид сведений:", list(opts.keys()), key="parts_item_sel")
+        item_id = opts[sel]
+
+        mine = parts_df[parts_df['item_id'] == item_id]
+        if mine.empty:
+            st.info("Частей нет — вид сведений передаётся целиком.")
+        else:
+            for _, p in mine.iterrows():
+                pc1, pc2 = st.columns([0.85, 0.15])
+                pc1.write(f"• {p['part_name']}")
+                if pc2.button("🗑", key=f"del_part_{p['part_id']}", help="Удалить часть"):
+                    try:
+                        session.execute(text("DELETE FROM project_item_parts WHERE part_id = :id"),
+                                        {"id": int(p['part_id'])})
+                        session.commit(); clear_cache(); st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка: {e}"); session.rollback()
+
+        new_part = st.text_input("Название новой части", key="parts_new_name")
+        if st.button("➕ Добавить часть", key="parts_add_btn"):
+            if not new_part.strip():
+                st.warning("Укажите название части")
+            else:
+                try:
+                    next_order = session.execute(text(
+                        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_item_parts WHERE item_id = :iid"
+                    ), {"iid": item_id}).scalar()
+                    session.execute(text("""
+                        INSERT INTO project_item_parts (item_id, part_name, sort_order)
+                        VALUES (:iid, :n, :o)
+                    """), {"iid": item_id, "n": new_part.strip(), "o": next_order})
+                    session.commit(); clear_cache()
+                    st.session_state.pop("parts_new_name", None)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка: {e}"); session.rollback()
+
 def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
     """Вынесенный состав проекта"""
     st.markdown("#### 📦 Состав проекта (Наборы → Виды)")
@@ -361,6 +427,8 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                     })
 
     if not is_readonly:
+        render_item_parts_manager(session, proj_id_int, items_df)
+
         with st.expander("➕ Добавить / ✏️ Редактировать элемент состава", expanded=False):
             item_options = ["(Добавить новый)"]
             item_ids_map = {}
