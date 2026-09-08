@@ -510,7 +510,12 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
         # 1. Загрузка существующих
         # Используем int() для ID, так как pandas может вернуть numpy.int64
         curr_ps_id = int(existing_data['stage_progress_id'])
-        docs = query_db("SELECT * FROM stage_documents WHERE project_stage_id = :id", {"id": curr_ps_id})
+        # Протоколы переговоров показываются в своём блоке выше - здесь только
+        # обычные вложения, иначе один документ дублировался бы в двух местах
+        docs = query_db("""
+            SELECT * FROM stage_documents
+            WHERE project_stage_id = :id AND COALESCE(is_nego_protocol, FALSE) = FALSE
+        """, {"id": curr_ps_id})
         
         for _, d in docs.iterrows():
             dc1, dc2 = st.columns([0.85, 0.15])
@@ -741,9 +746,23 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
                         unsafe_allow_html=True)
 
         # СТРОКА 4: Файлы
-        docs = query_db("SELECT doc_name, doc_url FROM stage_documents WHERE project_stage_id = :id", {"id": int(row['stage_progress_id'])})
+        docs = query_db("""
+            SELECT doc_name, doc_url, doc_date, COALESCE(is_nego_protocol, FALSE) AS is_nego
+            FROM stage_documents WHERE project_stage_id = :id
+            ORDER BY is_nego DESC, doc_date NULLS LAST, doc_id
+        """, {"id": int(row['stage_progress_id'])})
         if not docs.empty:
-            links = [f'<a href="{d["doc_url"]}" target="_blank" style="text-decoration:none; font-size:0.8rem;">📄 {d["doc_name"]}</a>' for _, d in docs.iterrows()]
+            links = []
+            for _, d in docs.iterrows():
+                # Протокол переговоров - веха этапа, показываем с датой и своей иконкой
+                icon = "📑" if d['is_nego'] else "📄"
+                dt = f" от {d['doc_date'].strftime('%d.%m.%Y')}" if pd.notna(d['doc_date']) else ""
+                label = f"{icon} {d['doc_name']}{dt}"
+                if d['doc_url']:
+                    links.append(f'<a href="{d["doc_url"]}" target="_blank" '
+                                 f'style="text-decoration:none; font-size:0.8rem;">{label}</a>')
+                else:
+                    links.append(f'<span style="font-size:0.8rem;">{label}</span>')
             st.markdown('<div style="margin-top:8px;">' + " ".join(links) + '</div>', unsafe_allow_html=True)
 
         # СТРОКА 5: Действия
