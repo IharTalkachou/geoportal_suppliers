@@ -207,13 +207,19 @@ def render_technology_tab(session, project_id, user_role="user"):
 
         # 3. Данные (Исправлена сортировка)
         df = query_db("""
-            SELECT ps.*, s.stage_name, ms.micro_status_name, u.display_name as responsible_name
+            SELECT ps.*, s.stage_name, ms.micro_status_name, u.display_name as responsible_name,
+                   -- Охват этапа одной строкой: этап затрагивает несколько видов
+                   -- сведений, но в таблице показывается одной строкой
+                   (SELECT string_agg(it.info_name, ', ' ORDER BY it.info_name)
+                      FROM jsonb_array_elements_text(ps.affected_item_ids) AS aid
+                      JOIN project_items pi2 ON pi2.item_id = aid::int
+                      JOIN info_types it ON pi2.info_id = it.info_id) AS affected_names
             FROM project_stages ps
             JOIN stages s ON ps.stage_id = s.stage_id
             JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
             LEFT JOIN users u ON ps.responsible_id = u.user_id
             WHERE ps.project_id = :pid AND s.track_category = '2. Технологический'
-            ORDER BY CASE WHEN ps.micro_status = 4 THEN 1 ELSE 0 END ASC, 
+            ORDER BY CASE WHEN ps.micro_status = 4 THEN 1 ELSE 0 END ASC,
                      COALESCE(ps.actual_end, ps.actual_start, ps.planned_start) DESC,
                      s.stage_order DESC
         """, {"pid": project_id})
@@ -224,6 +230,14 @@ def render_technology_tab(session, project_id, user_role="user"):
         for k in ["td_stage", "td_ms", "td_p_start", "td_p_end", "td_affected_ids", "td_multi_items", "td_resp", "td_a_start", "td_a_end"]:
             if k in st.session_state: del st.session_state[k]
         tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items)
+
+    view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица"],
+                         key=f"tech_view_{project_id}", horizontal=True,
+                         label_visibility="collapsed")
+    if view_mode == "📋 Таблица":
+        from ui.shared_components import render_stages_table
+        render_stages_table(df, extra_col=("Виды сведений", "affected_names"))
+        return
 
     # Канбан
     col_work, col_plan, col_done = st.columns(3)

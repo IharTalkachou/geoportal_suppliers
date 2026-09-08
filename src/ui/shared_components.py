@@ -216,3 +216,43 @@ def render_supplier_documents(supplier_id):
                     it = f" (ит. {int(d['iteration_count'])})" if pd.notna(d['iteration_count']) else ""
                     st.markdown(f"• {d['title']}{it} — {_link(d['doc_url'], d['doc_name'])}",
                                 unsafe_allow_html=True)
+
+def render_stages_table(df, extra_col=None):
+    """Табличный вид этапов (только для просмотра), общий для обоих треков.
+
+    Порядок строк тот же, что и в карточках: сначала незакрытые, внутри - по дате
+    от свежих к старым (сортировка приходит из SQL вызывающей вкладки).
+    extra_col - опциональная пара (заголовок, имя колонки в df) для трек-специфичных
+    данных: в технологическом треке это охват видов сведений.
+    """
+    if df.empty:
+        st.info("Этапы не заведены.")
+        return
+
+    def _d(v):
+        return v.strftime('%d.%m.%Y') if pd.notna(v) else "—"
+
+    rows = []
+    for _, r in df.iterrows():
+        row = {
+            "Этап": r['stage_name'],
+            "Ит.": int(r['iteration_count']) if pd.notna(r['iteration_count']) else None,
+            "Статус": r['micro_status_name'],
+            "Исполнитель": r['responsible_name'] or "Не назначен",
+        }
+        if extra_col:
+            header, col = extra_col
+            row[header] = r.get(col) or "—"
+        row.update({
+            "План. начало": _d(r['planned_start']),
+            "Дедлайн": _d(r['planned_end']),
+            "Факт. начало": _d(r['actual_start']),
+            "Факт. конец": _d(r['actual_end']),
+            "Комментарий": r['comments'] or "",
+        })
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    calc_h = (len(table) * 35) + 45
+    st.dataframe(table, width="stretch", hide_index=True,
+                 height=min(700, max(120, calc_h)))

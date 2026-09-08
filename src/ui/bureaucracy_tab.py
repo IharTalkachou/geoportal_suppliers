@@ -573,6 +573,14 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
 
     render_documents_block(session, project_id, is_agreement_project, is_readonly)
 
+    view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица"],
+                         key=f"buro_view_{project_id}", horizontal=True,
+                         label_visibility="collapsed")
+    if view_mode == "📋 Таблица":
+        from ui.shared_components import render_stages_table
+        render_stages_table(df)
+        return
+
     # Распределение
     work_df = df[df['micro_status'].isin([2, 3, 6])]
     plan_df = df[df['micro_status'].isin([1, 5])]

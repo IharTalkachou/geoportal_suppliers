@@ -12,17 +12,32 @@ def render_project_dashboard(session, user_role="user"):
     is_readonly = (user_role == "user")
 
     # 1. ОБРАБОТКА ВХОДЯЩИХ ФИЛЬТРОВ
-    suppliers = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
-    sup_map = dict(zip(suppliers["supplier_name"], suppliers["supplier_id"]))
-    inv_sup_map = {v: k for k, v in sup_map.items()}
-
     inc_sup_id = st.session_state.get("filter_supplier_id")
     inc_prj_id = st.session_state.get("filter_project_id")
+
+    # Переход из карточки поставщика может вести к поставщику вне ОНПД -
+    # снимаем фильтр, иначе он выпадет из списка и переход "потеряется"
+    if inc_sup_id:
+        st.session_state["only_mandatory_sup"] = False
+
+    only_mandatory = st.checkbox(
+        "⭐ Только поставщики ОНПД", key="only_mandatory_sup",
+        help="Показывать в списке ниже только поставщиков с признаком «Поставщик ОНПД»"
+    )
+
+    sup_sql = "SELECT supplier_id, supplier_name FROM suppliers"
+    if only_mandatory:
+        sup_sql += " WHERE is_mandatory = TRUE"
+    sup_sql += " ORDER BY supplier_name"
+    suppliers = query_db(sup_sql)
+
+    sup_map = dict(zip(suppliers["supplier_name"], suppliers["supplier_id"]))
+    inv_sup_map = {v: k for k, v in sup_map.items()}
 
     if inc_sup_id:
         st.session_state["dash_sup_filter"] = inv_sup_map.get(inc_sup_id, "Все")
         st.session_state["filter_supplier_id"] = None
-        
+
     if inc_prj_id:
         st.session_state["selected_project_id"] = int(inc_prj_id)
         st.session_state["filter_project_id"] = None
@@ -36,9 +51,16 @@ def render_project_dashboard(session, user_role="user"):
         st.session_state["proj_list_ver"] += 1
         st.session_state["dash_edit_mode"] = False
 
+    # Ранее выбранный поставщик мог отсеяться чекбоксом - тогда сбрасываем на "Все",
+    # иначе selectbox упадёт на несуществующем в options значении
+    if st.session_state.get("dash_sup_filter") not in (None, "Все") and \
+       st.session_state.get("dash_sup_filter") not in sup_map:
+        st.session_state["dash_sup_filter"] = "Все"
+        st.session_state["selected_project_id"] = None
+
     selected_sup = st.selectbox(
-        "🏢 Фильтр по поставщику", 
-        ["Все"] + list(sup_map.keys()), 
+        "🏢 Фильтр по поставщику",
+        ["Все"] + list(sup_map.keys()),
         key="dash_sup_filter",
         on_change=_on_supplier_change
     )
