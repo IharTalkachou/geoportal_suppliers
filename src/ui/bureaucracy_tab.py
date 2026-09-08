@@ -370,7 +370,6 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     # Этап "Внесение изменений в протокол" - работа над УЖЕ подписанным
     # документом; при закрытии он считается перезаключённым в новой редакции
     is_changes_stage = cur_code == 'CHANGES_PROTOCOL'
-    link_col = 'signed_stage_id' if is_signing_stage else 'drafting_stage_id'
 
     if is_signing_stage or is_drafting_stage or is_changes_stage:
         st.divider()
@@ -402,9 +401,14 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
 
         cur_ids = []
         if is_edit:
+            if is_signing_stage:
+                cur_sql = "SELECT doc_id FROM project_documents WHERE signed_stage_id = :sid"
+            else:
+                # Работа над документом - связь многие-ко-многим: один документ
+                # проходит несколько итераций этапа, каждая со своей строкой
+                cur_sql = "SELECT doc_id FROM project_document_stages WHERE stage_progress_id = :sid"
             cur_ids = [int(x) for x in query_db(
-                f"SELECT doc_id FROM project_documents WHERE {link_col} = :sid",
-                {"sid": int(existing_data['stage_progress_id'])}
+                cur_sql, {"sid": int(existing_data['stage_progress_id'])}
             )['doc_id'].tolist()]
 
         if pdocs.empty:
@@ -635,33 +639,30 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                         WHERE doc_id = :did
                     """), {"sid": int(ps_id), "done": is_done,
                            "ae": st.session_state.d_a_end, "did": did})
-            elif is_drafting_stage:
-                # Работа над документом до подписания - статус подписи не трогаем
+            elif is_drafting_stage or is_changes_stage:
+                # Работа над документом: связь многие-ко-многим, поэтому правим
+                # только строки ЭТОЙ итерации этапа - привязки к другим итерациям
+                # того же документа остаются нетронутыми
                 session.execute(text("""
-                    UPDATE project_documents SET drafting_stage_id = NULL
-                    WHERE drafting_stage_id = :sid
+                    DELETE FROM project_document_stages WHERE stage_progress_id = :sid
                 """), {"sid": int(ps_id)})
                 for did in signed_doc_ids:
                     session.execute(text("""
-                        UPDATE project_documents SET drafting_stage_id = :sid WHERE doc_id = :did
-                    """), {"sid": int(ps_id), "did": did})
-            elif is_changes_stage:
-                # Изменения вносятся в уже подписанный документ: при закрытии
-                # этапа он считается перезаключённым - обновляем дату подписания.
-                # Скан заменяется вручную ниже (новая редакция - новый файл).
-                is_done = micro_map[st.session_state.d_ms] == 4
-                session.execute(text("""
-                    UPDATE project_documents SET drafting_stage_id = NULL
-                    WHERE drafting_stage_id = :sid
-                """), {"sid": int(ps_id)})
-                for did in signed_doc_ids:
-                    session.execute(text("""
-                        UPDATE project_documents
-                        SET drafting_stage_id = :sid,
-                            signed_date = CASE WHEN :done THEN COALESCE(:ae, signed_date) ELSE signed_date END
-                        WHERE doc_id = :did
-                    """), {"sid": int(ps_id), "done": is_done,
-                           "ae": st.session_state.d_a_end, "did": did})
+                        INSERT INTO project_document_stages (doc_id, stage_progress_id)
+                        VALUES (:did, :sid)
+                        ON CONFLICT (doc_id, stage_progress_id) DO NOTHING
+                    """), {"did": did, "sid": int(ps_id)})
+
+                # Внесение изменений в подписанный документ: при закрытии этапа
+                # он считается перезаключённым - обновляем дату подписания.
+                # Скан заменяется вручную (новая редакция - новый файл).
+                if is_changes_stage and micro_map[st.session_state.d_ms] == 4:
+                    for did in signed_doc_ids:
+                        session.execute(text("""
+                            UPDATE project_documents
+                            SET signed_date = COALESCE(:ae, signed_date)
+                            WHERE doc_id = :did
+                        """), {"ae": st.session_state.d_a_end, "did": did})
 
             session.commit(); _resync_buro_iterations(session, project_id); session.commit()
             from utils.project_utils import sync_project_status
@@ -808,12 +809,14 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
 
         # СТРОКА 3а: Документы, подписанные на этом этапе (со ссылкой на скан)
         signed = query_db("""
-            SELECT doc_kind, doc_number, doc_url,
-                   (signed_stage_id = :id) AS is_signed_here
-            FROM project_documents
-            WHERE signed_stage_id = :id OR drafting_stage_id = :id
-            ORDER BY CASE WHEN doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
-                     sort_order NULLS LAST, doc_id
+            SELECT pd.doc_kind, pd.doc_number, pd.doc_url,
+                   (pd.signed_stage_id = :id) AS is_signed_here
+            FROM project_documents pd
+            WHERE pd.signed_stage_id = :id
+               OR EXISTS (SELECT 1 FROM project_document_stages pds
+                           WHERE pds.doc_id = pd.doc_id AND pds.stage_progress_id = :id)
+            ORDER BY CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                     pd.sort_order NULLS LAST, pd.doc_id
         """, {"id": int(row['stage_progress_id'])})
         if not signed.empty:
             parts = []

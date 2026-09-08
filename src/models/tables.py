@@ -233,7 +233,6 @@ class ProjectDocument(Base):
         CheckConstraint("doc_kind = ANY (ARRAY['Соглашение'::text, 'Протокол'::text])", name='project_documents_kind_check'),
         Index('idx_pdocs_project', 'project_id'),
         Index('idx_pdocs_signed_stage', 'signed_stage_id'),
-        Index('idx_pdocs_drafting_stage', 'drafting_stage_id'),
         # В проекте допустимо не более одного соглашения; протоколов - сколько угодно
         Index('idx_pdocs_one_agreement', 'project_id', unique=True,
               postgresql_where=text("doc_kind = 'Соглашение'")),
@@ -252,8 +251,27 @@ class ProjectDocument(Base):
     created_at = Column(DateTime, server_default=text("now()"))
     signed_stage_id = Column(Integer, ForeignKey('project_stages.stage_progress_id', ondelete='SET NULL'),
                              comment='Этап "Документ подписан", на котором подписан этот документ; на одном этапе их может быть несколько')
-    drafting_stage_id = Column(Integer, ForeignKey('project_stages.stage_progress_id', ondelete='SET NULL'),
-                               comment='Этап "Согласование протокола", в рамках которого ведётся работа над этим документом до его подписания')
+
+class ProjectDocumentStage(Base):
+    """Работа над документом на этапе (согласование, внесение изменений).
+
+    Связь многие-ко-многим, а НЕ колонка в project_documents: работа над одним
+    и тем же протоколом ведётся итеративно, и каждая итерация этапа - отдельная
+    строка project_stages. При связи один-к-одному указание документа в новой
+    итерации стирало бы его из предыдущих.
+    Факт подписания - другое дело, он единичный: см. project_documents.signed_stage_id.
+    """
+    __tablename__ = 'project_document_stages'
+    __table_args__ = (
+        UniqueConstraint('doc_id', 'stage_progress_id', name='unique_document_stage'),
+        Index('idx_pdoc_stages_doc', 'doc_id'),
+        Index('idx_pdoc_stages_stage', 'stage_progress_id'),
+        {'comment': 'Этапы работы над документом проекта (согласование, внесение изменений)'},
+    )
+
+    link_id = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id = Column(Integer, ForeignKey('project_documents.doc_id', ondelete='CASCADE'), nullable=False)
+    stage_progress_id = Column(Integer, ForeignKey('project_stages.stage_progress_id', ondelete='CASCADE'), nullable=False)
 
 class ProjectItemPart(Base):
     """Часть вида сведений внутри проекта (редкий сценарий).
