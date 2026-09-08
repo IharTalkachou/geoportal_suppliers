@@ -20,9 +20,15 @@ def render_project_dashboard(session, user_role="user"):
     if inc_sup_id:
         st.session_state["only_mandatory_sup"] = False
 
+    def _on_mandatory_toggle():
+        # Открытый проект мог принадлежать отсеянному поставщику
+        st.session_state["selected_project_id"] = None
+        st.session_state["proj_list_ver"] = st.session_state.get("proj_list_ver", 0) + 1
+
     only_mandatory = st.checkbox(
         "⭐ Только поставщики ОНПД", key="only_mandatory_sup",
-        help="Показывать в списке ниже только поставщиков с признаком «Поставщик ОНПД»"
+        on_change=_on_mandatory_toggle,
+        help="Показывать только поставщиков с признаком «Поставщик ОНПД» и их проекты"
     )
 
     sup_sql = "SELECT supplier_id, supplier_name FROM suppliers"
@@ -67,9 +73,17 @@ def render_project_dashboard(session, user_role="user"):
     
     current_ver = st.session_state["proj_list_ver"]
     if selected_sup == "Все":
-        projects = query_db(f"SELECT project_id, project_name FROM projects ORDER BY project_name /* v{current_ver} */")
+        # При включённом чекбоксе "Все" означает "все поставщики ОНПД",
+        # поэтому список проектов сужается до проектов этих поставщиков
+        mand_where = """
+            WHERE EXISTS (SELECT 1 FROM suppliers s
+                           WHERE s.supplier_id = p.supplier_id AND s.is_mandatory = TRUE)
+        """ if only_mandatory else ""
+        projects = query_db(
+            f"SELECT p.project_id, p.project_name FROM projects p {mand_where} "
+            f"ORDER BY p.project_name /* v{current_ver} */")
     else:
-        projects = query_db(f"SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name /* v{current_ver} */", 
+        projects = query_db(f"SELECT project_id, project_name FROM projects WHERE supplier_id = :sid ORDER BY project_name /* v{current_ver} */",
                             {"sid": sup_map[selected_sup]})
 
     proj_map = {int(r["project_id"]): r["project_name"] for _, r in projects.iterrows()}
@@ -170,11 +184,16 @@ def render_project_dashboard(session, user_role="user"):
     proj_data = proj_query_res.iloc[0]
 
     # 5. ПОД-НАВИГАЦИЯ
+    nav_key = f"project_nav_{proj_id_int}"
+    nav_options = ["📄 Паспорт", "📦 Состав", "📜 Согласование документов",
+                   "📄 Документы", "⚙️ Техническая проработка"]
+    # default= игнорируется, если ключ уже в session_state - ставим значение сами
+    if nav_key not in st.session_state:
+        st.session_state[nav_key] = "📄 Паспорт"
     sub_nav = st.segmented_control(
         "Разделы проекта",
-        options=["📄 Паспорт", "📦 Состав", "📜 Согласование документов", "⚙️ Техническая проработка"],
-        default="📄 Паспорт",
-        key=f"project_nav_{proj_id_int}",
+        options=nav_options,
+        key=nav_key,
         label_visibility="collapsed"
     )
     st.markdown("---")
@@ -185,6 +204,8 @@ def render_project_dashboard(session, user_role="user"):
         render_composition_subtab(session, proj_id_int, is_readonly, proj_data)
     elif sub_nav == "📜 Согласование документов":
         render_bureaucracy_tab(session, proj_id_int, user_role=user_role)
+    elif sub_nav == "📄 Документы":
+        render_documents_subtab(session, proj_id_int, is_readonly, proj_data)
     elif sub_nav == "⚙️ Техническая проработка":
         render_technology_tab(session, proj_id_int, user_role=user_role)
 
@@ -343,6 +364,16 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
                         st.error(f"Ошибка сохранения: {e}")
                         session.rollback()
 
+
+def render_documents_subtab(session, proj_id_int, is_readonly, proj_data):
+    """Документы проекта отдельным разделом.
+
+    Вынесены из вкладки этапов: при 4+ документах блок сильно перекрывал
+    просмотр самих этапов.
+    """
+    from ui.bureaucracy_tab import render_documents_block
+    render_documents_block(session, proj_id_int,
+                           bool(proj_data.get('is_agreement_project')), is_readonly)
 
 def render_item_parts_manager(session, proj_id_int, items_df):
     """Разбиение вида сведений на части (редкий сценарий).

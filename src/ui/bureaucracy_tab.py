@@ -96,6 +96,15 @@ def build_coverage_options(project_id):
             opts[base] = (int(r['item_id']), None)
     return opts
 
+def doc_title(kind, number):
+    """Подпись документа одной строкой: «Протокол 1», «Соглашение».
+
+    Единый формат для карточки документа, карточки этапа и видов сведений -
+    чтобы название везде выглядело одинаково.
+    """
+    num = (str(number).strip() if number is not None and str(number).strip() else "")
+    return f"{kind} {num}".strip()
+
 def custom_badge(text, bg_color="#E0E0E0", text_color="#333", bold=True):
     fw = "700" if bold else "500"
     return (f'<span style="background-color:{bg_color};color:{text_color};padding:2px 10px;'
@@ -221,6 +230,7 @@ def document_mgmt_dialog(session, project_id, allow_agreement, existing_data=Non
             from utils.project_utils import sync_project_status
             sync_project_status(session, project_id)
             clear_cache()
+            clear_doc_form_state()
             st.session_state.buro_toast = "✅ Документ сохранён"
             st.rerun()
         except Exception as e:
@@ -237,6 +247,7 @@ def confirm_delete_document_dialog(session, doc_id, project_id):
             from utils.project_utils import sync_project_status
             sync_project_status(session, project_id)
             clear_cache()
+            clear_doc_form_state()
             st.rerun()
         except Exception as e:
             st.error(f"Ошибка: {e}")
@@ -275,10 +286,7 @@ def render_documents_block(session, project_id, is_agreement_project, is_readonl
                     badge = custom_badge("В работе", "#F39C12", "white")
                 st.markdown(badge, unsafe_allow_html=True)
 
-                title = doc['doc_number'] or doc['doc_kind']
-                st.markdown(f"**{doc['doc_kind']}**")
-                if doc['doc_number']:
-                    st.caption(title)
+                st.markdown(f"**{doc_title(doc['doc_kind'], doc['doc_number'])}**")
 
                 mine = cov_df[cov_df['doc_id'] == doc['doc_id']]
                 if mine.empty:
@@ -373,7 +381,7 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
             doc_opts = {}
             for _, d in pdocs.iterrows():
                 mark = "✅" if d['is_signed'] else "⏳"
-                label = f"{mark} {d['doc_kind']}" + (f" — {d['doc_number']}" if d['doc_number'] else "")
+                label = f"{mark} {doc_title(d['doc_kind'], d['doc_number'])}"
                 doc_opts[label] = int(d['doc_id'])
             st.multiselect(
                 "Какие документы подписаны на этом этапе",
@@ -417,6 +425,7 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                         session.commit(); clear_cache()
                         for k in ["d_inline_kind", "d_inline_num", "d_inline_url"]:
                             st.session_state.pop(k, None)
+                        clear_doc_form_state()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Ошибка: {e}"); session.rollback()
@@ -571,8 +580,6 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
             clear_stage_form_state()
             stage_mgmt_dialog(session, project_id, stage_map, micro_map)
 
-    render_documents_block(session, project_id, is_agreement_project, is_readonly)
-
     view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица"],
                          key=f"buro_view_{project_id}", horizontal=True,
                          label_visibility="collapsed")
@@ -655,12 +662,32 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
         b_resp = custom_badge(row['responsible_name'] or "Не назначен", "#FEF9E7", "#9A7D0A")
         st.markdown(f"<div>{b_stage}{b_resp}</div>", unsafe_allow_html=True)
 
+        # СТРОКА 3а: Документы, подписанные на этом этапе (со ссылкой на скан)
+        signed = query_db("""
+            SELECT doc_kind, doc_number, doc_url
+            FROM project_documents
+            WHERE signed_stage_id = :id
+            ORDER BY CASE WHEN doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                     sort_order NULLS LAST, doc_id
+        """, {"id": int(row['stage_progress_id'])})
+        if not signed.empty:
+            parts = []
+            for _, d in signed.iterrows():
+                name = doc_title(d['doc_kind'], d['doc_number'])
+                if d['doc_url']:
+                    parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
+                                 f'style="text-decoration:none;font-size:0.8rem;">📑 {name}</a>')
+                else:
+                    parts.append(f'<span style="font-size:0.8rem;">📑 {name}</span>')
+            st.markdown('<div style="margin-top:8px;">' + " · ".join(parts) + '</div>',
+                        unsafe_allow_html=True)
+
         # СТРОКА 4: Файлы
         docs = query_db("SELECT doc_name, doc_url FROM stage_documents WHERE project_stage_id = :id", {"id": int(row['stage_progress_id'])})
         if not docs.empty:
             links = [f'<a href="{d["doc_url"]}" target="_blank" style="text-decoration:none; font-size:0.8rem;">📄 {d["doc_name"]}</a>' for _, d in docs.iterrows()]
             st.markdown('<div style="margin-top:8px;">' + " ".join(links) + '</div>', unsafe_allow_html=True)
-        
+
         # СТРОКА 5: Действия
         if not is_readonly:
             st.write("")

@@ -315,6 +315,26 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                 WHERE ir.project_id = :pid
             """, {"pid": current_proj_id})
 
+            # Документы, покрывающие вид сведений: либо явным охватом
+            # (project_document_items), либо неявно - документ с пустым охватом
+            # покрывает весь проект, т.е. все его наборы
+            docs_by_item = query_db("""
+                SELECT pi.item_id, pd.doc_kind, pd.doc_number, pd.doc_url,
+                       pd.is_signed, pd.signed_date
+                FROM project_items pi
+                JOIN project_documents pd ON pd.project_id = pi.project_id
+                WHERE pi.project_id = :pid
+                  AND (
+                    EXISTS (SELECT 1 FROM project_document_items pdi
+                             WHERE pdi.doc_id = pd.doc_id AND pdi.item_id = pi.item_id)
+                    OR NOT EXISTS (SELECT 1 FROM project_document_items pdi
+                                    WHERE pdi.doc_id = pd.doc_id)
+                  )
+                ORDER BY pi.item_id,
+                         CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                         pd.sort_order NULLS LAST, pd.doc_id
+            """, {"pid": current_proj_id})
+
             if items_df.empty: st.info("В проекте нет наборов")
             else:
                 for _, row in items_df.iterrows():
@@ -322,6 +342,22 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                         st.markdown(f"**{row['dataset_name']}**")
                         st.markdown(f"_{row['info_name']}_")
                         st.caption(f"⚖️ {row['provision_right']}")
+
+                        item_docs = docs_by_item[docs_by_item['item_id'] == row['item_id']] \
+                            if not docs_by_item.empty else docs_by_item
+                        if not item_docs.empty:
+                            parts = []
+                            for _, d in item_docs.iterrows():
+                                mark = "✅" if d['is_signed'] else "⏳"
+                                name = f"{d['doc_kind']} {str(d['doc_number']).strip()}".strip() \
+                                    if pd.notna(d['doc_number']) and str(d['doc_number']).strip() else d['doc_kind']
+                                if d['doc_url']:
+                                    parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
+                                                 f'style="text-decoration:none;font-size:0.8rem;">{mark} {name}</a>')
+                                else:
+                                    parts.append(f'<span style="font-size:0.8rem;">{mark} {name}</span>')
+                            st.markdown('<div style="margin:4px 0;">' + " · ".join(parts) + '</div>',
+                                        unsafe_allow_html=True)
 
                         item_reqs = incl_df[incl_df["info_id"] == row["info_id"]]
                         if not item_reqs.empty:
