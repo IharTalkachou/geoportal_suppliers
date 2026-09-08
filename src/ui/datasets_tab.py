@@ -150,6 +150,27 @@ def render_info_types_manager(session, is_readonly):
         ORDER BY it.info_name
     """, {"did": sel_ds_id})
 
+    # Документы (соглашения/протоколы), покрывающие вид сведений у конкретного
+    # поставщика: либо явным охватом project_document_items, либо неявно -
+    # документ с пустым охватом покрывает весь проект, т.е. все его наборы
+    docs_df = query_db("""
+        SELECT DISTINCT pi.info_id, p.supplier_id,
+               pd.doc_id, pd.doc_kind, pd.doc_number, pd.doc_url, pd.is_signed
+        FROM project_items pi
+        JOIN projects p ON pi.project_id = p.project_id
+        JOIN project_documents pd ON pd.project_id = pi.project_id
+        JOIN info_types it ON pi.info_id = it.info_id
+        WHERE it.dataset_id = :did
+          AND (
+            EXISTS (SELECT 1 FROM project_document_items pdi
+                     WHERE pdi.doc_id = pd.doc_id AND pdi.item_id = pi.item_id)
+            OR NOT EXISTS (SELECT 1 FROM project_document_items pdi
+                            WHERE pdi.doc_id = pd.doc_id)
+          )
+        ORDER BY pi.info_id, p.supplier_id,
+                 CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END, pd.doc_id
+    """, {"did": sel_ds_id})
+
     if info_df.empty:
         st.info("В этом наборе еще нет видов сведений.")
     else:
@@ -185,8 +206,27 @@ def render_info_types_manager(session, is_readonly):
                     valid_sups = group[group['supplier_id'].notna()]
                     if not valid_sups.empty:
                         for _, s_row in valid_sups.iterrows():
+                            # Документы этого поставщика, покрывающие данный вид сведений
+                            if not docs_df.empty:
+                                sup_docs = docs_df[
+                                    (docs_df['info_id'] == s_row['info_id']) &
+                                    (docs_df['supplier_id'] == s_row['supplier_id'])
+                                ]
+                                if not sup_docs.empty:
+                                    parts = []
+                                    for _, d in sup_docs.iterrows():
+                                        mark = "✅" if d['is_signed'] else "⏳"
+                                        num = str(d['doc_number']).strip() if pd.notna(d['doc_number']) else ""
+                                        name = f"{d['doc_kind']} {num}".strip()
+                                        if d['doc_url']:
+                                            parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
+                                                         f'style="text-decoration:none;font-size:0.75rem;">{mark} {name}</a>')
+                                        else:
+                                            parts.append(f'<span style="font-size:0.75rem;">{mark} {name}</span>')
+                                    st.markdown('<div style="margin:2px 0 4px 0;">' + " · ".join(parts) + '</div>',
+                                                unsafe_allow_html=True)
                             st.button(
-                                f"🏢 {s_row['supplier_name']}", 
+                                f"🏢 {s_row['supplier_name']}",
                                 key=f"btn_nav_{idx}_{s_row['supplier_id']}",
                                 on_click=go_to_sup_callback,
                                 args=(int(s_row['supplier_id']),),

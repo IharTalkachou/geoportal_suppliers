@@ -460,10 +460,13 @@ class StageDocument(Base):
     project_stage_id = Column(Integer, ForeignKey('project_stages.stage_progress_id', ondelete='CASCADE'))
     item_stage_id = Column(Integer, ForeignKey('item_stages_old.stage_progress_id', ondelete='CASCADE'))
     doc_name = Column(Text, nullable=False)
-    doc_url = Column(Text, nullable=False)
+    doc_url = Column(Text)
     created_at = Column(DateTime, server_default=text("now()"))
     provision_history_id = Column(Integer, ForeignKey('provision_request_history.history_id', ondelete='CASCADE'))
     inclusion_history_id = Column(Integer, ForeignKey('inclusion_request_history.history_id', ondelete='CASCADE'))
+    doc_date = Column(Date, comment='Дата документа - напр. дата протокола переговоров, приложенного к этапу')
+    is_nego_protocol = Column(Boolean, server_default=text("false"),
+                              comment='Признак протокола переговоров (веха этапа "Переговоры"), а не обычного вложения')
 
 class OverdueLog(Base):
     __tablename__ = 'overdue_log'

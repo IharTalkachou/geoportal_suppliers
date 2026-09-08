@@ -447,6 +447,64 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                             st.error(f"Ошибка: {e}"); session.rollback()
 
 
+    # Протокол переговоров - веха этапа "Переговоры": дата + скан.
+    # Это ДРУГАЯ сущность, нежели протокол передачи данных: он не покрывает
+    # виды сведений и не участвует в расчёте прогресса, поэтому живёт
+    # в stage_documents, а не в project_documents.
+    is_nego_stage = stage_map.get(st.session_state.d_stage, {}).get("code") == 'NEGOTIATIONS'
+    if is_nego_stage:
+        st.divider()
+        if not is_edit:
+            st.caption("📑 Протокол переговоров можно приложить после сохранения этапа.")
+        else:
+            nego_ps_id = int(existing_data['stage_progress_id'])
+            nego_docs = query_db("""
+                SELECT doc_id, doc_name, doc_url, doc_date
+                FROM stage_documents
+                WHERE project_stage_id = :id AND is_nego_protocol
+                ORDER BY doc_date NULLS LAST, doc_id
+            """, {"id": nego_ps_id})
+
+            has_proto = st.checkbox("📑 Есть протокол переговоров", key="d_has_proto",
+                                    value=not nego_docs.empty)
+            if has_proto:
+                for _, d in nego_docs.iterrows():
+                    pc1, pc2 = st.columns([0.85, 0.15])
+                    dt = f" от {d['doc_date'].strftime('%d.%m.%Y')}" if pd.notna(d['doc_date']) else ""
+                    if d['doc_url']:
+                        pc1.markdown(f'<a href="{d["doc_url"]}" target="_blank" '
+                                     f'style="text-decoration:none;">📑 {d["doc_name"]}{dt}</a>',
+                                     unsafe_allow_html=True)
+                    else:
+                        pc1.caption(f"📑 {d['doc_name']}{dt} (без скана)")
+                    if pc2.button("🗑", key=f"del_nego_{d['doc_id']}", help="Удалить протокол"):
+                        session.execute(text("DELETE FROM stage_documents WHERE doc_id = :id"),
+                                        {"id": int(d['doc_id'])})
+                        session.commit(); clear_cache(); st.rerun()
+
+                with st.popover("➕ Добавить протокол переговоров", width='stretch'):
+                    np1, np2 = st.columns(2)
+                    np_name = np1.text_input("Номер / наименование", key="d_nego_name")
+                    np_date = np2.date_input("Дата протокола", key="d_nego_date", value=None)
+                    np_url = st.text_input("🔗 Ссылка на скан", key="d_nego_url")
+                    if st.button("Сохранить протокол", key="d_nego_save"):
+                        if not np_name.strip():
+                            st.warning("Укажите номер или наименование протокола")
+                        else:
+                            try:
+                                session.execute(text("""
+                                    INSERT INTO stage_documents
+                                        (project_stage_id, doc_name, doc_url, doc_date, is_nego_protocol)
+                                    VALUES (:id, :n, :u, :d, TRUE)
+                                """), {"id": nego_ps_id, "n": np_name.strip(),
+                                       "u": np_url.strip() or None, "d": np_date})
+                                session.commit(); clear_cache()
+                                for k in ["d_nego_name", "d_nego_date", "d_nego_url"]:
+                                    st.session_state.pop(k, None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Ошибка: {e}"); session.rollback()
+
     if is_edit:
         st.caption("📂 Документы")
         # 1. Загрузка существующих
