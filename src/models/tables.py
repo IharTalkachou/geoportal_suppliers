@@ -214,12 +214,10 @@ class ProjectStage(Base):
     document_url = Column(Text)
     responsible_id = Column(Integer, ForeignKey('users.user_id'), comment='Ответственный сотрудник за конкретный документарный этап')
     affected_item_ids = Column(JSONB, server_default=text("'[]'::jsonb"))
-    document_id = Column(Integer, ForeignKey('project_documents.doc_id', ondelete='SET NULL'), comment='Документ проекта (соглашение/протокол), к подписанию которого относится этап')
 
     __table_args__ = (
         Index('idx_pstages_project', 'project_id'),
         Index('idx_pstages_stage', 'stage_id'),
-        Index('idx_pstages_document', 'document_id'),
     )
 
 class ProjectDocument(Base):
@@ -234,6 +232,7 @@ class ProjectDocument(Base):
     __table_args__ = (
         CheckConstraint("doc_kind = ANY (ARRAY['Соглашение'::text, 'Протокол'::text])", name='project_documents_kind_check'),
         Index('idx_pdocs_project', 'project_id'),
+        Index('idx_pdocs_signed_stage', 'signed_stage_id'),
         # В проекте допустимо не более одного соглашения; протоколов - сколько угодно
         Index('idx_pdocs_one_agreement', 'project_id', unique=True,
               postgresql_where=text("doc_kind = 'Соглашение'")),
@@ -250,6 +249,8 @@ class ProjectDocument(Base):
     notes = Column(Text)
     sort_order = Column(Integer)
     created_at = Column(DateTime, server_default=text("now()"))
+    signed_stage_id = Column(Integer, ForeignKey('project_stages.stage_progress_id', ondelete='SET NULL'),
+                             comment='Этап "Документ подписан", на котором подписан этот документ; на одном этапе их может быть несколько')
 
 class ProjectItemPart(Base):
     """Часть вида сведений внутри проекта (редкий сценарий).

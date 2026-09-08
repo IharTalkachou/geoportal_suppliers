@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from config.cache import query_db, clear_cache
 from config.auth import log_action
 
-from ui.shared_components import render_survey_viewer, render_project_documents
+from ui.shared_components import render_survey_viewer, render_project_documents, render_supplier_documents
 
 # 🔤 Маппинг для отображения
 RU_LABELS = {
@@ -116,6 +116,9 @@ def render_supplier_card(session, selected_sup_id, is_readonly):
     if st.session_state["sup_edit_mode"]:
         with st.expander("📝 Форма редактирования", expanded=True):
             render_supplier_form(session, sup_data)
+
+    st.divider()
+    render_supplier_documents(selected_sup_id)
 
 def render_supplier_form(session, existing_data=None):
     is_editing = existing_data is not None

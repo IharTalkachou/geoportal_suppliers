@@ -149,3 +149,70 @@ def render_project_documents(project_id, compact=False):
                 it = f" (ит. {int(d['iteration_count'])})" if pd.notna(d['iteration_count']) else ""
                 st.markdown(f"• {d['title']}{it} — {_link(d['doc_url'], d['doc_name'])}",
                             unsafe_allow_html=True)
+
+def render_supplier_documents(supplier_id):
+    """Все документы поставщика по всем его проектам (общий компонент).
+
+    Тот же принцип, что и render_project_documents, но срез по поставщику:
+    соглашение и протоколы из project_documents плюс файлы этапов из
+    stage_documents, сгруппированные по проектам.
+    """
+    docs = query_db("""
+        SELECT p.project_name,
+               pd.doc_kind AS title,
+               COALESCE(pd.doc_number, pd.doc_kind) AS doc_name,
+               pd.doc_url,
+               pd.signed_date AS doc_date,
+               pd.is_signed
+        FROM project_documents pd
+        JOIN projects p ON pd.project_id = p.project_id
+        WHERE p.supplier_id = :sid AND pd.doc_url IS NOT NULL AND pd.doc_url <> ''
+        ORDER BY p.project_name,
+                 CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                 pd.sort_order NULLS LAST, pd.doc_id
+    """, {"sid": supplier_id})
+
+    stage_docs = query_db("""
+        SELECT p.project_name,
+               s.stage_name AS title,
+               sd.doc_name,
+               sd.doc_url,
+               ps.iteration_count,
+               s.track_category
+        FROM stage_documents sd
+        JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
+        JOIN projects p ON ps.project_id = p.project_id
+        JOIN stages s ON ps.stage_id = s.stage_id
+        WHERE p.supplier_id = :sid
+        ORDER BY p.project_name, s.track_category, s.stage_order, ps.iteration_count
+    """, {"sid": supplier_id})
+
+    st.markdown("##### 📂 Документы поставщика")
+    if docs.empty and stage_docs.empty:
+        st.caption("Документы по проектам поставщика пока не загружены.")
+        return
+
+    def _link(url, name):
+        return f'<a href="{url}" target="_blank" style="text-decoration:none;">📄 {name}</a>'
+
+    # Проекты в порядке появления; внутри - сначала соглашения/протоколы, затем файлы этапов
+    projects = list(dict.fromkeys(
+        docs['project_name'].tolist() + stage_docs['project_name'].tolist()
+    ))
+
+    for proj in projects:
+        with st.expander(f"📁 {proj}", expanded=len(projects) == 1):
+            mine = docs[docs['project_name'] == proj] if not docs.empty else docs
+            for _, d in mine.iterrows():
+                mark = "✅" if d['is_signed'] else "⏳"
+                date_txt = f" от {d['doc_date'].strftime('%d.%m.%Y')}" if pd.notna(d['doc_date']) else ""
+                st.markdown(f"{mark} **{d['title']}**{date_txt} — {_link(d['doc_url'], d['doc_name'])}",
+                            unsafe_allow_html=True)
+
+            mine_st = stage_docs[stage_docs['project_name'] == proj] if not stage_docs.empty else stage_docs
+            for track, group in mine_st.groupby('track_category', sort=True):
+                st.caption(track)
+                for _, d in group.iterrows():
+                    it = f" (ит. {int(d['iteration_count'])})" if pd.notna(d['iteration_count']) else ""
+                    st.markdown(f"• {d['title']}{it} — {_link(d['doc_url'], d['doc_name'])}",
+                                unsafe_allow_html=True)
