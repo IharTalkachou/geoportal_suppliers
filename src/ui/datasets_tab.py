@@ -154,7 +154,7 @@ def render_info_types_manager(session, is_readonly):
     # поставщика: либо явным охватом project_document_items, либо неявно -
     # документ с пустым охватом покрывает весь проект, т.е. все его наборы
     docs_df = query_db("""
-        SELECT DISTINCT pi.info_id, p.supplier_id,
+        SELECT pi.info_id, p.supplier_id,
                pd.doc_id, pd.doc_kind, pd.doc_number, pd.doc_url, pd.is_signed
         FROM project_items pi
         JOIN projects p ON pi.project_id = p.project_id
@@ -167,6 +167,12 @@ def render_info_types_manager(session, is_readonly):
             OR NOT EXISTS (SELECT 1 FROM project_document_items pdi
                             WHERE pdi.doc_id = pd.doc_id)
           )
+        -- GROUP BY вместо DISTINCT: один вид сведений может встречаться в
+        -- нескольких project_items одного проекта, но документ нужен один раз.
+        -- При DISTINCT сортировка по CASE невозможна - выражения ORDER BY
+        -- обязаны быть в списке выборки.
+        GROUP BY pi.info_id, p.supplier_id, pd.doc_id, pd.doc_kind,
+                 pd.doc_number, pd.doc_url, pd.is_signed
         ORDER BY pi.info_id, p.supplier_id,
                  CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END, pd.doc_id
     """, {"did": sel_ds_id})
