@@ -367,14 +367,28 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     # Этап "Согласование протокола" - работа над документом ДО подписания:
     # соглашение может быть уже подписано, пока протоколы ещё согласовываются
     is_drafting_stage = cur_code == 'PROTOCOL_NEGOTIATIONS'
+    # Этап "Внесение изменений в протокол" - работа над УЖЕ подписанным
+    # документом; при закрытии он считается перезаключённым в новой редакции
+    is_changes_stage = cur_code == 'CHANGES_PROTOCOL'
     link_col = 'signed_stage_id' if is_signing_stage else 'drafting_stage_id'
 
-    if is_signing_stage or is_drafting_stage:
+    if is_signing_stage or is_drafting_stage or is_changes_stage:
         st.divider()
-        st.markdown("**📄 Подписываемые документы**" if is_signing_stage
-                    else "**📄 Согласуемые документы**")
+        if is_signing_stage:
+            st.markdown("**📄 Подписываемые документы**")
+        elif is_changes_stage:
+            st.markdown("**📄 Изменяемые документы**")
+        else:
+            st.markdown("**📄 Согласуемые документы**")
 
-        pdocs = load_project_documents(project_id)
+        all_pdocs = load_project_documents(project_id)
+        pdocs = all_pdocs
+        if is_changes_stage:
+            # Вносить изменения можно только в документ, который реально есть:
+            # подписан и со сканом
+            pdocs = all_pdocs[(all_pdocs['is_signed'] == True) &
+                              all_pdocs['doc_url'].notna() &
+                              (all_pdocs['doc_url'].astype(str).str.strip() != "")]
 
         # Охват документов - показываем прямо в подписи, чтобы было видно,
         # какие виды сведений (или их части) затрагивает каждый документ
@@ -394,7 +408,10 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
             )['doc_id'].tolist()]
 
         if pdocs.empty:
-            st.caption("В проекте пока нет документов — добавьте ниже.")
+            if is_changes_stage:
+                st.warning("⚠️ Нет подписанных документов со сканом — вносить изменения не во что.")
+            else:
+                st.caption("В проекте пока нет документов — добавьте ниже.")
         else:
             doc_opts = {}
             for _, d in pdocs.iterrows():
@@ -406,15 +423,24 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 if cov:
                     label += f" — {cov}"
                 doc_opts[label] = int(d['doc_id'])
+
+            if is_signing_stage:
+                ms_label = "Какие документы подписаны на этом этапе"
+                ms_help = "Можно отметить сразу несколько. При статусе «Выполнено» они будут помечены подписанными."
+            elif is_changes_stage:
+                ms_label = "В какие документы вносятся изменения"
+                ms_help = ("Доступны только подписанные документы со сканом. При статусе «Выполнено» "
+                           "дата подписания обновится, а скан нужно будет заменить на новую редакцию.")
+            else:
+                ms_label = "Над какими документами идёт работа"
+                ms_help = "Виды сведений берутся из охвата документа — задаются в его карточке в разделе «Документы»."
+
             st.multiselect(
-                "Какие документы подписаны на этом этапе" if is_signing_stage
-                else "Над какими документами идёт работа",
+                ms_label,
                 options=list(doc_opts.keys()),
                 default=[l for l, v in doc_opts.items() if v in cur_ids],
                 key="d_docs_multi",
-                help=("Можно отметить сразу несколько. При статусе «Выполнено» они будут помечены подписанными."
-                      if is_signing_stage else
-                      "Виды сведений берутся из охвата документа — задаются в его карточке в разделе «Документы».")
+                help=ms_help
             )
             signed_doc_ids = [doc_opts[l] for l in st.session_state.get("d_docs_multi", [])]
 
@@ -427,7 +453,7 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 {"pid": project_id}
             ).iloc[0]['is_agreement_project'])
             kinds = ["Протокол"]
-            has_agreement = (not pdocs.empty) and (pdocs['doc_kind'] == 'Соглашение').any()
+            has_agreement = (not all_pdocs.empty) and (all_pdocs['doc_kind'] == 'Соглашение').any()
             if is_agreement_project and not has_agreement:
                 kinds = ["Соглашение", "Протокол"]
 
@@ -456,9 +482,11 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                     except Exception as e:
                         st.error(f"Ошибка: {e}"); session.rollback()
 
-            if not pdocs.empty:
+            if not all_pdocs.empty:
                 st.divider()
-                for _, d in pdocs.iterrows():
+                if is_changes_stage:
+                    st.caption("Замените ссылку на скан новой редакцией документа:")
+                for _, d in all_pdocs.iterrows():
                     ec1, ec2, ec3 = st.columns([0.5, 0.35, 0.15])
                     ec1.caption(f"{d['doc_kind']}: {d['doc_number'] or '—'}")
                     upd_url = ec2.text_input("URL", value=d['doc_url'] or "",
@@ -617,6 +645,23 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                     session.execute(text("""
                         UPDATE project_documents SET drafting_stage_id = :sid WHERE doc_id = :did
                     """), {"sid": int(ps_id), "did": did})
+            elif is_changes_stage:
+                # Изменения вносятся в уже подписанный документ: при закрытии
+                # этапа он считается перезаключённым - обновляем дату подписания.
+                # Скан заменяется вручную ниже (новая редакция - новый файл).
+                is_done = micro_map[st.session_state.d_ms] == 4
+                session.execute(text("""
+                    UPDATE project_documents SET drafting_stage_id = NULL
+                    WHERE drafting_stage_id = :sid
+                """), {"sid": int(ps_id)})
+                for did in signed_doc_ids:
+                    session.execute(text("""
+                        UPDATE project_documents
+                        SET drafting_stage_id = :sid,
+                            signed_date = CASE WHEN :done THEN COALESCE(:ae, signed_date) ELSE signed_date END
+                        WHERE doc_id = :did
+                    """), {"sid": int(ps_id), "done": is_done,
+                           "ae": st.session_state.d_a_end, "did": did})
 
             session.commit(); _resync_buro_iterations(session, project_id); session.commit()
             from utils.project_utils import sync_project_status
@@ -656,7 +701,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
 
     # 2. Данные
     df = query_db("""
-        SELECT ps.*, s.stage_name, s.stage_order, ms.micro_status_name, u.display_name as responsible_name
+        SELECT ps.*, s.stage_name, s.stage_order, s.stage_code, ms.micro_status_name, u.display_name as responsible_name
         FROM project_stages ps
         JOIN stages s ON ps.stage_id = s.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
@@ -775,7 +820,8 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
             for _, d in signed.iterrows():
                 name = doc_title(d['doc_kind'], d['doc_number'])
                 if not d['is_signed_here']:
-                    name = f"{name} (в работе)"
+                    # Этап работы над документом: согласование или внесение изменений
+                    name = f"{name} ({'изменяется' if row.get('stage_code') == 'CHANGES_PROTOCOL' else 'в работе'})"
                 if d['doc_url']:
                     parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
                                  f'style="text-decoration:none;font-size:0.8rem;">📑 {name}</a>')
