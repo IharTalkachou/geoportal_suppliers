@@ -362,16 +362,34 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     # протоколов), поэтому выбор множественный. Документы заводятся и правятся
     # прямо здесь - отдельно ходить в блок «Документы проекта» не требуется.
     signed_doc_ids = []
-    is_signing_stage = stage_map.get(st.session_state.d_stage, {}).get("code") == 'CONTRACT_SIGNED'
-    if is_signing_stage:
+    cur_code = stage_map.get(st.session_state.d_stage, {}).get("code")
+    is_signing_stage = cur_code == 'CONTRACT_SIGNED'
+    # Этап "Согласование протокола" - работа над документом ДО подписания:
+    # соглашение может быть уже подписано, пока протоколы ещё согласовываются
+    is_drafting_stage = cur_code == 'PROTOCOL_NEGOTIATIONS'
+    link_col = 'signed_stage_id' if is_signing_stage else 'drafting_stage_id'
+
+    if is_signing_stage or is_drafting_stage:
         st.divider()
-        st.markdown("**📄 Подписываемые документы**")
+        st.markdown("**📄 Подписываемые документы**" if is_signing_stage
+                    else "**📄 Согласуемые документы**")
 
         pdocs = load_project_documents(project_id)
+
+        # Охват документов - показываем прямо в подписи, чтобы было видно,
+        # какие виды сведений (или их части) затрагивает каждый документ
+        cov_by_doc = {}
+        _cov = load_document_coverage(project_id)
+        if not _cov.empty:
+            for did, grp in _cov.groupby('doc_id'):
+                names = [f"{r['info_name']} → {r['part_name']}" if pd.notna(r['part_name']) else r['info_name']
+                         for _, r in grp.iterrows()]
+                cov_by_doc[int(did)] = "; ".join(names)
+
         cur_ids = []
         if is_edit:
             cur_ids = [int(x) for x in query_db(
-                "SELECT doc_id FROM project_documents WHERE signed_stage_id = :sid",
+                f"SELECT doc_id FROM project_documents WHERE {link_col} = :sid",
                 {"sid": int(existing_data['stage_progress_id'])}
             )['doc_id'].tolist()]
 
@@ -382,13 +400,21 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
             for _, d in pdocs.iterrows():
                 mark = "✅" if d['is_signed'] else "⏳"
                 label = f"{mark} {doc_title(d['doc_kind'], d['doc_number'])}"
+                # Охват документа: он же определяет, какие виды сведений
+                # затрагивает работа по этому протоколу
+                cov = cov_by_doc.get(int(d['doc_id']))
+                if cov:
+                    label += f" — {cov}"
                 doc_opts[label] = int(d['doc_id'])
             st.multiselect(
-                "Какие документы подписаны на этом этапе",
+                "Какие документы подписаны на этом этапе" if is_signing_stage
+                else "Над какими документами идёт работа",
                 options=list(doc_opts.keys()),
                 default=[l for l, v in doc_opts.items() if v in cur_ids],
                 key="d_docs_multi",
-                help="Можно отметить сразу несколько. При статусе «Выполнено» они будут помечены подписанными."
+                help=("Можно отметить сразу несколько. При статусе «Выполнено» они будут помечены подписанными."
+                      if is_signing_stage else
+                      "Виды сведений берутся из охвата документа — задаются в его карточке в разделе «Документы».")
             )
             signed_doc_ids = [doc_opts[l] for l in st.session_state.get("d_docs_multi", [])]
 
@@ -581,6 +607,16 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                         WHERE doc_id = :did
                     """), {"sid": int(ps_id), "done": is_done,
                            "ae": st.session_state.d_a_end, "did": did})
+            elif is_drafting_stage:
+                # Работа над документом до подписания - статус подписи не трогаем
+                session.execute(text("""
+                    UPDATE project_documents SET drafting_stage_id = NULL
+                    WHERE drafting_stage_id = :sid
+                """), {"sid": int(ps_id)})
+                for did in signed_doc_ids:
+                    session.execute(text("""
+                        UPDATE project_documents SET drafting_stage_id = :sid WHERE doc_id = :did
+                    """), {"sid": int(ps_id), "did": did})
 
             session.commit(); _resync_buro_iterations(session, project_id); session.commit()
             from utils.project_utils import sync_project_status
@@ -727,9 +763,10 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
 
         # СТРОКА 3а: Документы, подписанные на этом этапе (со ссылкой на скан)
         signed = query_db("""
-            SELECT doc_kind, doc_number, doc_url
+            SELECT doc_kind, doc_number, doc_url,
+                   (signed_stage_id = :id) AS is_signed_here
             FROM project_documents
-            WHERE signed_stage_id = :id
+            WHERE signed_stage_id = :id OR drafting_stage_id = :id
             ORDER BY CASE WHEN doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
                      sort_order NULLS LAST, doc_id
         """, {"id": int(row['stage_progress_id'])})
@@ -737,6 +774,8 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
             parts = []
             for _, d in signed.iterrows():
                 name = doc_title(d['doc_kind'], d['doc_number'])
+                if not d['is_signed_here']:
+                    name = f"{name} (в работе)"
                 if d['doc_url']:
                     parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
                                  f'style="text-decoration:none;font-size:0.8rem;">📑 {name}</a>')
