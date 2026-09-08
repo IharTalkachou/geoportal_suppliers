@@ -386,6 +386,12 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
 
         # Заведение/правка документов, не выходя из формы этапа
         with st.expander("➕ Добавить / ✏️ изменить документ"):
+            # Соглашение допустимо только в проекте с соответствующим признаком
+            # и только одно (частичный уникальный индекс idx_pdocs_one_agreement)
+            is_agreement_project = bool(query_db(
+                "SELECT is_agreement_project FROM projects WHERE project_id = :pid",
+                {"pid": project_id}
+            ).iloc[0]['is_agreement_project'])
             kinds = ["Протокол"]
             has_agreement = (not pdocs.empty) and (pdocs['doc_kind'] == 'Соглашение').any()
             if is_agreement_project and not has_agreement:
