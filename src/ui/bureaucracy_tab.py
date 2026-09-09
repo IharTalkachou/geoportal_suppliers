@@ -134,6 +134,11 @@ def clear_stage_form_state():
     """
     for k in STAGE_FORM_KEYS:
         st.session_state.pop(k, None)
+    # Готовность/новая ссылка на этапе "Внесение изменений в протокол" -
+    # per-документные ключи (d_ready_<doc_id>, d_newurl_<doc_id>), заранее
+    # неизвестные - чистим по префиксу, иначе тянутся из ранее открытого этапа
+    for k in [k for k in st.session_state if k.startswith("d_ready_") or k.startswith("d_newurl_")]:
+        st.session_state.pop(k, None)
 
 @st.dialog("Документ проекта")
 def document_mgmt_dialog(session, project_id, allow_agreement, existing_data=None):
@@ -383,9 +388,11 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
         all_pdocs = load_project_documents(project_id)
         pdocs = all_pdocs
         if is_changes_stage:
-            # Вносить изменения можно только в документ, который реально есть:
-            # подписан и со сканом
-            pdocs = all_pdocs[(all_pdocs['is_signed'] == True) &
+            # Только подписанные ПРОТОКОЛЫ со сканом: название этапа предполагает
+            # изменения именно в протокол (не в соглашение), а без скана менять
+            # нечего - как в реальности, так и по логике данных
+            pdocs = all_pdocs[(all_pdocs['doc_kind'] == 'Протокол') &
+                              (all_pdocs['is_signed'] == True) &
                               all_pdocs['doc_url'].notna() &
                               (all_pdocs['doc_url'].astype(str).str.strip() != "")]
 
@@ -400,20 +407,27 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 cov_by_doc[int(did)] = "; ".join(names)
 
         cur_ids = []
+        cur_ready_state = {}
         if is_edit:
             if is_signing_stage:
-                cur_sql = "SELECT doc_id FROM project_documents WHERE signed_stage_id = :sid"
+                cur_ids = [int(x) for x in query_db(
+                    "SELECT doc_id FROM project_documents WHERE signed_stage_id = :sid",
+                    {"sid": int(existing_data['stage_progress_id'])}
+                )['doc_id'].tolist()]
             else:
                 # Работа над документом - связь многие-ко-многим: один документ
                 # проходит несколько итераций этапа, каждая со своей строкой
-                cur_sql = "SELECT doc_id FROM project_document_stages WHERE stage_progress_id = :sid"
-            cur_ids = [int(x) for x in query_db(
-                cur_sql, {"sid": int(existing_data['stage_progress_id'])}
-            )['doc_id'].tolist()]
+                _cs = query_db("""
+                    SELECT doc_id, is_ready, new_url FROM project_document_stages
+                    WHERE stage_progress_id = :sid
+                """, {"sid": int(existing_data['stage_progress_id'])})
+                cur_ids = [int(x) for x in _cs['doc_id'].tolist()]
+                for _, r in _cs.iterrows():
+                    cur_ready_state[int(r['doc_id'])] = (bool(r['is_ready']), r['new_url'] or "")
 
         if pdocs.empty:
             if is_changes_stage:
-                st.warning("⚠️ Нет подписанных документов со сканом — вносить изменения не во что.")
+                st.warning("⚠️ Нет подписанных протоколов со сканом — вносить изменения не во что.")
             else:
                 st.caption("В проекте пока нет документов — добавьте ниже.")
         else:
@@ -432,9 +446,8 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 ms_label = "Какие документы подписаны на этом этапе"
                 ms_help = "Можно отметить сразу несколько. При статусе «Выполнено» они будут помечены подписанными."
             elif is_changes_stage:
-                ms_label = "В какие документы вносятся изменения"
-                ms_help = ("Доступны только подписанные документы со сканом. При статусе «Выполнено» "
-                           "дата подписания обновится, а скан нужно будет заменить на новую редакцию.")
+                ms_label = "В какие протоколы вносятся изменения"
+                ms_help = "Можно отметить сразу несколько — готовность и новая ссылка указываются для каждого отдельно."
             else:
                 ms_label = "Над какими документами идёт работа"
                 ms_help = "Виды сведений берутся из охвата документа — задаются в его карточке в разделе «Документы»."
@@ -448,61 +461,78 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
             )
             signed_doc_ids = [doc_opts[l] for l in st.session_state.get("d_docs_multi", [])]
 
-        # Заведение/правка документов, не выходя из формы этапа
-        with st.expander("➕ Добавить / ✏️ изменить документ"):
-            # Соглашение допустимо только в проекте с соответствующим признаком
-            # и только одно (частичный уникальный индекс idx_pdocs_one_agreement)
-            is_agreement_project = bool(query_db(
-                "SELECT is_agreement_project FROM projects WHERE project_id = :pid",
-                {"pid": project_id}
-            ).iloc[0]['is_agreement_project'])
-            kinds = ["Протокол"]
-            has_agreement = (not all_pdocs.empty) and (all_pdocs['doc_kind'] == 'Соглашение').any()
-            if is_agreement_project and not has_agreement:
-                kinds = ["Соглашение", "Протокол"]
+            if is_changes_stage and signed_doc_ids:
+                st.caption("Готовность и новая ссылка — отдельно для каждого протокола:")
+                for did in signed_doc_ids:
+                    d_row = pdocs[pdocs['doc_id'] == did].iloc[0]
+                    dname = doc_title(d_row['doc_kind'], d_row['doc_number'])
+                    default_ready, default_url = cur_ready_state.get(did, (False, ""))
+                    with st.container(border=True):
+                        rc1, rc2 = st.columns([0.4, 0.6])
+                        is_ready = rc1.checkbox("✅ Готов", key=f"d_ready_{did}", value=default_ready)
+                        rc1.caption(dname)
+                        if is_ready:
+                            rc2.text_input("🔗 Новая ссылка на изменённый протокол",
+                                          key=f"d_newurl_{did}", value=default_url)
+                        else:
+                            rc2.caption("Протокол ещё дорабатывается")
 
-            ic1, ic2 = st.columns(2)
-            new_kind = ic1.selectbox("Вид", kinds, key="d_inline_kind")
-            new_num = ic2.text_input("Номер / наименование", key="d_inline_num")
-            new_url = st.text_input("🔗 Ссылка на скан", key="d_inline_url")
-            if st.button("Добавить документ", key="d_inline_add", width='stretch'):
-                if not new_num.strip():
-                    st.warning("Укажите номер или наименование документа")
-                else:
-                    try:
-                        nxt = session.execute(text(
-                            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_documents WHERE project_id = :pid"
-                        ), {"pid": project_id}).scalar()
-                        session.execute(text("""
-                            INSERT INTO project_documents (project_id, doc_kind, doc_number, doc_url, sort_order)
-                            VALUES (:pid, :k, :n, :u, :o)
-                        """), {"pid": project_id, "k": new_kind, "n": new_num.strip(),
-                               "u": new_url.strip() or None, "o": nxt})
-                        session.commit(); clear_cache()
-                        for k in ["d_inline_kind", "d_inline_num", "d_inline_url"]:
-                            st.session_state.pop(k, None)
-                        clear_doc_form_state()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}"); session.rollback()
+        # Заведение/правка документов, не выходя из формы этапа. Для этапа
+        # изменений не нужно: там работают только с уже выбранными выше
+        # протоколами, отдельный перечень всех документов проекта ни к чему
+        if not is_changes_stage:
+            with st.expander("➕ Добавить / ✏️ изменить документ"):
+                # Соглашение допустимо только в проекте с соответствующим признаком
+                # и только одно (частичный уникальный индекс idx_pdocs_one_agreement)
+                is_agreement_project = bool(query_db(
+                    "SELECT is_agreement_project FROM projects WHERE project_id = :pid",
+                    {"pid": project_id}
+                ).iloc[0]['is_agreement_project'])
+                kinds = ["Протокол"]
+                has_agreement = (not all_pdocs.empty) and (all_pdocs['doc_kind'] == 'Соглашение').any()
+                if is_agreement_project and not has_agreement:
+                    kinds = ["Соглашение", "Протокол"]
 
-            if not all_pdocs.empty:
-                st.divider()
-                if is_changes_stage:
-                    st.caption("Замените ссылку на скан новой редакцией документа:")
-                for _, d in all_pdocs.iterrows():
-                    ec1, ec2, ec3 = st.columns([0.5, 0.35, 0.15])
-                    ec1.caption(f"{d['doc_kind']}: {d['doc_number'] or '—'}")
-                    upd_url = ec2.text_input("URL", value=d['doc_url'] or "",
-                                             key=f"d_inline_url_{d['doc_id']}",
-                                             label_visibility="collapsed", placeholder="ссылка на скан")
-                    if ec3.button("💾", key=f"d_inline_save_{d['doc_id']}", help="Сохранить ссылку"):
+                ic1, ic2 = st.columns(2)
+                new_kind = ic1.selectbox("Вид", kinds, key="d_inline_kind")
+                new_num = ic2.text_input("Номер / наименование", key="d_inline_num")
+                new_url = st.text_input("🔗 Ссылка на скан", key="d_inline_url")
+                if st.button("Добавить документ", key="d_inline_add", width='stretch'):
+                    if not new_num.strip():
+                        st.warning("Укажите номер или наименование документа")
+                    else:
                         try:
-                            session.execute(text("UPDATE project_documents SET doc_url = :u WHERE doc_id = :id"),
-                                            {"u": upd_url.strip() or None, "id": int(d['doc_id'])})
-                            session.commit(); clear_cache(); st.rerun()
+                            nxt = session.execute(text(
+                                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_documents WHERE project_id = :pid"
+                            ), {"pid": project_id}).scalar()
+                            session.execute(text("""
+                                INSERT INTO project_documents (project_id, doc_kind, doc_number, doc_url, sort_order)
+                                VALUES (:pid, :k, :n, :u, :o)
+                            """), {"pid": project_id, "k": new_kind, "n": new_num.strip(),
+                                   "u": new_url.strip() or None, "o": nxt})
+                            session.commit(); clear_cache()
+                            for k in ["d_inline_kind", "d_inline_num", "d_inline_url"]:
+                                st.session_state.pop(k, None)
+                            clear_doc_form_state()
+                            st.rerun()
                         except Exception as e:
                             st.error(f"Ошибка: {e}"); session.rollback()
+
+                if not all_pdocs.empty:
+                    st.divider()
+                    for _, d in all_pdocs.iterrows():
+                        ec1, ec2, ec3 = st.columns([0.5, 0.35, 0.15])
+                        ec1.caption(f"{d['doc_kind']}: {d['doc_number'] or '—'}")
+                        upd_url = ec2.text_input("URL", value=d['doc_url'] or "",
+                                                 key=f"d_inline_url_{d['doc_id']}",
+                                                 label_visibility="collapsed", placeholder="ссылка на скан")
+                        if ec3.button("💾", key=f"d_inline_save_{d['doc_id']}", help="Сохранить ссылку"):
+                            try:
+                                session.execute(text("UPDATE project_documents SET doc_url = :u WHERE doc_id = :id"),
+                                                {"u": upd_url.strip() or None, "id": int(d['doc_id'])})
+                                session.commit(); clear_cache(); st.rerun()
+                            except Exception as e:
+                                st.error(f"Ошибка: {e}"); session.rollback()
 
 
     # Протокол переговоров - веха этапа "Переговоры": дата + скан.
@@ -639,10 +669,10 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                         WHERE doc_id = :did
                     """), {"sid": int(ps_id), "done": is_done,
                            "ae": st.session_state.d_a_end, "did": did})
-            elif is_drafting_stage or is_changes_stage:
-                # Работа над документом: связь многие-ко-многим, поэтому правим
-                # только строки ЭТОЙ итерации этапа - привязки к другим итерациям
-                # того же документа остаются нетронутыми
+            elif is_drafting_stage:
+                # Работа над документом до подписания: связь многие-ко-многим,
+                # правим только строки ЭТОЙ итерации этапа - привязки к другим
+                # итерациям того же документа остаются нетронутыми
                 session.execute(text("""
                     DELETE FROM project_document_stages WHERE stage_progress_id = :sid
                 """), {"sid": int(ps_id)})
@@ -652,17 +682,36 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                         VALUES (:did, :sid)
                         ON CONFLICT (doc_id, stage_progress_id) DO NOTHING
                     """), {"did": did, "sid": int(ps_id)})
+            elif is_changes_stage:
+                # Готовность и новая ссылка - индивидуально для КАЖДОГО выбранного
+                # протокола, а не для этапа целиком: один этап может вести
+                # изменение нескольких протоколов с разной готовностью.
+                # Как только протокол отмечен готовым - он считается перезаключённым
+                # в новой редакции немедленно, без ожидания закрытия всего этапа.
+                per_doc = []
+                for did in signed_doc_ids:
+                    ready = bool(st.session_state.get(f"d_ready_{did}", False))
+                    new_url_val = (st.session_state.get(f"d_newurl_{did}", "") or "").strip() or None
+                    if ready and not new_url_val:
+                        d_row = pdocs[pdocs['doc_id'] == did].iloc[0]
+                        dname = doc_title(d_row['doc_kind'], d_row['doc_number'])
+                        raise ValueError(f"Укажите новую ссылку для готового протокола «{dname}»")
+                    per_doc.append((did, ready, new_url_val))
 
-                # Внесение изменений в подписанный документ: при закрытии этапа
-                # он считается перезаключённым - обновляем дату подписания.
-                # Скан заменяется вручную (новая редакция - новый файл).
-                if is_changes_stage and micro_map[st.session_state.d_ms] == 4:
-                    for did in signed_doc_ids:
+                session.execute(text("""
+                    DELETE FROM project_document_stages WHERE stage_progress_id = :sid
+                """), {"sid": int(ps_id)})
+                for did, ready, new_url_val in per_doc:
+                    session.execute(text("""
+                        INSERT INTO project_document_stages (doc_id, stage_progress_id, is_ready, new_url)
+                        VALUES (:did, :sid, :ready, :url)
+                    """), {"did": did, "sid": int(ps_id), "ready": ready, "url": new_url_val})
+                    if ready:
                         session.execute(text("""
                             UPDATE project_documents
-                            SET signed_date = COALESCE(:ae, signed_date)
+                            SET doc_url = :url, signed_date = COALESCE(:ae, CURRENT_DATE)
                             WHERE doc_id = :did
-                        """), {"ae": st.session_state.d_a_end, "did": did})
+                        """), {"url": new_url_val, "ae": st.session_state.d_a_end, "did": did})
 
             session.commit(); _resync_buro_iterations(session, project_id); session.commit()
             from utils.project_utils import sync_project_status
@@ -810,26 +859,40 @@ def render_stage_card(session, row, project_id, stage_map, micro_map, is_readonl
         # СТРОКА 3а: Документы, подписанные на этом этапе (со ссылкой на скан)
         signed = query_db("""
             SELECT pd.doc_kind, pd.doc_number, pd.doc_url,
-                   (pd.signed_stage_id = :id) AS is_signed_here
+                   (pd.signed_stage_id = :id) AS is_signed_here,
+                   COALESCE(pds.is_ready, FALSE) AS is_ready
             FROM project_documents pd
+            LEFT JOIN project_document_stages pds
+                   ON pds.doc_id = pd.doc_id AND pds.stage_progress_id = :id
             WHERE pd.signed_stage_id = :id
-               OR EXISTS (SELECT 1 FROM project_document_stages pds
-                           WHERE pds.doc_id = pd.doc_id AND pds.stage_progress_id = :id)
+               OR EXISTS (SELECT 1 FROM project_document_stages pds2
+                           WHERE pds2.doc_id = pd.doc_id AND pds2.stage_progress_id = :id)
             ORDER BY CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
                      pd.sort_order NULLS LAST, pd.doc_id
         """, {"id": int(row['stage_progress_id'])})
         if not signed.empty:
+            def _doc_chip(label, url):
+                if url:
+                    return (f'<a href="{url}" target="_blank" '
+                           f'style="text-decoration:none;font-size:0.8rem;">📑 {label}</a>')
+                return f'<span style="font-size:0.8rem;">📑 {label}</span>'
+
+            is_changes_row = row.get('stage_code') == 'CHANGES_PROTOCOL'
             parts = []
             for _, d in signed.iterrows():
-                name = doc_title(d['doc_kind'], d['doc_number'])
-                if not d['is_signed_here']:
-                    # Этап работы над документом: согласование или внесение изменений
-                    name = f"{name} ({'изменяется' if row.get('stage_code') == 'CHANGES_PROTOCOL' else 'в работе'})"
-                if d['doc_url']:
-                    parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
-                                 f'style="text-decoration:none;font-size:0.8rem;">📑 {name}</a>')
+                base = doc_title(d['doc_kind'], d['doc_number'])
+                if d['is_signed_here']:
+                    parts.append(_doc_chip(base, d['doc_url']))
+                elif is_changes_row:
+                    if d['is_ready']:
+                        # Готов - ссылка уже обновлена на новую редакцию
+                        parts.append(_doc_chip(f"{base} (готов, с изменениями)", d['doc_url']))
+                    else:
+                        # Пока не готов - ссылки ещё нет смысла показывать,
+                        # старый скан больше не актуален
+                        parts.append(f'<span style="font-size:0.8rem;">📑 {base} (изменяется)</span>')
                 else:
-                    parts.append(f'<span style="font-size:0.8rem;">📑 {name}</span>')
+                    parts.append(_doc_chip(f"{base} (в работе)", d['doc_url']))
             st.markdown('<div style="margin-top:8px;">' + " · ".join(parts) + '</div>',
                         unsafe_allow_html=True)
 

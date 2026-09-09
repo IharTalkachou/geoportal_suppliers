@@ -272,6 +272,9 @@ class ProjectDocumentStage(Base):
     link_id = Column(Integer, primary_key=True, autoincrement=True)
     doc_id = Column(Integer, ForeignKey('project_documents.doc_id', ondelete='CASCADE'), nullable=False)
     stage_progress_id = Column(Integer, ForeignKey('project_stages.stage_progress_id', ondelete='CASCADE'), nullable=False)
+    is_ready = Column(Boolean, server_default=text("false"),
+                      comment='Готовность документа на этапе "Внесение изменений в протокол" - протокол перезаключён в новой редакции')
+    new_url = Column(Text, comment='Ссылка на новую редакцию протокола (заполняется вместе с is_ready)')
 
 class ProjectItemPart(Base):
     """Часть вида сведений внутри проекта (редкий сценарий).
