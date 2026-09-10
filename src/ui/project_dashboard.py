@@ -375,67 +375,145 @@ def render_documents_subtab(session, proj_id_int, is_readonly, proj_data):
     render_documents_block(session, proj_id_int,
                            bool(proj_data.get('is_agreement_project')), is_readonly)
 
-def render_item_parts_manager(session, proj_id_int, items_df):
-    """Разбиение вида сведений на части (редкий сценарий).
+def render_part_details_manager(session, proj_id_int, items_flat, formats_list, periods_list, prov_options):
+    """Параметры передачи по частям вида сведений.
 
-    Нужно, когда один вид сведений передаётся не одним протоколом, а несколькими
-    (напр. УИВП Минобороны). По умолчанию частей нет и всё работает как раньше,
-    поэтому блок свёрнут и не мешает обычной работе.
+    Части заводятся в справочнике («🗄️ Наборы → 📄 Виды сведений»), а здесь
+    задаётся, КАК конкретный поставщик передаёт каждую из них: часть равна
+    протоколу, и условия от протокола к протоколу различаются.
+
+    Наличие строк project_item_part_details по item_id означает «этот поставщик
+    разбил вид сведений»: с этого момента значения берутся с частей, а не с
+    project_items.
     """
-    if items_df.empty:
+    if items_flat.empty:
         return
 
-    parts_df = query_db("""
-        SELECT pip.part_id, pip.item_id, pip.part_name, pip.sort_order
-        FROM project_item_parts pip
-        JOIN project_items pi ON pip.item_id = pi.item_id
+    # Виды сведений проекта, у которых в справочнике есть части
+    splittable = query_db("""
+        SELECT pi.item_id, d.dataset_name, i.info_name, count(itp.part_id) AS parts_cnt
+        FROM project_items pi
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        JOIN info_type_parts itp ON itp.info_id = pi.info_id
         WHERE pi.project_id = :pid
-        ORDER BY pip.item_id, pip.sort_order NULLS LAST, pip.part_id
+        GROUP BY pi.item_id, d.dataset_name, i.info_name
+        ORDER BY d.dataset_name, i.info_name
     """, {"pid": proj_id_int})
 
-    total = len(parts_df)
-    label = f"✂️ Разбиение видов сведений на части ({total})" if total else "✂️ Разбиение видов сведений на части"
-    with st.expander(label, expanded=False):
-        st.caption("Нужно только если один вид сведений передаётся несколькими протоколами. "
-                   "Если частей нет — протокол покрывает вид сведений целиком.")
+    if splittable.empty:
+        return
 
-        opts = {f"{r['dataset_name']} → {r['info_name']}": int(r['item_id']) for _, r in items_df.iterrows()}
-        sel = st.selectbox("Вид сведений:", list(opts.keys()), key="parts_item_sel")
-        item_id = opts[sel]
+    with st.expander("✂️ Параметры передачи по частям", expanded=False):
+        st.caption("Заполняется, когда вид сведений передаётся несколькими протоколами: "
+                   "часть = протокол. Состав частей задаётся в справочнике видов сведений.")
 
-        mine = parts_df[parts_df['item_id'] == item_id]
-        if mine.empty:
-            st.info("Частей нет — вид сведений передаётся целиком.")
-        else:
-            for _, p in mine.iterrows():
-                pc1, pc2 = st.columns([0.85, 0.15])
-                pc1.write(f"• {p['part_name']}")
-                if pc2.button("🗑", key=f"del_part_{p['part_id']}", help="Удалить часть"):
-                    try:
-                        session.execute(text("DELETE FROM project_item_parts WHERE part_id = :id"),
-                                        {"id": int(p['part_id'])})
-                        session.commit(); clear_cache(); st.rerun()
-                    except Exception as e:
-                        st.error(f"Ошибка: {e}"); session.rollback()
+        opts = {f"{r['dataset_name']} → {r['info_name']} ({int(r['parts_cnt'])} ч.)": int(r['item_id'])
+                for _, r in splittable.iterrows()}
+        sel_lbl = st.selectbox("Вид сведений:", list(opts.keys()), key="pd_item_sel")
+        item_id = opts[sel_lbl]
 
-        new_part = st.text_input("Название новой части", key="parts_new_name")
-        if st.button("➕ Добавить часть", key="parts_add_btn"):
-            if not new_part.strip():
-                st.warning("Укажите название части")
-            else:
-                try:
-                    next_order = session.execute(text(
-                        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM project_item_parts WHERE item_id = :iid"
-                    ), {"iid": item_id}).scalar()
-                    session.execute(text("""
-                        INSERT INTO project_item_parts (item_id, part_name, sort_order)
-                        VALUES (:iid, :n, :o)
-                    """), {"iid": item_id, "n": new_part.strip(), "o": next_order})
-                    session.commit(); clear_cache()
-                    st.session_state.pop("parts_new_name", None)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Ошибка: {e}"); session.rollback()
+        # Первое открытие: копируем значения с project_items в каждую часть.
+        # Частей в справочнике могло прибавиться позже - DO NOTHING не трогает
+        # уже отредактированные строки, но довозит недостающие.
+        try:
+            session.execute(text("""
+                INSERT INTO project_item_part_details
+                    (item_id, part_id, provision_right, format, update_period,
+                     meta_days, meta_method, data_days, data_method)
+                SELECT pi.item_id, itp.part_id, pi.provision_right,
+                       COALESCE(pi.format, it.format), COALESCE(pi.update_period, it."update"),
+                       pi.meta_days, pi.meta_method, pi.data_days, pi.data_method
+                FROM project_items pi
+                JOIN info_types it ON pi.info_id = it.info_id
+                JOIN info_type_parts itp ON itp.info_id = pi.info_id
+                WHERE pi.item_id = :iid
+                ON CONFLICT (item_id, part_id) DO NOTHING
+            """), {"iid": item_id})
+            session.commit()
+            clear_cache()
+        except Exception as e:
+            st.error(f"Ошибка инициализации частей: {e}")
+            session.rollback()
+            return
+
+        details = query_db("""
+            SELECT pd.detail_id, pd.part_id, itp.part_name, pd.provision_right,
+                   pd.format, pd.update_period, pd.meta_days, pd.meta_method,
+                   pd.data_days, pd.data_method
+            FROM project_item_part_details pd
+            JOIN info_type_parts itp ON pd.part_id = itp.part_id
+            WHERE pd.item_id = :iid
+            ORDER BY itp.sort_order NULLS LAST, itp.part_id
+        """, {"iid": item_id})
+
+        if details.empty:
+            st.info("Части не найдены.")
+            return
+
+        part_opts = {r['part_name']: int(r['part_id']) for _, r in details.iterrows()}
+        sel_part_name = st.selectbox("Часть:", list(part_opts.keys()), key="pd_part_sel")
+        part_id = part_opts[sel_part_name]
+        curr = details[details['part_id'] == part_id].iloc[0]
+
+        # Префилл: сентинел составной - переключение и вида сведений, и части
+        sentinel = f"{item_id}|{part_id}"
+        if st.session_state.get("pd_sel_prev") != sentinel:
+            st.session_state["pd_prov_in"] = (curr["provision_right"]
+                                              if pd.notna(curr["provision_right"]) else prov_options[0])
+            db_formats = curr["format"] or ""
+            st.session_state["pd_fmt_in"] = [f.strip() for f in db_formats.split(",")
+                                             if f.strip() in formats_list]
+            st.session_state["pd_upd_in"] = (curr["update_period"]
+                                             if curr["update_period"] in periods_list
+                                             else (periods_list[0] if periods_list else ""))
+            st.session_state["pd_meta_d"] = int(curr["meta_days"]) if pd.notna(curr["meta_days"]) else 10
+            st.session_state["pd_meta_m"] = curr["meta_method"] or "Электронный кабинет"
+            st.session_state["pd_data_d"] = int(curr["data_days"]) if pd.notna(curr["data_days"]) else 10
+            st.session_state["pd_data_m"] = curr["data_method"] or "Сервис (WMS/WFS)"
+            st.session_state["pd_sel_prev"] = sentinel
+
+        st.selectbox("Право предоставления", prov_options, key="pd_prov_in")
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            st.multiselect("Формат предоставления", options=formats_list, key="pd_fmt_in")
+            st.number_input("Срок метаданных (дн.)", min_value=0, key="pd_meta_d")
+            st.selectbox("Способ (метаданные)",
+                         ["Электронный кабинет", "Передача XML", "API", "Другой"], key="pd_meta_m")
+        with pc2:
+            st.selectbox("Срок обновления", options=periods_list, key="pd_upd_in")
+            st.number_input("Срок данных (дн.)", min_value=0, key="pd_data_d")
+            st.selectbox("Способ (данные)",
+                         ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель", "Не передаются"],
+                         key="pd_data_m")
+
+        if st.button("💾 Сохранить параметры части", type="primary", width='stretch', key="pd_save_btn"):
+            try:
+                session.execute(text("""
+                    INSERT INTO project_item_part_details
+                        (item_id, part_id, provision_right, format, update_period,
+                         meta_days, meta_method, data_days, data_method)
+                    VALUES (:i, :p, CAST(:prov AS data_provision_type), :fmt, :upd,
+                            :md, :mm, :dd, :dm)
+                    ON CONFLICT (item_id, part_id) DO UPDATE SET
+                        provision_right = EXCLUDED.provision_right,
+                        format          = EXCLUDED.format,
+                        update_period   = EXCLUDED.update_period,
+                        meta_days       = EXCLUDED.meta_days,
+                        meta_method     = EXCLUDED.meta_method,
+                        data_days       = EXCLUDED.data_days,
+                        data_method     = EXCLUDED.data_method
+                """), {"i": item_id, "p": part_id,
+                       "prov": st.session_state["pd_prov_in"],
+                       "fmt": ", ".join(st.session_state["pd_fmt_in"]) or None,
+                       "upd": st.session_state["pd_upd_in"] or None,
+                       "md": st.session_state["pd_meta_d"], "mm": st.session_state["pd_meta_m"],
+                       "dd": st.session_state["pd_data_d"], "dm": st.session_state["pd_data_m"]})
+                session.commit(); clear_cache()
+                st.success("✅ Сохранено!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Ошибка: {e}"); session.rollback()
 
 def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
     """Вынесенный состав проекта"""
@@ -450,11 +528,19 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
     # info_map хранит и ID вида, и ID набора для проверки
     info_map = {row["info_name"]: {"id": row["info_id"], "ds_id": row["dataset_id"]} for _, row in info_types_all.iterrows()}
 
-    # 2. Загружаем текущий состав проекта
-    items_df = query_db("""
-        SELECT 
-            pi.item_id, d.dataset_name, i.info_name, 
-            i.format, i.update,
+    # Справочники форматов и сроков обновления (те же, что в справочнике видов сведений)
+    formats_list = query_db("SELECT format_name FROM ref_file_formats ORDER BY format_name")["format_name"].tolist()
+    periods_list = query_db("SELECT period_name FROM ref_update_periods ORDER BY period_name")["period_name"].tolist()
+
+    # 2a. Плоский состав: строка на вид сведений. Используется для выпадающих
+    # списков редактирования и проверки дублей - там разворот по частям только
+    # мешал бы (задвоил бы список и сломал проверку).
+    items_flat = query_db("""
+        SELECT
+            pi.item_id, d.dataset_name, i.info_name,
+            COALESCE(pi.format, i.format) AS format,
+            COALESCE(pi.update_period, i.update) AS update,
+            pi.format AS own_format, pi.update_period AS own_update,
             c.full_name as tech_contact,
             pi.provision_right,
             pi.meta_days, pi.data_days,
@@ -467,25 +553,60 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
         ORDER BY d.dataset_name, i.info_name
     """, {"pid": proj_id_int})
 
-    st.dataframe(items_df[["dataset_name", "info_name", "tech_contact", "provision_right", "format", "update", "data_method"]], 
+    # 2b. Состав для показа: у разбитых видов - строка на часть. Разворот идёт
+    # через project_item_part_details, а не через справочник частей: части есть
+    # у вида сведений всегда, но разбитым он считается только у того поставщика,
+    # который завёл параметры передачи по частям.
+    items_df = query_db("""
+        SELECT
+            pi.item_id, pd.part_id, d.dataset_name, i.info_name, itp.part_name,
+            c.full_name as tech_contact,
+            COALESCE(pd.provision_right, pi.provision_right) AS provision_right,
+            COALESCE(pd.format, pi.format, i.format)         AS format,
+            COALESCE(pd.update_period, pi.update_period, i.update) AS update,
+            COALESCE(pd.meta_days, pi.meta_days)     AS meta_days,
+            COALESCE(pd.meta_method, pi.meta_method) AS meta_method,
+            COALESCE(pd.data_days, pi.data_days)     AS data_days,
+            COALESCE(pd.data_method, pi.data_method) AS data_method
+        FROM project_items pi
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        LEFT JOIN contacts c ON pi.tech_contact_id = c.contact_id
+        LEFT JOIN project_item_part_details pd ON pd.item_id = pi.item_id
+        LEFT JOIN info_type_parts itp ON itp.part_id = pd.part_id
+        WHERE pi.project_id = :pid
+        ORDER BY d.dataset_name, i.info_name, itp.sort_order NULLS LAST, itp.part_id
+    """, {"pid": proj_id_int})
+
+    # Вид сведений с частью показывается одной подписью
+    display_df = items_df.copy()
+    if not display_df.empty:
+        display_df["info_name"] = display_df.apply(
+            lambda r: f"{r['info_name']} — {r['part_name']}" if pd.notna(r['part_name']) else r['info_name'],
+            axis=1)
+
+    st.dataframe(display_df[["dataset_name", "info_name", "tech_contact", "provision_right",
+                             "format", "update", "meta_method", "data_method"]],
                     width='stretch', hide_index=True,
                     column_config={
-                        "dataset_name": "Набор данных", 
-                        "info_name": "Вид сведений", 
+                        "dataset_name": "Набор данных",
+                        "info_name": "Вид сведений",
                         "tech_contact": "Технический контакт",
-                        "provision_right": "Право предоставления набора",
-                        "format": "Формат предоставления набора",
-                        "update": "Срок обновления набора",
-                        "data_method": "Способ предоставления набора"
+                        "provision_right": "Право предоставления",
+                        "format": "Формат предоставления",
+                        "update": "Срок обновления",
+                        "meta_method": "Способ (метаданные)",
+                        "data_method": "Способ (данные)"
                     })
 
     if not is_readonly:
-        render_item_parts_manager(session, proj_id_int, items_df)
+        st.caption("✂️ Разбиение вида сведений на части задаётся в справочнике: "
+                   "«🗄️ Наборы → 📄 Виды сведений → ✂️ Части».")
 
         with st.expander("➕ Добавить / ✏️ Редактировать элемент состава", expanded=False):
             item_options = ["(Добавить новый)"]
             item_ids_map = {}
-            for _, row in items_df.iterrows():
+            for _, row in items_flat.iterrows():
                 label = f"{row['dataset_name']} → {row['info_name']}"
                 item_options.append(label)
                 item_ids_map[label] = row["item_id"]
@@ -507,8 +628,8 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
             if st.session_state.get("crud_item_sel_prev") != sel_item:
                 if is_editing:
                     # Извлекаем данные один раз здесь
-                    curr = items_df[items_df["item_id"] == item_ids_map[sel_item]].iloc[0]
-                    
+                    curr = items_flat[items_flat["item_id"] == item_ids_map[sel_item]].iloc[0]
+
                     st.session_state["crud_ds_in"] = curr["dataset_name"]
                     st.session_state["crud_info_in"] = curr["info_name"]
                     st.session_state["crud_cont_in"] = curr["tech_contact"] if pd.notna(curr["tech_contact"]) else "Не выбран"
@@ -517,6 +638,13 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                     st.session_state["c_meta_m"] = curr["meta_method"]
                     st.session_state["c_data_d"] = int(curr["data_days"])
                     st.session_state["c_data_m"] = curr["data_method"]
+                    # Переопределения формата/срока: пусто = берётся из справочника
+                    own_fmt = curr["own_format"] or ""
+                    st.session_state["c_fmt_in"] = [f.strip() for f in own_fmt.split(",")
+                                                    if f.strip() in formats_list]
+                    st.session_state["c_upd_in"] = (curr["own_update"]
+                                                    if curr["own_update"] in periods_list
+                                                    else "(из справочника)")
                 else:
                     st.session_state["crud_ds_in"] = list(ds_map.keys())[0] if ds_map else ""
                     st.session_state["crud_info_in"] = ""
@@ -526,7 +654,9 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                     st.session_state["c_meta_m"] = "Электронный кабинет"
                     st.session_state["c_data_d"] = 0
                     st.session_state["c_data_m"] = "Сервис (WMS/WFS)"
-                
+                    st.session_state["c_fmt_in"] = []
+                    st.session_state["c_upd_in"] = "(из справочника)"
+
                 st.session_state["crud_item_sel_prev"] = sel_item
 
             # Виджеты
@@ -546,6 +676,15 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
             
             sel_cont = st.selectbox("Тех. контакт", ["Не выбран"] + list(sup_cont_map.keys()), key="crud_cont_in")
             sel_prov = st.selectbox("Право предоставления *", prov_options, key="crud_prov_in")
+
+            # Формат и срок обновления: по умолчанию берутся из справочника видов
+            # сведений, здесь их можно переопределить для конкретного поставщика
+            cfmt1, cfmt2 = st.columns(2)
+            with cfmt1:
+                st.multiselect("Формат предоставления", options=formats_list, key="c_fmt_in",
+                               help="Пусто — берётся из справочника вида сведений")
+            with cfmt2:
+                st.selectbox("Срок обновления", options=["(из справочника)"] + periods_list, key="c_upd_in")
 
             st.markdown("---")
             st.markdown("**⏳ Параметры размещения (ALM/SLA)**")
@@ -587,27 +726,35 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                             i_id = int(info_map[sel_info]["id"])
                             c_id = int(sup_cont_map[sel_cont]) if sel_cont != "Не выбран" else None
                             
+                            # Пусто = наследуется из справочника вида сведений
+                            sel_fmt = ", ".join(st.session_state.c_fmt_in) or None
+                            sel_upd = (st.session_state.c_upd_in
+                                       if st.session_state.c_upd_in != "(из справочника)" else None)
+
                             if is_editing:
                                 target_item_id = int(item_ids_map[sel_item])
                                 session.execute(text("""
-                                    UPDATE project_items SET 
+                                    UPDATE project_items SET
                                         dataset_id=:d, info_id=:i, tech_contact_id=:c, provision_right=CAST(:prov AS data_provision_type),
-                                        meta_days=:md, data_days=:dd, meta_method=:mm, data_method=:dm
+                                        meta_days=:md, data_days=:dd, meta_method=:mm, data_method=:dm,
+                                        format=:fmt, update_period=:upd
                                     WHERE item_id=:id
-                                """), {"d": d_id, "i": i_id, "c": c_id, "prov": sel_prov, 
-                                    "md": st.session_state.c_meta_d, "mm": st.session_state.c_meta_m, "dd": st.session_state.c_data_d, "dm": st.session_state.c_data_m, "id": target_item_id})
+                                """), {"d": d_id, "i": i_id, "c": c_id, "prov": sel_prov,
+                                    "md": st.session_state.c_meta_d, "mm": st.session_state.c_meta_m, "dd": st.session_state.c_data_d, "dm": st.session_state.c_data_m,
+                                    "fmt": sel_fmt, "upd": sel_upd, "id": target_item_id})
                             else:
                                 # Проверка на дубликат перед вставкой
-                                is_dup = not items_df[(items_df["dataset_name"] == sel_ds) & (items_df["info_name"] == sel_info)].empty
+                                is_dup = not items_flat[(items_flat["dataset_name"] == sel_ds) & (items_flat["info_name"] == sel_info)].empty
                                 if is_dup:
                                     st.warning("⚠️ Этот вид сведений уже есть в проекте")
                                     st.stop()
-                                    
+
                                 session.execute(text("""
-                                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right, meta_days, data_days, meta_method, data_method) 
-                                    VALUES (:p, :d, :i, :c, CAST(:prov AS data_provision_type), :md, :dd, :mm, :dm)
-                                """), {"p": proj_id_int, "d": d_id, "i": i_id, "c": c_id, "prov": sel_prov, 
-                                    "md": st.session_state.c_meta_d, "mm": st.session_state.c_meta_m, "dd": st.session_state.c_data_d, "dm": st.session_state.c_data_m})
+                                    INSERT INTO project_items (project_id, dataset_id, info_id, tech_contact_id, provision_right, meta_days, data_days, meta_method, data_method, format, update_period)
+                                    VALUES (:p, :d, :i, :c, CAST(:prov AS data_provision_type), :md, :dd, :mm, :dm, :fmt, :upd)
+                                """), {"p": proj_id_int, "d": d_id, "i": i_id, "c": c_id, "prov": sel_prov,
+                                    "md": st.session_state.c_meta_d, "mm": st.session_state.c_meta_m, "dd": st.session_state.c_data_d, "dm": st.session_state.c_data_m,
+                                    "fmt": sel_fmt, "upd": sel_upd})
                             
                             session.commit()
                             clear_cache()
@@ -637,4 +784,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                     except Exception as e:
                         st.error(f"Ошибка: {e}")
                         session.rollback()
+
+        render_part_details_manager(session, proj_id_int, items_flat,
+                                    formats_list, periods_list, prov_options)
 
