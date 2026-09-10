@@ -971,21 +971,31 @@ def _fetch_summary_rows():
     """Собирает плоскую таблицу отчёта: одна строка на вид сведений (или его часть)."""
 
     # Состав всех проектов: набор -> вид сведений, с разворотом на части.
-    # LEFT JOIN на части: если частей нет, остаётся одна строка с part_id = NULL.
+    # Разворот идёт через project_item_part_details, а НЕ через справочник частей:
+    # части есть у вида сведений всегда, но разбитым он считается только у того
+    # поставщика, который завёл параметры передачи по частям. У остальных
+    # остаётся одна строка с part_id = NULL, как было до появления частей.
     items_df = query_db("""
         SELECT s.supplier_id, s.supplier_name, s.is_mandatory AS supplier_mandatory,
                p.project_id, p.project_name, p.notes AS project_notes,
                pi.item_id, d.dataset_name, d.is_mandatory AS dataset_mandatory,
                i.info_name,
-               pip.part_id, pip.part_name
+               pd.part_id, itp.part_name,
+               -- Условия передачи: часть -> проект -> справочник вида сведений
+               COALESCE(pd.provision_right, pi.provision_right)        AS provision_right,
+               COALESCE(pd.format, pi.format, i.format)                AS format,
+               COALESCE(pd.update_period, pi.update_period, i."update") AS update_period,
+               COALESCE(pd.meta_method, pi.meta_method)                AS meta_method,
+               COALESCE(pd.data_method, pi.data_method)                AS data_method
         FROM project_items pi
         JOIN projects p ON pi.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id
         JOIN datasets d ON pi.dataset_id = d.dataset_id
         JOIN info_types i ON pi.info_id = i.info_id
-        LEFT JOIN project_item_parts pip ON pip.item_id = pi.item_id
+        LEFT JOIN project_item_part_details pd ON pd.item_id = pi.item_id
+        LEFT JOIN info_type_parts itp ON itp.part_id = pd.part_id
         ORDER BY s.is_mandatory DESC, s.supplier_name, d.dataset_name,
-                 i.info_name, pip.sort_order NULLS LAST, pip.part_id
+                 i.info_name, itp.sort_order NULLS LAST, itp.part_id
     """)
 
     # Поставщики с подписанным соглашением
