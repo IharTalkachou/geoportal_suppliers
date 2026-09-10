@@ -65,6 +65,7 @@ def get_analytics_snapshot():
         JOIN projects p ON pi.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id
         JOIN info_types it ON pi.info_id = it.info_id
+        LEFT JOIN info_type_parts itp ON itp.part_id = (aff ->> 'part_id')::int
         JOIN stages stg ON ps.stage_id = stg.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
         LEFT JOIN users u ON ps.responsible_id = u.user_id
