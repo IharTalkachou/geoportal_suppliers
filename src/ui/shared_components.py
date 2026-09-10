@@ -101,14 +101,39 @@ def render_project_documents(project_id, compact=False):
     Вызывается из паспорта проекта и из карточки поставщика.
     """
     docs = query_db("""
-        SELECT doc_kind AS title,
-               COALESCE(doc_number, doc_kind) AS doc_name,
-               doc_url,
-               signed_date AS doc_date,
-               is_signed
-        FROM project_documents
-        WHERE project_id = :pid AND doc_url IS NOT NULL AND doc_url <> ''
-        ORDER BY CASE WHEN doc_kind = 'Соглашение' THEN 0 ELSE 1 END, sort_order NULLS LAST, doc_id
+        SELECT pd.doc_kind AS title,
+               COALESCE(pd.doc_number, pd.doc_kind) AS doc_name,
+               pd.doc_url,
+               pd.signed_date AS doc_date,
+               pd.is_signed,
+               -- Вид сведений (или его часть), к которому относится протокол.
+               -- Пустой охват означает "весь проект", поэтому подставляется его
+               -- состав. У соглашения охват не показывается - оно в проекте одно.
+               CASE WHEN pd.doc_kind = 'Соглашение' THEN NULL ELSE COALESCE(
+                   (SELECT string_agg(
+                               CASE WHEN itp.part_name IS NOT NULL
+                                    THEN i.info_name || ' → ' || itp.part_name
+                                    ELSE i.info_name END, '; '
+                               ORDER BY i.info_name, itp.sort_order NULLS LAST)
+                      FROM project_document_items pdi
+                      JOIN project_items pi ON pdi.item_id = pi.item_id
+                      JOIN info_types i ON pi.info_id = i.info_id
+                      LEFT JOIN info_type_parts itp ON pdi.part_id = itp.part_id
+                     WHERE pdi.doc_id = pd.doc_id),
+                   (SELECT string_agg(DISTINCT i.info_name, '; ')
+                      FROM project_items pi
+                      JOIN info_types i ON pi.info_id = i.info_id
+                     WHERE pi.project_id = pd.project_id)
+               ) END AS coverage
+        FROM project_documents pd
+        WHERE pd.project_id = :pid AND pd.doc_url IS NOT NULL AND pd.doc_url <> ''
+        -- Порядок по номеру документа - как в реестре соглашений: номер хранится
+        -- текстом, поэтому числовая часть извлекается отдельно, иначе "10"
+        -- встало бы перед "8"
+        ORDER BY CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                 NULLIF(regexp_replace(COALESCE(pd.doc_number, ''), '\D', '', 'g'), '')::bigint
+                     NULLS LAST,
+                 pd.doc_number, pd.doc_id
     """, {"pid": project_id})
 
     stage_docs = query_db("""
@@ -139,7 +164,9 @@ def render_project_documents(project_id, compact=False):
         for _, d in docs.iterrows():
             mark = "✅" if d['is_signed'] else "⏳"
             date_txt = f" от {d['doc_date'].strftime('%d.%m.%Y')}" if pd.notna(d['doc_date']) else ""
-            st.markdown(f"{mark} **{d['title']}**{date_txt} — {_link(d['doc_url'], d['doc_name'])}",
+            cov_txt = (f" — {d['coverage']}"
+                       if pd.notna(d.get('coverage')) and str(d['coverage']).strip() else "")
+            st.markdown(f"{mark} **{d['title']}**{date_txt} — {_link(d['doc_url'], d['doc_name'])}{cov_txt}",
                         unsafe_allow_html=True)
 
     if not stage_docs.empty:
@@ -163,13 +190,37 @@ def render_supplier_documents(supplier_id):
                COALESCE(pd.doc_number, pd.doc_kind) AS doc_name,
                pd.doc_url,
                pd.signed_date AS doc_date,
-               pd.is_signed
+               pd.is_signed,
+               -- Вид сведений (или его часть), к которому относится протокол.
+               -- Пустой охват означает "весь проект", поэтому подставляется его
+               -- состав. У соглашения охват не показывается - оно у поставщика одно.
+               CASE WHEN pd.doc_kind = 'Соглашение' THEN NULL ELSE COALESCE(
+                   (SELECT string_agg(
+                               CASE WHEN itp.part_name IS NOT NULL
+                                    THEN i.info_name || ' → ' || itp.part_name
+                                    ELSE i.info_name END, '; '
+                               ORDER BY i.info_name, itp.sort_order NULLS LAST)
+                      FROM project_document_items pdi
+                      JOIN project_items pi ON pdi.item_id = pi.item_id
+                      JOIN info_types i ON pi.info_id = i.info_id
+                      LEFT JOIN info_type_parts itp ON pdi.part_id = itp.part_id
+                     WHERE pdi.doc_id = pd.doc_id),
+                   (SELECT string_agg(DISTINCT i.info_name, '; ')
+                      FROM project_items pi
+                      JOIN info_types i ON pi.info_id = i.info_id
+                     WHERE pi.project_id = pd.project_id)
+               ) END AS coverage
         FROM project_documents pd
         JOIN projects p ON pd.project_id = p.project_id
         WHERE p.supplier_id = :sid AND pd.doc_url IS NOT NULL AND pd.doc_url <> ''
+        -- Порядок по номеру документа - тот же, что в реестре соглашений:
+        -- номер хранится текстом, поэтому числовая часть извлекается отдельно,
+        -- иначе "10" встало бы перед "8"
         ORDER BY p.project_name,
                  CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
-                 pd.sort_order NULLS LAST, pd.doc_id
+                 NULLIF(regexp_replace(COALESCE(pd.doc_number, ''), '\D', '', 'g'), '')::bigint
+                     NULLS LAST,
+                 pd.doc_number, pd.doc_id
     """, {"sid": supplier_id})
 
     stage_docs = query_db("""
@@ -206,7 +257,9 @@ def render_supplier_documents(supplier_id):
             for _, d in mine.iterrows():
                 mark = "✅" if d['is_signed'] else "⏳"
                 date_txt = f" от {d['doc_date'].strftime('%d.%m.%Y')}" if pd.notna(d['doc_date']) else ""
-                st.markdown(f"{mark} **{d['title']}**{date_txt} — {_link(d['doc_url'], d['doc_name'])}",
+                cov_txt = (f" — {d['coverage']}"
+                           if pd.notna(d.get('coverage')) and str(d['coverage']).strip() else "")
+                st.markdown(f"{mark} **{d['title']}**{date_txt} — {_link(d['doc_url'], d['doc_name'])}{cov_txt}",
                             unsafe_allow_html=True)
 
             mine_st = stage_docs[stage_docs['project_name'] == proj] if not stage_docs.empty else stage_docs
