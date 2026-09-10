@@ -113,13 +113,16 @@ def calculate_buro_progress(df):
 
     # --- БЛОК А (Проекты без CHANGES_PROTOCOL и ADDITIONAL_AGREEMENT) ---
 
-    # А.1. CONTRACT_SIGNED
+    # А.1. Подписание документа
+    # У проекта-соглашения это CONTRACT_SIGNED, у проекта-протокола - PROTOCOL_SIGNED:
+    # этапы разные по смыслу, но в расчёте равнозначны, поэтому ветка общая.
     # Соглашение и протоколы проекта подписываются независимо друг от друга,
     # поэтому 100% даётся не за первый закрытый этап подписания, а только когда
     # подписаны ВСЕ документы проекта (project_documents, см. data_provider).
     # Проекты без заведённых документов считаются по-прежнему - обратная совместимость.
-    if 'CONTRACT_SIGNED' in codes_in_df:
-        cs_rows = df[df['stage_code'] == 'CONTRACT_SIGNED']
+    SIGNING_CODES = ['CONTRACT_SIGNED', 'PROTOCOL_SIGNED']
+    if any(c in codes_in_df for c in SIGNING_CODES):
+        cs_rows = df[df['stage_code'].isin(SIGNING_CODES)]
         if not cs_rows.empty and (cs_rows['status'] == 'Выполнено').any():
             docs_total, docs_signed = _get_doc_counts(df)
             if docs_total > 0:
@@ -128,9 +131,11 @@ def calculate_buro_progress(df):
                         f"Docs signed: {docs_signed}/{docs_total} = {progress:.1f}%")
             return 100.0, 100.0, 0.0, "Contract Signed: 100%"
 
-    # А.2. DOCUMENT_APPROVAL
-    if 'DOCUMENT_APPROVAL' in codes_in_df:
-        da_df = df[df['stage_code'] == 'DOCUMENT_APPROVAL']
+    # А.2. Согласование документа
+    # У соглашения - DOCUMENT_APPROVAL, у протокола - PROTOCOL_NEGOTIATIONS.
+    APPROVAL_CODES = ['DOCUMENT_APPROVAL', 'PROTOCOL_NEGOTIATIONS']
+    if any(c in codes_in_df for c in APPROVAL_CODES):
+        da_df = df[df['stage_code'].isin(APPROVAL_CODES)]
         if not da_df.empty:
             latest_idx = da_df['iteration_count'].idxmax()
             latest_iter = da_df.loc[latest_idx]
@@ -470,9 +475,11 @@ def render_bureaucracy_audit_table(df):
     
     b_df = df[df['track_type'] == 'bureaucracy']
     
-    all_stages = ['START_APP', 'NEGOTIATIONS_REQUEST', 'NEGOTIATIONS', 'PROTOCOL_NEGOTIATIONS', 
-                  'SET_APPOINTMENT', 'VERIFICATION', 'DOCUMENT_APPROVAL', 'CONTRACT_SIGNED', 
-                  'CHANGES_PROTOCOL', 'ADDITIONAL_AGREEMENT']
+    # Протокольные проекты используют свои этапы согласования и подписания
+    # (PROTOCOL_NEGOTIATIONS / PROTOCOL_SIGNED) вместо DOCUMENT_APPROVAL / CONTRACT_SIGNED
+    all_stages = ['START_APP', 'NEGOTIATIONS_REQUEST', 'NEGOTIATIONS', 'PROTOCOL_NEGOTIATIONS',
+                  'SET_APPOINTMENT', 'VERIFICATION', 'DOCUMENT_APPROVAL', 'CONTRACT_SIGNED',
+                  'PROTOCOL_SIGNED', 'CHANGES_PROTOCOL', 'ADDITIONAL_AGREEMENT']
     
     audit_data = []
     

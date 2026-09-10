@@ -24,9 +24,13 @@ def _build_events(raw_df):
     done['event_date'] = done['actual_end']
     done['is_active'] = False
 
+    # Этапы в работе всегда сверху ленты: они актуальны сегодня, независимо от
+    # того, когда начались. Дата начала остаётся в подписи карточки.
     active = raw_df[(raw_df['status'] == 'В работе') & raw_df['actual_start'].notna()].copy()
-    active['event_date'] = active['actual_start']
+    active['event_date'] = pd.Timestamp.today().normalize()
+    active['started_at'] = active['actual_start']
     active['is_active'] = True
+    done['started_at'] = pd.NaT
 
     df = pd.concat([done, active], ignore_index=True)
     if df.empty:
@@ -51,6 +55,7 @@ def _build_events(raw_df):
 
         rows.append({
             'event_date': first['event_date'],
+            'started_at': first['started_at'],
             'is_active': bool(first['is_active']),
             'supplier_name': first['supplier_name'],
             'project_name': first['project_name'],
@@ -114,14 +119,18 @@ def render_events_tab():
                 st.caption(f"📁 {ev['scope']}")
 
                 it = f" (ит. {int(ev['iteration_count'])})" if pd.notna(ev['iteration_count']) else ""
-                # Незакрытый этап датируется началом работы - помечаем явно,
-                # чтобы его нельзя было принять за выполненный
-                if ev['is_active']:
-                    prefix = f"⏳ В работе с {format_date_ru_local(ev['event_date'].date())} — "
+                # Незакрытый этап помечается отдельным бейджем рядом с названием,
+                # иначе пометка и название сливаются в одну полосу
+                stage_badge = badge_html(f"{ev['stage_name']}{it}", s_color, s_text, icon=track_icon)
+                if ev['is_active'] and pd.notna(ev['started_at']):
+                    work_badge = badge_html(f"⏳ В работе с {format_date_ru_local(ev['started_at'].date())}",
+                                            "#FDEBD0", "#935116")
+                    st.markdown(
+                        f'<div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; '
+                        f'font-size:0.95rem;">{work_badge}{stage_badge}</div>',
+                        unsafe_allow_html=True)
                 else:
-                    prefix = ""
-                st.markdown(badge_html(f"{prefix}{ev['stage_name']}{it}", s_color, s_text, icon=track_icon),
-                            unsafe_allow_html=True)
+                    st.markdown(stage_badge, unsafe_allow_html=True)
 
                 # Пустой комментарий заменяется названием этапа: строка без текста
                 # выглядела бы как потерянные данные

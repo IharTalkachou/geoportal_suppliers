@@ -39,7 +39,9 @@ def sync_project_status(session, project_id: int):
     if doc_counts and doc_counts['total'] > 0:
         is_signed = (doc_counts['signed'] == doc_counts['total'])
     else:
-        is_signed = any((done_stages['stage_name'] == 'Документ подписан') | (done_stages['stage_code'] == 'CONTRACT_SIGNED'))
+        # Подписание: у соглашения - "Документ подписан", у протокола - "Протокол подписан"
+        is_signed = any(done_stages['stage_name'].isin(['Документ подписан', 'Протокол подписан'])
+                        | done_stages['stage_code'].isin(['CONTRACT_SIGNED', 'PROTOCOL_SIGNED']))
     
     # --- РАСЧЕТ ЗАВЕРШЕННОСТИ ТЕХНОЛОГИИ ---
     # Сколько всего наборов в проекте

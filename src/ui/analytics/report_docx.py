@@ -828,7 +828,13 @@ def fetch_bureaucracy_logic_stats(start_t, end_t):
     """Сбор статистики для подразделов 6.1.2 (блоки 10-16)"""
     
     def get_sups_by_stage(stage_code, micro_status=4, only_first_iter=False, extra_where=""):
-        where_clause = f"stg.stage_code = '{stage_code}'"
+        # stage_code - код или список кодов: у проекта-протокола свои этапы
+        # согласования и подписания, равнозначные этапам соглашения
+        if isinstance(stage_code, (list, tuple, set)):
+            codes = ", ".join(f"'{c}'" for c in stage_code)
+            where_clause = f"stg.stage_code IN ({codes})"
+        else:
+            where_clause = f"stg.stage_code = '{stage_code}'"
         if micro_status:
             where_clause += f" AND ps.micro_status = {micro_status}"
         if only_first_iter:
@@ -851,7 +857,8 @@ def fetch_bureaucracy_logic_stats(start_t, end_t):
     b10_sups = get_sups_by_stage('NEGOTIATIONS')
     
     # Блок 11: Согласование (ТОЛЬКО 1-я итерация, по actual_end)
-    b11_sups = get_sups_by_stage('DOCUMENT_APPROVAL', only_first_iter=True, extra_where="s.is_mandatory = TRUE")
+    b11_sups = get_sups_by_stage(['DOCUMENT_APPROVAL', 'PROTOCOL_NEGOTIATIONS'],
+                                 only_first_iter=True, extra_where="s.is_mandatory = TRUE")
 
     # Блок 12: Подписано Соглашение (is_agreement_project = TRUE)
     b12_sups = get_sups_by_stage('CONTRACT_SIGNED', extra_where="p.is_agreement_project = TRUE")
@@ -865,8 +872,8 @@ def fetch_bureaucracy_logic_stats(start_t, end_t):
         JOIN stages stg ON ps.stage_id = stg.stage_id
         JOIN project_items pi ON p.project_id = pi.project_id
         JOIN info_types it ON pi.info_id = it.info_id
-        WHERE stg.stage_code = 'CONTRACT_SIGNED' 
-          AND ps.micro_status = 4 
+        WHERE stg.stage_code IN ('CONTRACT_SIGNED', 'PROTOCOL_SIGNED')
+          AND ps.micro_status = 4
           AND p.is_agreement_project = FALSE
           AND ps.actual_end BETWEEN :s AND :e
     """, {"s": start_t, "e": end_t})

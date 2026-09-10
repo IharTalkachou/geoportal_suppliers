@@ -413,7 +413,8 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
     # прямо здесь - отдельно ходить в блок «Документы проекта» не требуется.
     signed_doc_ids = []
     cur_code = stage_map.get(st.session_state.d_stage, {}).get("code")
-    is_signing_stage = cur_code == 'CONTRACT_SIGNED'
+    # Подписание: у соглашения - "Документ подписан", у протокола - "Протокол подписан"
+    is_signing_stage = cur_code in ('CONTRACT_SIGNED', 'PROTOCOL_SIGNED')
     # Этап "Согласование протокола" - работа над документом ДО подписания:
     # соглашение может быть уже подписано, пока протоколы ещё согласовываются
     is_drafting_stage = cur_code == 'PROTOCOL_NEGOTIATIONS'
@@ -797,13 +798,22 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
     # 1. Справочники
     s_ref = query_db("SELECT stage_id, stage_name, duration_days, stage_code FROM stages WHERE track_category = '1. Документарный' ORDER BY stage_order")
     m_ref = query_db("SELECT micro_status_id, micro_status_name FROM ref_micro_statuses")
-    stage_map = {r['stage_name']: {"id": int(r['stage_id']), "duration": int(r['duration_days'] or 0),
-                                   "code": r['stage_code']} for _, r in s_ref.iterrows()}
     micro_map = {r['micro_status_name']: int(r['micro_status_id']) for _, r in m_ref.iterrows()}
 
     is_agreement_project = bool(query_db(
         "SELECT is_agreement_project FROM projects WHERE project_id = :pid", {"pid": project_id}
     ).iloc[0]['is_agreement_project'])
+
+    # Этапы различаются по типу проекта: соглашение согласуют и подписывают как
+    # документ, протокол - как протокол. Допсоглашение бывает только у соглашения.
+    # CHANGES_PROTOCOL доступен обоим: протоколы есть и внутри проекта-соглашения.
+    AGREEMENT_ONLY = {'DOCUMENT_APPROVAL', 'CONTRACT_SIGNED', 'ADDITIONAL_AGREEMENT'}
+    PROTOCOL_ONLY = {'PROTOCOL_SIGNED'}
+    hidden = PROTOCOL_ONLY if is_agreement_project else AGREEMENT_ONLY
+    s_ref = s_ref[~s_ref['stage_code'].isin(hidden)]
+
+    stage_map = {r['stage_name']: {"id": int(r['stage_id']), "duration": int(r['duration_days'] or 0),
+                                   "code": r['stage_code']} for _, r in s_ref.iterrows()}
 
     # 2. Данные
     df = query_db("""
