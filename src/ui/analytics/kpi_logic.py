@@ -39,6 +39,16 @@ def get_proximity_color(target_date, mode="deadline"):
         if diff <= 30: return "#1E8449", "white"
         return "#145A32", "white"
 
+TRACK_SUBTAB_LABEL = {
+    'bureaucracy': "📜 Согласование документов",
+    'tech': "⚙️ Техническая проработка",
+}
+
+def _goto_project_cb(project_id, track_type):
+    st.session_state["main_nav"] = "📋 Проекты"
+    st.session_state["filter_project_id"] = int(project_id)
+    st.session_state[f"project_nav_{int(project_id)}"] = TRACK_SUBTAB_LABEL.get(track_type, "📄 Паспорт")
+
 def check_sla_alert(row):
     """Централизованная логика проверки просрочек SLA"""
     status, code = row['status'], row['stage_code']
@@ -87,7 +97,8 @@ def render_kpi_tab():
     # Распределение
     g_work = active_df[active_df['status'].isin(['В работе', 'Просрочено'])].copy()
     g_wait = active_df[active_df['status'] == 'Ожидание'].copy()
-    g_hold = active_df[active_df['status'].isin(['Отложено', 'Планируется'])].copy()
+    g_planned = active_df[active_df['status'] == 'Планируется'].copy()
+    g_deferred = active_df[active_df['status'] == 'Отложено'].copy()
 
     col_left, col_right = st.columns(2)
     with col_left:
@@ -95,8 +106,10 @@ def render_kpi_tab():
         _render_smart_group(g_work, raw_df, "work", is_planned=False)
         st.write("<div style='margin-top:20px'></div>", unsafe_allow_html=True)
         st.divider()
-        st.subheader("⏳ Отложено / План")
-        _render_smart_group(g_hold, raw_df, "hold", is_planned=True)
+        st.subheader("⏳ Планируется")
+        _render_smart_group(g_planned, raw_df, "planned", is_planned=True)
+        with st.expander(f"🗄️ Отложено ({len(g_deferred)})", expanded=False):
+            _render_smart_group(g_deferred, raw_df, "deferred", is_planned=True)
     with col_right:
         st.subheader("📨 Ожидание")
         _render_smart_group(g_wait, raw_df, "wait", is_planned=False)
@@ -171,31 +184,21 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
                     st.markdown(f"<div style='height: {selected_index * 96}px;'></div>", unsafe_allow_html=True)
 
                     s_color = selected_row.get('stage_color') or "#BDC3C7"
-                    related_items = raw_all[raw_all['uid'] == selected_row['uid']]['info_name'].unique().tolist()
-                    items_str = ", ".join([str(i) for i in related_items if i != '—'])
+                    comment_text = selected_row['comments'] or selected_row['stage_name']
 
                     with st.container(border=True):
                         st.markdown(f"### 🏢 {selected_row['supplier_name']}")
                         st.caption(f"Проект: {selected_row['project_name']}")
-                        
-                        if not is_planned:
-                            val = format_date_ru_local(selected_row['actual_start']) if pd.notna(selected_row['actual_start']) else "не начато"
-                            st.write(f"🚀 **Фактическое начало:** {val}")
-                        else:
-                            val = format_date_ru_local(selected_row['planned_end']) if pd.notna(selected_row['planned_end']) else "—"
-                            st.write(f"🎯 **Плановое завершение:** {val}")
-                        
-                        st.divider()
+
                         st.write(f"👤 **Ответственный:** {selected_row['responsible_name'] or '—'}")
-                        if items_str: 
-                        #if related_items:
-                            st.markdown("**📦 Состав:**")
-                            for item in related_items:
-                                st.markdown(f"<div style='font-size:0.85rem; margin: 1px 0; color: #444;'>• {item}</div>", unsafe_allow_html=True)
-                        st.write("")
                         st.markdown(f'<div style="margin-top:15px; padding:10px; background:#f9f9f9; border-left:4px solid {s_color};">'
-                                    f'<b>💬 Комментарий:</b><br>{selected_row["comments"] or "—"}</div>', 
+                                    f'<b>💬 Комментарий:</b><br>{comment_text}</div>',
                                     unsafe_allow_html=True)
+                        st.write("")
+                        st.button(
+                            "➡️ Перейти к проекту", key=f"goto_proj_{key_prefix}_{selected_row['uid']}",
+                            on_click=_goto_project_cb, args=(selected_row['project_id'], selected_row['track_type']),
+                        )
                 else:
                     # 🟢 ИСПРАВЛЕНИЕ: Если проект исчез из списка (отфильтрован), сбрасываем выбор
                     st.session_state[state_key] = None
