@@ -61,42 +61,55 @@ def calculate_buro_progress(df):
     has_ext = any(c in ['CHANGES_PROTOCOL', 'ADDITIONAL_AGREEMENT'] for c in codes_in_df)
     
     # --- БЛОК Б (Проекты с CHANGES_PROTOCOL или ADDITIONAL_AGREEMENT) ---
+    # Внесение изменений и допсоглашение - работа НАД уже подписанным документом.
+    # Пока она идёт, проект временно отходит от завершённого состояния; как только
+    # она закончена, он снова считается выполненным на 100%.
+    #
+    # Вес делится между теми этапами ветки, которые в проекте реально есть.
+    # Раньше он был жёстко закреплён (5% на CHANGES_PROTOCOL + 5% на
+    # ADDITIONAL_AGREEMENT), из-за чего проект с одним типом этапа упирался
+    # в потолок 95% даже после его завершения.
     if has_ext:
-        # CP (5%) и AA (5%) считаются независимо
-        cp_df = df[df['stage_code'] == 'CHANGES_PROTOCOL']
-        if not cp_df.empty:
-            total_cp = len(cp_df)
-            done_cp = len(cp_df[cp_df['status'] == 'Выполнено'])
-            latest_cp = cp_df.loc[cp_df['iteration_count'].idxmax()]
-            
-            if latest_cp['status'] == 'Выполнено':
-                passed_cp = 5.0
-                active_cp = 0.0
+        ext_codes = [c for c in ['CHANGES_PROTOCOL', 'ADDITIONAL_AGREEMENT'] if c in codes_in_df]
+        weight = 10.0 / len(ext_codes)  # один этап -> 10%, оба -> по 5%
+
+        passed_ext = 0.0
+        active_ext = 0.0
+        descs = []
+        for code in ext_codes:
+            c_df = df[df['stage_code'] == code]
+            total_c = len(c_df)
+            done_c = len(c_df[c_df['status'] == 'Выполнено'])
+            latest_c = c_df.loc[c_df['iteration_count'].idxmax()]
+
+            if latest_c['status'] == 'Выполнено':
+                p_c, a_c = weight, 0.0
             else:
-                passed_cp = 5.0 * (done_cp / total_cp)
-                active_cp = 5.0 * (get_sla_ratio(latest_cp) / total_cp)
-        else:
-            passed_cp = 0.0
-            active_cp = 0.0
-            
-        aa_df = df[df['stage_code'] == 'ADDITIONAL_AGREEMENT']
-        if not aa_df.empty:
-            total_aa = len(aa_df)
-            done_aa = len(aa_df[aa_df['status'] == 'Выполнено'])
-            latest_aa = aa_df.loc[aa_df['iteration_count'].idxmax()]
-            
-            if latest_aa['status'] == 'Выполнено':
-                passed_aa = 5.0
-                active_aa = 0.0
-            else:
-                passed_aa = 5.0 * (done_aa / total_aa)
-                active_aa = 5.0 * (get_sla_ratio(latest_aa) / total_aa)
-        else:
-            passed_aa = 0.0
-            active_aa = 0.0
-            
-        progress = 90.0 + passed_cp + active_cp + passed_aa + active_aa
-        return min(100.0, progress), (90.0 + passed_cp + passed_aa), (active_cp + active_aa), f"Ext: 90% + CP({passed_cp:.1f}% passed + {active_cp:.1f}% active) + AA({passed_aa:.1f}% passed + {active_aa:.1f}% active)"
+                p_c = weight * (done_c / total_c)
+                a_c = weight * (get_sla_ratio(latest_c) / total_c)
+            passed_ext += p_c
+            active_ext += a_c
+            descs.append(f"{code}({p_c:.1f}% passed + {a_c:.1f}% active)")
+
+        all_ext_done = all(
+            df[df['stage_code'] == c].loc[df[df['stage_code'] == c]['iteration_count'].idxmax()]['status'] == 'Выполнено'
+            for c in ext_codes
+        )
+
+        # Работа над документами завершена - проект снова выполнен. Но 100% даётся
+        # только если подписаны все его документы: незакрытый документ означает,
+        # что изменения ещё не доведены до подписания.
+        if all_ext_done:
+            docs_total, docs_signed = _get_doc_counts(df)
+            if docs_total > 0 and docs_signed < docs_total:
+                progress = 100.0 * docs_signed / docs_total
+                return (progress, progress, 0.0,
+                        f"Ext done, docs signed: {docs_signed}/{docs_total} = {progress:.1f}%")
+            return 100.0, 100.0, 0.0, f"Ext completed: 100% ({'; '.join(descs)})"
+
+        progress = 90.0 + passed_ext + active_ext
+        return (min(100.0, progress), 90.0 + passed_ext, active_ext,
+                f"Ext: 90% + " + " + ".join(descs))
 
     # --- БЛОК А (Проекты без CHANGES_PROTOCOL и ADDITIONAL_AGREEMENT) ---
 
