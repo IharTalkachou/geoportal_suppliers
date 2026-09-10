@@ -1,8 +1,10 @@
+import sys
+
 import streamlit as st
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from config.database import engine
-from config.cache import query_db
+from config.cache import query_db, clear_cache
 
 
 # Импортируем наши новые модули
@@ -28,6 +30,7 @@ def render_analytics_tab(user_role="user"):
     
     # 1. СИНХРОНИЗАЦИЯ (Один раз при загрузке вкладки)
     with st.spinner("Синхронизация данных..."):
+        _sync_planned_to_active()
         _sync_overdue_log_internal()
 
     # 2. ПОД-НАВИГАЦИЯ (Segmented Control)
@@ -89,6 +92,41 @@ def render_analytics_tab(user_role="user"):
     else:
         st.info("Разработка детальных тепловых карт в процессе переноса в новую модель...")
         # Здесь в будущем будет вызов heatmap_logic.render_heatmap(track)'''
+
+def _sync_planned_to_active():
+    """Этапы, у которых наступила плановая дата старта, переводятся в «В работе».
+
+    Запускается при заходе в Аналитику - отдельного планировщика в приложении нет,
+    поэтому этап «оживает» не в полночь, а когда кто-то открыл вкладку. Для задачи
+    это приемлемо: важно, чтобы такие этапы были видны в аналитике, а точную дату
+    старта всегда можно поправить в карточке этапа.
+
+    actual_start проставляется намеренно (COALESCE - не затирая уже указанную):
+    без неё этап не попадает ни в ленту событий, ни в расчёт SLA, а форма этапа
+    блокирует это поле для статуса «Планируется». Если старт просрочен, дата
+    встанет задним числом - это осознанный компромисс.
+
+    micro_status: 1 - «Планируется», 2 - «В работе».
+    """
+    query = """
+        UPDATE project_stages
+        SET micro_status = 2,
+            actual_start = COALESCE(actual_start, planned_start)
+        WHERE micro_status = 1
+          AND planned_start IS NOT NULL
+          AND planned_start <= CURRENT_DATE
+          AND actual_end IS NULL
+    """
+    try:
+        with Session(engine) as session:
+            res = session.execute(text(query))
+            session.commit()
+            # Снапшот аналитики кэширован: без сброса «ожившие» этапы
+            # появятся только после истечения TTL
+            if res.rowcount:
+                clear_cache()
+    except Exception as e:
+        print(f"SYNC_PLANNED_TO_ACTIVE failed: {e}", file=sys.stderr)
 
 def _sync_overdue_log_internal():
     """Обновленная логика синхронизации просрочек с поддержкой JSONB и единой таблицы этапов"""
