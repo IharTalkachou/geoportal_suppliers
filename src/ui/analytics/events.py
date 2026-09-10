@@ -10,14 +10,25 @@ from ui.analytics.kpi_logic import format_date_ru_local, badge_html
 # ==========================================
 
 def _build_events(raw_df):
-    """Свод выполненных этапов обоих треков: одна строка на событие.
+    """Свод этапов обоих треков: одна строка на событие.
+
+    Выполненные этапы датируются фактическим завершением, этапы в работе -
+    фактическим началом; и те и другие попадают в одну ленту.
 
     Технологическая ветка снапшота развёрнута по affected_item_ids, поэтому один
     этап, затрагивающий несколько видов сведений, приходит несколькими одинаковыми
     строками. Здесь они схлопываются обратно в одно событие, а виды сведений
     (или их части) склеиваются в одну подпись.
     """
-    df = raw_df[(raw_df['status'] == 'Выполнено') & raw_df['actual_end'].notna()].copy()
+    done = raw_df[(raw_df['status'] == 'Выполнено') & raw_df['actual_end'].notna()].copy()
+    done['event_date'] = done['actual_end']
+    done['is_active'] = False
+
+    active = raw_df[(raw_df['status'] == 'В работе') & raw_df['actual_start'].notna()].copy()
+    active['event_date'] = active['actual_start']
+    active['is_active'] = True
+
+    df = pd.concat([done, active], ignore_index=True)
     if df.empty:
         return df
 
@@ -39,7 +50,8 @@ def _build_events(raw_df):
             scope = first['project_name']
 
         rows.append({
-            'actual_end': first['actual_end'],
+            'event_date': first['event_date'],
+            'is_active': bool(first['is_active']),
             'supplier_name': first['supplier_name'],
             'project_name': first['project_name'],
             'scope': scope,
@@ -51,7 +63,7 @@ def _build_events(raw_df):
         })
 
     events = pd.DataFrame(rows)
-    return events.sort_values('actual_end', ascending=False)
+    return events.sort_values('event_date', ascending=False)
 
 
 def render_events_tab():
@@ -80,7 +92,7 @@ def render_events_tab():
     if period != "Всё время":
         days = 7 if period == "За неделю" else 30
         cutoff = pd.Timestamp.today().normalize() - timedelta(days=days)
-        events = events[events['actual_end'] >= cutoff]
+        events = events[events['event_date'] >= cutoff]
 
     if events.empty:
         st.info("За выбранный период событий нет.")
@@ -90,7 +102,7 @@ def render_events_tab():
 
     # --- ЛЕНТА ---
     # Группировка по дате: заголовок-дата, под ним события этого дня
-    for day, group in events.groupby(events['actual_end'].dt.date, sort=False):
+    for day, group in events.groupby(events['event_date'].dt.date, sort=False):
         st.markdown(f"##### {format_date_ru_local(day)}")
         for _, ev in group.iterrows():
             track_icon = "📄" if ev['track_type'] == 'bureaucracy' else "💻"
@@ -102,10 +114,19 @@ def render_events_tab():
                 st.caption(f"📁 {ev['scope']}")
 
                 it = f" (ит. {int(ev['iteration_count'])})" if pd.notna(ev['iteration_count']) else ""
-                st.markdown(badge_html(f"{ev['stage_name']}{it}", s_color, s_text, icon=track_icon),
+                # Незакрытый этап датируется началом работы - помечаем явно,
+                # чтобы его нельзя было принять за выполненный
+                if ev['is_active']:
+                    prefix = f"⏳ В работе с {format_date_ru_local(ev['event_date'].date())} — "
+                else:
+                    prefix = ""
+                st.markdown(badge_html(f"{prefix}{ev['stage_name']}{it}", s_color, s_text, icon=track_icon),
                             unsafe_allow_html=True)
 
-                comment = ev['comments'] if pd.notna(ev['comments']) and str(ev['comments']).strip() else "—"
+                # Пустой комментарий заменяется названием этапа: строка без текста
+                # выглядела бы как потерянные данные
+                comment = (ev['comments'] if pd.notna(ev['comments']) and str(ev['comments']).strip()
+                           else ev['stage_name'])
                 st.markdown(
                     f'<div style="margin-top:8px; padding:8px; background:#f9f9f9; '
                     f'border-left:3px solid {s_color}; font-size:0.85rem;">💬 {comment}</div>',

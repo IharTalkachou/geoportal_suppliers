@@ -509,7 +509,16 @@ def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, i
         # Режим нового проекта (Колонка 1 пуста)
         st.session_state["ds_form_proj"] = "(Новый проект)"
         st.text_input("Название нового проекта *", key="ds_form_new_p")
-        st.checkbox("Проект Соглашения", key="ds_form_new_p_agr")
+        # Соглашение у поставщика одно - если оно уже есть, галочка недоступна
+        _sup_agr = query_db("""
+            SELECT project_name FROM projects
+            WHERE supplier_id = :sid AND is_agreement_project LIMIT 1
+        """, {"sid": int(supplier_id)})
+        _agr_taken = _sup_agr.iloc[0]['project_name'] if not _sup_agr.empty else None
+        st.checkbox("Проект Соглашения", key="ds_form_new_p_agr",
+                    disabled=bool(_agr_taken),
+                    help=(f"Соглашение уже закреплено за проектом «{_agr_taken}»"
+                          if _agr_taken else None))
     else:
         # Режим добавления/изменения в существующий проект
         proj_names = projs_df["project_name"].tolist()

@@ -116,7 +116,17 @@ def render_project_dashboard(session, user_role="user"):
                     # 🟢 МЫ УБРАЛИ st.form, чтобы кнопка могла напрямую влиять на session_state
                     # Это сделает процесс "создать и открыть" более надежным
                     new_p_name = st.text_input("Название проекта *", key="new_proj_name_field")
-                    new_p_agr = st.checkbox("Проект Соглашения (первичное подключение)", key="new_proj_agr_field")
+                    # Соглашение у поставщика одно - если оно уже есть, галочка недоступна
+                    _sup_agr = query_db("""
+                        SELECT project_name FROM projects
+                        WHERE supplier_id = :sid AND is_agreement_project LIMIT 1
+                    """, {"sid": int(sup_map[selected_sup])})
+                    _agr_taken = _sup_agr.iloc[0]['project_name'] if not _sup_agr.empty else None
+                    new_p_agr = st.checkbox(
+                        "Проект Соглашения (первичное подключение)", key="new_proj_agr_field",
+                        disabled=bool(_agr_taken),
+                        help=(f"Соглашение уже закреплено за проектом «{_agr_taken}»"
+                              if _agr_taken else None))
                     
                     if st.button("🚀 Создать и открыть", width='stretch'):
                         if new_p_name:
@@ -328,11 +338,24 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
             with st.form("edit_proj_form"):
                 st.markdown("#### 📝 Редактирование реквизитов")
                 
+                # Соглашение у поставщика одно: если оно уже закреплено за другим
+                # проектом, галочку здесь ставить нельзя
+                other_agr = query_db("""
+                    SELECT project_name FROM projects
+                    WHERE supplier_id = :sid AND is_agreement_project AND project_id <> :pid
+                    LIMIT 1
+                """, {"sid": int(proj_data['supplier_id']), "pid": proj_id_int})
+                agr_taken_by = other_agr.iloc[0]['project_name'] if not other_agr.empty else None
+
                 col_f1, col_f2 = st.columns(2)
                 with col_f1:
                     p_name_in = st.text_input("Название проекта", value=proj_data['project_name'])
                     p_sup_in = st.selectbox("Поставщик", sup_names, index=sup_names.index(proj_data['supplier_name']) if proj_data['supplier_name'] in sup_names else 0)
-                    p_is_agr = st.checkbox("Проект Соглашения", value=bool(proj_data['is_agreement_project']))
+                    p_is_agr = st.checkbox(
+                        "Проект Соглашения", value=bool(proj_data['is_agreement_project']),
+                        disabled=bool(agr_taken_by),
+                        help=(f"Соглашение уже закреплено за проектом «{agr_taken_by}»"
+                              if agr_taken_by else None))
                     p_stat_in = st.selectbox("Статус", stat_names, index=stat_names.index(proj_data['status_name']) if proj_data['status_name'] in stat_names else 0)
                 
                 with col_f2:
