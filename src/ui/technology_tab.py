@@ -55,7 +55,16 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
     if "td_p_start" not in st.session_state:
         st.session_state.td_p_start = existing_data['planned_start'] if is_edit else date.today()
     if "td_affected_ids" not in st.session_state:
-        st.session_state.td_affected_ids = existing_data['affected_item_ids'] if (is_edit and existing_data.get('affected_item_ids')) else []
+        # Из БД приходит массив объектов {item_id, part_id}; внутри формы
+        # охват хранится списком пар [item_id, part_id]
+        _raw = existing_data['affected_item_ids'] if (is_edit and existing_data.get('affected_item_ids')) else []
+        if isinstance(_raw, str):
+            try: _raw = json.loads(_raw)
+            except Exception: _raw = []
+        st.session_state.td_affected_ids = [
+            [int(a['item_id']), int(a['part_id']) if a.get('part_id') is not None else None]
+            for a in _raw if isinstance(a, dict)
+        ]
     if "td_a_start" not in st.session_state:
         st.session_state.td_a_start = existing_data['actual_start'] if is_edit else None
     if "td_a_end" not in st.session_state:
@@ -71,10 +80,22 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
         # meta_days и data_days нужны только на этапах Размещение метаданных Поставщиком и Размещение наборов
         # Коды этапов: META_WAIT и DATA_WAIT (проверь соответствие в своей таблице stages)
         
-        if sel_code == 'META_WAIT' and ids:
-            days = project_items[project_items['item_id'].isin(ids)]['meta_days'].max()
-        elif sel_code == 'DATA_WAIT' and ids:
-            days = project_items[project_items['item_id'].isin(ids)]['data_days'].max()
+        # ids - список пар [item_id, part_id]; срок берём по выбранным строкам
+        # состава: у нацеленной части - её собственный, иначе - по виду сведений
+        sel_keys = {(int(a[0]), int(a[1]) if a[1] is not None else None) for a in ids}
+        if sel_keys:
+            mask = project_items.apply(
+                lambda r: (int(r['item_id']),
+                           int(r['part_id']) if pd.notna(r.get('part_id')) else None) in sel_keys,
+                axis=1)
+            sel_rows = project_items[mask]
+        else:
+            sel_rows = project_items.iloc[0:0]
+
+        if sel_code == 'META_WAIT' and not sel_rows.empty:
+            days = sel_rows['meta_days'].max()
+        elif sel_code == 'DATA_WAIT' and not sel_rows.empty:
+            days = sel_rows['data_days'].max()
         else:
             # Для всех остальных этапов читаем duration_days из таблицы stages (из справочника)
             days = sel_stage_info.get('duration', 0)
@@ -130,15 +151,28 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
     '''if available_items.empty and not is_edit:
         st.warning("⚠️ Все наборы уже прошли этот этап."); affected_ids = []
     else:'''
-    item_opts = {f"{r['dataset_name']} | {r['info_name']}": int(r['item_id']) for _, r in available_items.iterrows()}
-    
+    # Варианты: вид сведений целиком и (если поставщик его разбил) каждая часть.
+    # Часть = протокол, у неё свои сроки и она публикуется отдельно.
+    item_opts = {}
+    for _, r in available_items.iterrows():
+        base = f"{r['dataset_name']} | {r['info_name']}"
+        if pd.notna(r.get('part_id')):
+            item_opts[f"{base} → {r['part_name']}"] = (int(r['item_id']), int(r['part_id']))
+        elif bool(r.get('has_parts')):
+            item_opts[f"{base} (целиком)"] = (int(r['item_id']), None)
+        else:
+            item_opts[base] = (int(r['item_id']), None)
+
     def on_items_change():
-        st.session_state.td_affected_ids = [item_opts[l] for l in st.session_state.td_multi_items]
+        st.session_state.td_affected_ids = [list(item_opts[l]) for l in st.session_state.td_multi_items]
         update_logic_callback()
 
+    # td_affected_ids хранится как список пар [item_id, part_id]
+    _current = {(int(a[0]), int(a[1]) if a[1] is not None else None)
+                for a in st.session_state.td_affected_ids}
     st.multiselect(
-        "Выберите виды сведений *", options=list(item_opts.keys()), 
-        default=[l for l, iid in item_opts.items() if iid in st.session_state.td_affected_ids],
+        "Выберите виды сведений *", options=list(item_opts.keys()),
+        default=[l for l, val in item_opts.items() if val in _current],
         key="td_multi_items", on_change=on_items_change
     )
     affected_ids = st.session_state.td_affected_ids
@@ -163,7 +197,11 @@ def tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items, e
                 "mst": micro_map[st.session_state.td_ms], "ps": st.session_state.td_p_start,
                 "pe": st.session_state.td_p_end, "as": st.session_state.td_a_start,
                 "ae": st.session_state.td_a_end, "comm": st.session_state.td_comm,
-                "items": json.dumps(affected_ids), "rid": r_id
+                # Пары [item_id, part_id] -> [{"item_id": N, "part_id": M|null}]
+                "items": json.dumps([{"item_id": int(a[0]),
+                                      "part_id": int(a[1]) if a[1] is not None else None}
+                                     for a in affected_ids]),
+                "rid": r_id
             }
             if is_edit:
                 params["id"] = int(existing_data['stage_progress_id'])
@@ -186,12 +224,36 @@ def render_technology_tab(session, project_id, user_role="user"):
     
     with st.spinner("Загрузка технологий..."):
         # 1. Состав + SLA
+        # Состав с разворотом по частям: строка на часть у тех видов сведений,
+        # которые поставщик разбил (есть project_item_part_details), плюс строка
+        # "целиком" на каждый вид. Сроки берутся с части, если она задана.
         project_items = query_db("""
-            SELECT pi.item_id, d.dataset_name, i.info_name, pi.meta_days, pi.data_days
+            SELECT pi.item_id, NULL::int AS part_id, NULL::text AS part_name,
+                   d.dataset_name, i.info_name,
+                   pi.meta_days, pi.data_days,
+                   EXISTS (SELECT 1 FROM project_item_part_details pd
+                            WHERE pd.item_id = pi.item_id) AS has_parts,
+                   0 AS ord, NULL::int AS part_ord
             FROM project_items pi
             JOIN datasets d ON pi.dataset_id = d.dataset_id
             JOIN info_types i ON pi.info_id = i.info_id
             WHERE pi.project_id = :pid
+
+            UNION ALL
+
+            SELECT pi.item_id, pd.part_id, itp.part_name,
+                   d.dataset_name, i.info_name,
+                   COALESCE(pd.meta_days, pi.meta_days), COALESCE(pd.data_days, pi.data_days),
+                   TRUE AS has_parts,
+                   1 AS ord, itp.sort_order AS part_ord
+            FROM project_items pi
+            JOIN datasets d ON pi.dataset_id = d.dataset_id
+            JOIN info_types i ON pi.info_id = i.info_id
+            JOIN project_item_part_details pd ON pd.item_id = pi.item_id
+            JOIN info_type_parts itp ON itp.part_id = pd.part_id
+            WHERE pi.project_id = :pid
+
+            ORDER BY dataset_name, info_name, ord, part_ord NULLS LAST, part_id
         """, {"pid": project_id})
 
         if project_items.empty:
@@ -210,10 +272,15 @@ def render_technology_tab(session, project_id, user_role="user"):
             SELECT ps.*, s.stage_name, ms.micro_status_name, u.display_name as responsible_name,
                    -- Охват этапа одной строкой: этап затрагивает несколько видов
                    -- сведений, но в таблице показывается одной строкой
-                   (SELECT string_agg(it.info_name, ', ' ORDER BY it.info_name)
-                      FROM jsonb_array_elements_text(ps.affected_item_ids) AS aid
-                      JOIN project_items pi2 ON pi2.item_id = aid::int
-                      JOIN info_types it ON pi2.info_id = it.info_id) AS affected_names
+                   -- affected_item_ids: массив объектов {item_id, part_id}
+                   (SELECT string_agg(
+                              CASE WHEN itp.part_name IS NOT NULL
+                                   THEN it.info_name || ' → ' || itp.part_name
+                                   ELSE it.info_name END, ', ')
+                      FROM jsonb_array_elements(ps.affected_item_ids) AS aff
+                      JOIN project_items pi2 ON pi2.item_id = (aff ->> 'item_id')::int
+                      JOIN info_types it ON pi2.info_id = it.info_id
+                      LEFT JOIN info_type_parts itp ON itp.part_id = (aff ->> 'part_id')::int) AS affected_names
             FROM project_stages ps
             JOIN stages s ON ps.stage_id = s.stage_id
             JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
@@ -288,8 +355,17 @@ def render_tech_card(session, row, project_id, stage_map, micro_map, project_ite
             if isinstance(affected_ids, str):
                 try: affected_ids = json.loads(affected_ids)
                 except: affected_ids = []
-                
-            names = project_items[project_items['item_id'].isin(affected_ids)]['info_name'].tolist()
+
+            # Массив объектов {item_id, part_id}: показываем вид сведений,
+            # а для нацеленной части - с её названием
+            keys = {(int(a['item_id']), int(a['part_id']) if a.get('part_id') is not None else None)
+                    for a in affected_ids if isinstance(a, dict)}
+            names = []
+            for _, r in project_items.iterrows():
+                key = (int(r['item_id']), int(r['part_id']) if pd.notna(r.get('part_id')) else None)
+                if key in keys:
+                    names.append(f"{r['info_name']} → {r['part_name']}" if pd.notna(r.get('part_name'))
+                                 else r['info_name'])
             st.markdown("**📦 Применено к:**")
             for name in names:
                 st.markdown(f"<div style='font-size:0.8rem; margin: 1px 0; color: #444;'>• {name}</div>", unsafe_allow_html=True)

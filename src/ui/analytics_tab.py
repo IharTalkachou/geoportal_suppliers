@@ -113,12 +113,11 @@ def _sync_overdue_log_internal():
             s.supplier_name, 
             p.project_name, 
             (
-                SELECT STRING_AGG(it_inner.info_name, ', ')
-                FROM project_items pi_inner
+                -- affected_item_ids: массив объектов {item_id, part_id}
+                SELECT STRING_AGG(DISTINCT it_inner.info_name, ', ')
+                FROM jsonb_array_elements(ps.affected_item_ids) AS aff
+                JOIN project_items pi_inner ON pi_inner.item_id = (aff ->> 'item_id')::int
                 JOIN info_types it_inner ON pi_inner.info_id = it_inner.info_id
-                WHERE pi_inner.item_id IN (
-                    SELECT jsonb_array_elements_text(ps.affected_item_ids)::int
-                )
             ) as info_name,
             stg.stage_name, 
             u.display_name, 

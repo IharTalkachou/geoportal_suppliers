@@ -50,19 +50,23 @@ def get_analytics_snapshot():
             ps.planned_start, ps.planned_end, ps.actual_start, ps.actual_end,
             ps.comments, u.display_name as responsible_name, 
             'tech' as track_type,
-            it.info_name,
+            CASE WHEN itp.part_name IS NOT NULL
+                 THEN it.info_name || ' — ' || itp.part_name
+                 ELSE it.info_name END as info_name,
             stg.stage_color,
             p.is_agreement_project,
             NULL::bigint as docs_total,
             NULL::bigint as docs_signed
         FROM project_stages ps
-        CROSS JOIN LATERAL jsonb_array_elements_text(ps.affected_item_ids) AS item_id_str
-        JOIN project_items pi ON pi.item_id = item_id_str::int
-        JOIN projects p ON pi.project_id = p.project_id 
+        -- affected_item_ids: массив объектов {item_id, part_id};
+        -- part_id = NULL означает "вид сведений целиком"
+        CROSS JOIN LATERAL jsonb_array_elements(ps.affected_item_ids) AS aff
+        JOIN project_items pi ON pi.item_id = (aff ->> 'item_id')::int
+        JOIN projects p ON pi.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id
-        JOIN info_types it ON pi.info_id = it.info_id 
+        JOIN info_types it ON pi.info_id = it.info_id
         JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id 
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
         LEFT JOIN users u ON ps.responsible_id = u.user_id
         WHERE stg.track_category = '2. Технологический'
     """

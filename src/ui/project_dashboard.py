@@ -768,11 +768,15 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                 if is_editing and st.button("🗑 Удалить", type="secondary", key="del_item_btn", width='stretch'):
                     try:
                         target_item_id = int(item_ids_map[sel_item])
-                        # Проверка на этапы
+                        # Проверка на этапы. affected_item_ids - массив объектов
+                        # {item_id, part_id}, поэтому ищем разворотом массива
                         check_stages = query_db("""
-                            SELECT 1 FROM project_stages 
-                            WHERE affected_item_ids @> CAST(:id_json AS JSONB) LIMIT 1
-                        """, {"id_json": f"[{target_item_id}]"})
+                            SELECT 1 FROM project_stages ps
+                            WHERE EXISTS (
+                                SELECT 1 FROM jsonb_array_elements(ps.affected_item_ids) AS aff
+                                WHERE (aff ->> 'item_id')::int = :iid
+                            ) LIMIT 1
+                        """, {"iid": target_item_id})
                         if not check_stages.empty:
                             st.error("❌ Нельзя удалить: есть связанные технологические этапы!")
                         else:

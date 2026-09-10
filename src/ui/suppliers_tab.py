@@ -566,14 +566,18 @@ def _delete_item_logic(session, supplier_id, item_row):
     """Вынесенная логика удаления, адаптированная под JSONB в project_stages"""
     item_id = int(item_row['item_id'])
     
-    # 🟢 ОБНОВЛЕНО: Проверка наличия технологических этапов в единой таблице
-    # Используем оператор @> для поиска ID набора внутри JSONB-массива
+    # Проверка наличия технологических этапов в единой таблице.
+    # affected_item_ids - массив объектов {item_id, part_id}, поэтому поиск идёт
+    # через разворот массива, а не оператором @> с числом
     check_stages_query = """
-        SELECT 1 FROM project_stages 
-        WHERE affected_item_ids @> CAST(:id_json AS JSONB) 
+        SELECT 1 FROM project_stages ps
+        WHERE EXISTS (
+            SELECT 1 FROM jsonb_array_elements(ps.affected_item_ids) AS aff
+            WHERE (aff ->> 'item_id')::int = :iid
+        )
         LIMIT 1
     """
-    has_stages = query_db(check_stages_query, {"id_json": f"[{item_id}]"})
+    has_stages = query_db(check_stages_query, {"iid": item_id})
     
     has_surveys = query_db("""
         SELECT 1 FROM surveys s JOIN survey_info_types sit ON s.survey_id = sit.survey_id

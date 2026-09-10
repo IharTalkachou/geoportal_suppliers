@@ -1026,18 +1026,36 @@ def _fetch_summary_rows():
     proto_parts = {(int(r['item_id']), int(r['part_id']))
                    for _, r in proto_cov[proto_cov['part_id'].notna()].iterrows()}
 
-    # Технологические флаги ПО НАБОРУ: разворачиваем affected_item_ids.
+    # Технологические флаги ПО НАБОРУ: разворачиваем affected_item_ids
+    # (массив объектов {item_id, part_id}).
     # DISTINCT обязателен - один этап на N наборов даёт N строк.
     tech_df = query_db("""
-        SELECT DISTINCT jsonb_array_elements_text(ps.affected_item_ids)::int AS item_id,
+        SELECT DISTINCT (aff ->> 'item_id')::int AS item_id,
+               (aff ->> 'part_id')::int AS part_id,
                stg.stage_code
         FROM project_stages ps
+        CROSS JOIN LATERAL jsonb_array_elements(ps.affected_item_ids) AS aff
         JOIN stages stg ON ps.stage_id = stg.stage_id
         JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
         WHERE stg.stage_code IN ('DATA_WAIT', 'DATA_PUB', 'META_WAIT', 'META_PUB')
           AND ms.micro_status_name = 'Выполнено'
     """)
-    tech_pairs = set(zip(tech_df['item_id'], tech_df['stage_code'])) if not tech_df.empty else set()
+    # Этап с part_id = NULL закрывает вид сведений целиком (все его части),
+    # этап с конкретной частью - только её
+    tech_whole = set()
+    tech_by_part = set()
+    if not tech_df.empty:
+        for _, t in tech_df.iterrows():
+            key_item = (int(t['item_id']), t['stage_code'])
+            if pd.isna(t['part_id']):
+                tech_whole.add(key_item)
+            else:
+                tech_by_part.add((int(t['item_id']), int(t['part_id']), t['stage_code']))
+
+    def tech_done(item_id, part_id, code):
+        if (item_id, code) in tech_whole:
+            return True
+        return part_id is not None and (item_id, part_id, code) in tech_by_part
 
     # Примечание: projects.notes как основа + свежие комментарии незакрытых этапов
     notes_df = query_db("""
@@ -1086,10 +1104,10 @@ def _fetch_summary_rows():
             'dataset_mandatory': bool(r['dataset_mandatory']),
             'info_label': info_label,
             'protocol_signed': protocol_ok,
-            'data_received': (item_id, 'DATA_WAIT') in tech_pairs,
-            'data_published': (item_id, 'DATA_PUB') in tech_pairs,
-            'meta_received': (item_id, 'META_WAIT') in tech_pairs,
-            'meta_published': (item_id, 'META_PUB') in tech_pairs,
+            'data_received': tech_done(item_id, part_id, 'DATA_WAIT'),
+            'data_published': tech_done(item_id, part_id, 'DATA_PUB'),
+            'meta_received': tech_done(item_id, part_id, 'META_WAIT'),
+            'meta_published': tech_done(item_id, part_id, 'META_PUB'),
             'note': "\n".join(note_parts),
         })
 
