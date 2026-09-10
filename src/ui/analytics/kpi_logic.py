@@ -195,10 +195,9 @@ def _render_smart_group(df_group, raw_all, key_prefix, is_planned=False):
                                     f'<b>💬 Комментарий:</b><br>{comment_text}</div>',
                                     unsafe_allow_html=True)
                         st.write("")
-                        st.button(
-                            "➡️ Перейти к проекту", key=f"goto_proj_{key_prefix}_{selected_row['uid']}",
-                            on_click=_goto_project_cb, args=(selected_row['project_id'], selected_row['track_type']),
-                        )
+                        if st.button("➡️ Перейти к проекту", key=f"goto_proj_{key_prefix}_{selected_row['uid']}"):
+                            _goto_project_cb(selected_row['project_id'], selected_row['track_type'])
+                            st.rerun(scope="app")
                 else:
                     # 🟢 ИСПРАВЛЕНИЕ: Если проект исчез из списка (отфильтрован), сбрасываем выбор
                     st.session_state[state_key] = None
