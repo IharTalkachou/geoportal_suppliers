@@ -58,40 +58,61 @@ def load_document_coverage(project_id):
     """Охват всех документов проекта: одна строка на связь документ-набор(-часть)."""
     return query_db("""
         SELECT pdi.link_id, pdi.doc_id, pdi.item_id, pdi.part_id,
-               d.dataset_name, i.info_name, pip.part_name
+               d.dataset_name, i.info_name, itp.part_name
         FROM project_document_items pdi
         JOIN project_documents pd ON pdi.doc_id = pd.doc_id
         JOIN project_items pi ON pdi.item_id = pi.item_id
         JOIN datasets d ON pi.dataset_id = d.dataset_id
         JOIN info_types i ON pi.info_id = i.info_id
-        LEFT JOIN project_item_parts pip ON pdi.part_id = pip.part_id
+        LEFT JOIN info_type_parts itp ON pdi.part_id = itp.part_id
         WHERE pd.project_id = :pid
-        ORDER BY d.dataset_name, i.info_name, pip.sort_order NULLS LAST
+        ORDER BY d.dataset_name, i.info_name, itp.sort_order NULLS LAST
     """, {"pid": project_id})
 
 def build_coverage_options(project_id):
     """Строит варианты охвата для мультиселекта: {подпись: (item_id, part_id)}.
 
-    Вид сведений с частями раскрывается построчно на свои части; без частей -
-    одна строка на вид сведений (part_id = None).
+    У вида сведений с частями предлагается И вариант "целиком" (part_id = None),
+    И каждая часть отдельно. Раньше обычный LEFT JOIN отдавал только части, из-за
+    чего существующая строка охвата с part_id IS NULL не находилась среди опций,
+    не попадала в default мультиселекта и молча удалялась при следующем
+    сохранении документа (охват переписывается целиком: DELETE + INSERT).
     """
     rows = query_db("""
+        -- Вариант "вид сведений целиком"
         SELECT pi.item_id, d.dataset_name, i.info_name,
-               pip.part_id, pip.part_name
+               NULL::int AS part_id, NULL::text AS part_name,
+               0 AS ord, NULL::int AS part_ord,
+               EXISTS (SELECT 1 FROM info_type_parts itp WHERE itp.info_id = pi.info_id) AS has_parts
         FROM project_items pi
         JOIN datasets d ON pi.dataset_id = d.dataset_id
         JOIN info_types i ON pi.info_id = i.info_id
-        LEFT JOIN project_item_parts pip ON pip.item_id = pi.item_id
         WHERE pi.project_id = :pid
-        ORDER BY d.dataset_name, i.info_name, pip.sort_order NULLS LAST, pip.part_id
+
+        UNION ALL
+
+        -- Отдельные части этого вида сведений
+        SELECT pi.item_id, d.dataset_name, i.info_name,
+               itp.part_id, itp.part_name,
+               1 AS ord, itp.sort_order AS part_ord,
+               TRUE AS has_parts
+        FROM project_items pi
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        JOIN info_type_parts itp ON itp.info_id = pi.info_id
+        WHERE pi.project_id = :pid
+
+        ORDER BY dataset_name, info_name, ord, part_ord NULLS LAST, part_id
     """, {"pid": project_id})
 
     opts = {}
     for _, r in rows.iterrows():
         base = f"{r['dataset_name']} | {r['info_name']}"
         if pd.notna(r['part_id']):
-            label = f"{base} → {r['part_name']}"
-            opts[label] = (int(r['item_id']), int(r['part_id']))
+            opts[f"{base} → {r['part_name']}"] = (int(r['item_id']), int(r['part_id']))
+        elif bool(r['has_parts']):
+            # Уточняем подпись, только когда есть с чем спутать
+            opts[f"{base} (целиком)"] = (int(r['item_id']), None)
         else:
             opts[base] = (int(r['item_id']), None)
     return opts
@@ -222,10 +243,18 @@ def document_mgmt_dialog(session, project_id, allow_agreement, existing_data=Non
                     RETURNING doc_id
                 """), params).scalar()
 
+            # Выбранный охват: (item_id, part_id)
+            selected = [cov_opts[label] for label in st.session_state.doc_coverage]
+            # "Целиком" уже включает все части этого вида сведений: если выбрано
+            # и то и другое, строки по частям избыточны и дали бы двойное
+            # покрытие в отчётах
+            whole_items = {iid for iid, pid in selected if pid is None}
+            selected = [(iid, pid) for iid, pid in selected
+                        if pid is None or iid not in whole_items]
+
             # Охват переписываем целиком - проще и надёжнее вычисления дельты
             session.execute(text("DELETE FROM project_document_items WHERE doc_id = :id"), {"id": int(doc_id)})
-            for label in st.session_state.doc_coverage:
-                item_id, part_id = cov_opts[label]
+            for item_id, part_id in selected:
                 session.execute(text("""
                     INSERT INTO project_document_items (doc_id, item_id, part_id)
                     VALUES (:d, :i, :p)
