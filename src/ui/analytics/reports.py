@@ -98,7 +98,9 @@ def _render_agreement_registry():
             pd.doc_id, pd.doc_kind, pd.doc_number, pd.doc_url,
             pd.is_signed, pd.signed_date AS sign_date,
             p.project_name, p.supplier_id, p.is_agreement_project,
-            COALESCE(
+            -- Охват нужен только протоколам: соглашение с поставщиком одно,
+            -- и перечислять для него виды сведений незачем
+            CASE WHEN pd.doc_kind = 'Соглашение' THEN NULL ELSE COALESCE(
                 (SELECT string_agg(
                             CASE WHEN itp.part_name IS NOT NULL
                                  THEN i.info_name || ' → ' || itp.part_name
@@ -113,13 +115,18 @@ def _render_agreement_registry():
                    FROM project_items pi
                    JOIN info_types i ON pi.info_id = i.info_id
                   WHERE pi.project_id = p.project_id)
-            ) AS coverage
+            ) END AS coverage
         FROM project_documents pd
         JOIN projects p ON pd.project_id = p.project_id
         WHERE pd.doc_url IS NOT NULL AND btrim(pd.doc_url) <> ''
-        ORDER BY pd.signed_date ASC NULLS LAST,
-                 CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
-                 pd.doc_id
+        -- Порядок по номеру документа, а не по дате подписания: протоколы
+        -- нумеруются последовательно, и читать реестр удобно в том же порядке.
+        -- Номер - текст, поэтому числовая часть извлекается отдельно, иначе
+        -- "10" встало бы перед "8" при лексикографическом сравнении.
+        ORDER BY CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                 NULLIF(regexp_replace(COALESCE(pd.doc_number, ''), '\D', '', 'g'), '')::bigint
+                     NULLS LAST,
+                 pd.doc_number, pd.doc_id
     """
     all_docs = query_db(docs_query)
 
@@ -760,21 +767,23 @@ def _export_registry_to_excel_internal(df, writer):
 
 def _render_meeting_minutes_registry():
     """
-    Отчёт 4: Реестр протоколов совещаний.
-    Собирает все документы с этапов 'Протокол переговоров' всех проектов.
+    Отчёт 5: Реестр протоколов совещаний.
+
+    Протокол переговоров - веха этапа "Переговоры": он живёт в stage_documents
+    с флагом is_nego_protocol. Раньше отчёт искал отдельный этап "Протокол
+    переговоров"/MEETING_MINUTES, но такого этапа больше нет (одноимённый был
+    переименован в "Согласование протокола"), из-за чего реестр был пуст.
     """
     st.markdown("#### 🤝 Архив протоколов совещаний и переговоров")
 
-    # 1. Получаем список поставщиков, у которых есть хоть один выполненный протокол
+    # 1. Поставщики, у которых есть хоть один протокол переговоров
     suppliers_query = """
         SELECT DISTINCT s.supplier_id, s.supplier_name
-        FROM project_stages ps
+        FROM stage_documents sd
+        JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
         JOIN projects p ON ps.project_id = p.project_id
         JOIN suppliers s ON p.supplier_id = s.supplier_id
-        JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE (stg.stage_name = 'Протокол переговоров' OR stg.stage_code = 'MEETING_MINUTES')
-          AND ms.micro_status_name = 'Выполнено'
+        WHERE sd.is_nego_protocol
         ORDER BY s.supplier_name
     """
     sups = query_db(suppliers_query)
@@ -783,22 +792,21 @@ def _render_meeting_minutes_registry():
         st.info("📭 Протоколы совещаний в базе данных не найдены.")
         return
 
-    # 2. Получаем все документы, привязанные к этим этапам
+    # 2. Сами протоколы переговоров.
+    # Дата берётся из doc_date (дата документа), а если она не проставлена -
+    # из даты закрытия этапа переговоров.
     docs_query = """
-        SELECT 
-            sd.doc_name, 
-            sd.doc_url, 
-            p.project_name, 
+        SELECT
+            sd.doc_name,
+            sd.doc_url,
+            p.project_name,
             p.supplier_id,
-            ps.actual_end as meeting_date
+            COALESCE(sd.doc_date, ps.actual_end) as meeting_date
         FROM stage_documents sd
         JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
         JOIN projects p ON ps.project_id = p.project_id
-        JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE (stg.stage_name = 'Протокол переговоров' OR stg.stage_code = 'MEETING_MINUTES')
-          AND ms.micro_status_name = 'Выполнено'
-        ORDER BY ps.actual_end DESC
+        WHERE sd.is_nego_protocol
+        ORDER BY COALESCE(sd.doc_date, ps.actual_end) DESC NULLS LAST
     """
     all_docs = query_db(docs_query)
 
@@ -817,11 +825,18 @@ def _render_meeting_minutes_registry():
                 for _, doc in sup_docs.iterrows():
                     col_date, col_btn = st.columns([0.2, 0.8])
                     with col_date:
-                        st.write(f"📅 **{doc['meeting_date'].strftime('%d.%m.%Y')}**")
+                        date_txt = (doc['meeting_date'].strftime('%d.%m.%Y')
+                                    if pd.notna(doc['meeting_date']) else "без даты")
+                        st.write(f"📅 **{date_txt}**")
                     with col_btn:
                         # На кнопке пишем проект и название файла
                         label = f"{doc['project_name']} — {doc['doc_name']}"
-                        st.link_button(label, doc['doc_url'], width='stretch')
+                        # Протокол можно завести до появления скана - тогда
+                        # показываем текстом, ссылки ещё нет
+                        if pd.notna(doc['doc_url']) and str(doc['doc_url']).strip():
+                            st.link_button(label, doc['doc_url'], width='stretch')
+                        else:
+                            st.caption(f"📑 {label} (без скана)")
 
 # ==========================================
 # 6. ПРОВОДНИК ОПРОСНИКОВ

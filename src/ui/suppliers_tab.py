@@ -320,7 +320,25 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
             # покрывает весь проект, т.е. все его наборы
             docs_by_item = query_db("""
                 SELECT pi.item_id, pd.doc_kind, pd.doc_number, pd.doc_url,
-                       pd.is_signed, pd.signed_date
+                       pd.is_signed, pd.signed_date,
+                       -- Вид сведений (или его часть), к которому относится
+                       -- протокол: у соглашения не показывается - оно одно
+                       CASE WHEN pd.doc_kind = 'Соглашение' THEN NULL ELSE COALESCE(
+                           (SELECT string_agg(
+                                       CASE WHEN itp.part_name IS NOT NULL
+                                            THEN i2.info_name || ' → ' || itp.part_name
+                                            ELSE i2.info_name END, '; '
+                                       ORDER BY i2.info_name, itp.sort_order NULLS LAST)
+                              FROM project_document_items pdi
+                              JOIN project_items pi2 ON pdi.item_id = pi2.item_id
+                              JOIN info_types i2 ON pi2.info_id = i2.info_id
+                              LEFT JOIN info_type_parts itp ON pdi.part_id = itp.part_id
+                             WHERE pdi.doc_id = pd.doc_id),
+                           (SELECT string_agg(DISTINCT i2.info_name, '; ')
+                              FROM project_items pi2
+                              JOIN info_types i2 ON pi2.info_id = i2.info_id
+                             WHERE pi2.project_id = pi.project_id)
+                       ) END AS coverage
                 FROM project_items pi
                 JOIN project_documents pd ON pd.project_id = pi.project_id
                 WHERE pi.project_id = :pid
@@ -332,7 +350,9 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                   )
                 ORDER BY pi.item_id,
                          CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
-                         pd.sort_order NULLS LAST, pd.doc_id
+                         NULLIF(regexp_replace(COALESCE(pd.doc_number, ''), '\D', '', 'g'), '')::bigint
+                             NULLS LAST,
+                         pd.doc_number, pd.doc_id
             """, {"pid": current_proj_id})
 
             if items_df.empty: st.info("В проекте нет наборов")
@@ -351,6 +371,10 @@ def render_datasets_subtab(session, selected_sup_id, is_readonly):
                                 mark = "✅" if d['is_signed'] else "⏳"
                                 name = f"{d['doc_kind']} {str(d['doc_number']).strip()}".strip() \
                                     if pd.notna(d['doc_number']) and str(d['doc_number']).strip() else d['doc_kind']
+                                # К протоколу дописываем вид сведений, за который
+                                # он отвечает; у соглашения охват не показывается
+                                if pd.notna(d.get('coverage')) and str(d['coverage']).strip():
+                                    name = f"{name} — {d['coverage']}"
                                 if d['doc_url']:
                                     parts.append(f'<a href="{d["doc_url"]}" target="_blank" '
                                                  f'style="text-decoration:none;font-size:0.8rem;">{mark} {name}</a>')
