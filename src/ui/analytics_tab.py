@@ -11,6 +11,7 @@ from ui.analytics.kpi_logic import render_kpi_tab
 from ui.analytics.calendar import render_calendar_tab
 from ui.analytics.progress_math import render_traffic_light_chart
 from ui.analytics.staff import render_staff_tab
+from ui.analytics.events import render_events_tab
 from ui.analytics.heatmap import render_heatmap_tab
 from ui.analytics.reports import render_reports_tab
 from ui.analytics.report_docx import render_monthly_report_tab
@@ -33,7 +34,8 @@ def render_analytics_tab(user_role="user"):
     # Используем ключ для сохранения состояния при переключении глобальных вкладок
     choice = st.segmented_control(
         "Разделы аналитики",
-        options=["🎯 Задачи", "📅 Календарь", "👥 Загрузка сотрудников", "📊 Прогресс проектов", "📄 Отчёты"],
+        options=["🎯 Задачи", "📅 Календарь", "👥 Загрузка сотрудников", "📊 Прогресс проектов",
+                 "🕘 Последние события", "📄 Отчёты"],
         default="🎯 Задачи",
         key="analytics_sub_nav",
         label_visibility="collapsed"
@@ -60,6 +62,9 @@ def render_analytics_tab(user_role="user"):
         #render_bureaucracy_audit_table(df)
         #render_tech_audit_table(df)
         #render_project_progress_audit_table(df)
+
+    elif choice == "🕘 Последние события":
+        render_events_tab()
 
     elif choice == "📄 Отчёты":
         render_reports_tab()
