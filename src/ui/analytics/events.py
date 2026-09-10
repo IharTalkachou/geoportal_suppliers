@@ -68,7 +68,14 @@ def _build_events(raw_df):
         })
 
     events = pd.DataFrame(rows)
-    return events.sort_values('event_date', ascending=False)
+    # Внутри одного дня активные этапы идут выше выполненных: сегодня это "что
+    # происходит сейчас" против "что уже закрыто". Между собой активные
+    # упорядочены по дате начала - дольше идущие сверху.
+    events['_sort_started'] = events['started_at'].fillna(pd.Timestamp.max)
+    return (events
+            .sort_values(['event_date', 'is_active', '_sort_started'],
+                         ascending=[False, False, True])
+            .drop(columns='_sort_started'))
 
 
 def render_events_tab():
