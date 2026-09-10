@@ -291,6 +291,16 @@ def render_documents_block(session, project_id, is_agreement_project, is_readonl
     """Блок документов проекта над колонками этапов."""
     docs = load_project_documents(project_id)
     cov_df = load_document_coverage(project_id)
+    # Состав проекта - подставляется в подпись документа с пустым охватом:
+    # "весь проект" само по себе не говорит, о каких видах сведений речь
+    all_items = query_db("""
+        SELECT i.info_name
+        FROM project_items pi
+        JOIN datasets d ON pi.dataset_id = d.dataset_id
+        JOIN info_types i ON pi.info_id = i.info_id
+        WHERE pi.project_id = :pid
+        ORDER BY d.dataset_name, i.info_name
+    """, {"pid": project_id})
 
     has_agreement = (not docs.empty) and (docs['doc_kind'] == 'Соглашение').any()
     allow_agreement = bool(is_agreement_project) and not has_agreement
@@ -322,13 +332,19 @@ def render_documents_block(session, project_id, is_agreement_project, is_readonl
 
                 st.markdown(f"**{doc_title(doc['doc_kind'], doc['doc_number'])}**")
 
+                # Охват: явно заданный либо, если он пуст, весь состав проекта -
+                # так сразу видно, к каким видам сведений относится документ,
+                # вместо неинформативного "весь проект"
                 mine = cov_df[cov_df['doc_id'] == doc['doc_id']]
-                if mine.empty:
-                    st.caption("📦 Охват: весь проект")
-                else:
+                if not mine.empty:
                     names = [f"{r['info_name']} → {r['part_name']}" if pd.notna(r['part_name']) else r['info_name']
                              for _, r in mine.iterrows()]
                     st.caption("📦 " + "; ".join(names))
+                elif not all_items.empty:
+                    names = all_items['info_name'].tolist()
+                    st.caption("📦 весь проект: " + "; ".join(names))
+                else:
+                    st.caption("📦 Охват: весь проект")
 
                 if doc['doc_url']:
                     st.markdown(
@@ -434,6 +450,17 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 names = [f"{r['info_name']} → {r['part_name']}" if pd.notna(r['part_name']) else r['info_name']
                          for _, r in grp.iterrows()]
                 cov_by_doc[int(did)] = "; ".join(names)
+        # Документ с пустым охватом покрывает весь проект - подставляем его состав,
+        # чтобы в подписи всегда было видно, о каких видах сведений речь
+        _all_items = query_db("""
+            SELECT i.info_name
+            FROM project_items pi
+            JOIN datasets d ON pi.dataset_id = d.dataset_id
+            JOIN info_types i ON pi.info_id = i.info_id
+            WHERE pi.project_id = :pid
+            ORDER BY d.dataset_name, i.info_name
+        """, {"pid": project_id})
+        _whole = "; ".join(_all_items['info_name'].tolist()) if not _all_items.empty else ""
 
         cur_ids = []
         cur_ready_state = {}
@@ -466,7 +493,7 @@ def stage_mgmt_dialog(session, project_id, stage_map, micro_map, existing_data=N
                 label = f"{mark} {doc_title(d['doc_kind'], d['doc_number'])}"
                 # Охват документа: он же определяет, какие виды сведений
                 # затрагивает работа по этому протоколу
-                cov = cov_by_doc.get(int(d['doc_id']))
+                cov = cov_by_doc.get(int(d['doc_id'])) or _whole
                 if cov:
                     label += f" — {cov}"
                 doc_opts[label] = int(d['doc_id'])

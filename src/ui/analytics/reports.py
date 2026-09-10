@@ -85,24 +85,41 @@ def _render_agreement_registry():
         st.info("📭 Подписанные соглашения пока не найдены.")
         return
 
-    # 2. Получаем ВСЕ документы по этапам "Документ подписан" для ВСЕХ проектов
-    # Это позволит вытянуть протоколы из обычных проектов
+    # 2. Документы всех проектов поставщика: соглашение и протоколы.
+    # Раньше ссылки брались из stage_documents, прикреплённых к этапу
+    # "Документ подписан", но теперь соглашения и протоколы - самостоятельные
+    # сущности (project_documents), и вложений на этапе больше не заводят.
+    #
+    # Охват показывается рядом со ссылкой: сразу видно, к каким видам сведений
+    # относится протокол. Пустой охват = документ покрывает весь проект,
+    # поэтому подставляется весь его состав.
     docs_query = """
-        SELECT 
-            sd.doc_name, 
-            sd.doc_url, 
-            p.project_name, 
-            p.supplier_id,
-            ps.actual_end as sign_date,
-            p.is_agreement_project
-        FROM stage_documents sd
-        JOIN project_stages ps ON sd.project_stage_id = ps.stage_progress_id
-        JOIN projects p ON ps.project_id = p.project_id
-        JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE (stg.stage_name = 'Документ подписан' OR stg.stage_code = 'CONTRACT_SIGNED')
-          AND ms.micro_status_name = 'Выполнено'
-        ORDER BY ps.actual_end ASC
+        SELECT
+            pd.doc_id, pd.doc_kind, pd.doc_number, pd.doc_url,
+            pd.is_signed, pd.signed_date AS sign_date,
+            p.project_name, p.supplier_id, p.is_agreement_project,
+            COALESCE(
+                (SELECT string_agg(
+                            CASE WHEN itp.part_name IS NOT NULL
+                                 THEN i.info_name || ' → ' || itp.part_name
+                                 ELSE i.info_name END, '; '
+                            ORDER BY i.info_name, itp.sort_order NULLS LAST)
+                   FROM project_document_items pdi
+                   JOIN project_items pi ON pdi.item_id = pi.item_id
+                   JOIN info_types i ON pi.info_id = i.info_id
+                   LEFT JOIN info_type_parts itp ON pdi.part_id = itp.part_id
+                  WHERE pdi.doc_id = pd.doc_id),
+                (SELECT string_agg(DISTINCT i.info_name, '; ')
+                   FROM project_items pi
+                   JOIN info_types i ON pi.info_id = i.info_id
+                  WHERE pi.project_id = p.project_id)
+            ) AS coverage
+        FROM project_documents pd
+        JOIN projects p ON pd.project_id = p.project_id
+        WHERE pd.doc_url IS NOT NULL AND btrim(pd.doc_url) <> ''
+        ORDER BY pd.signed_date ASC NULLS LAST,
+                 CASE WHEN pd.doc_kind = 'Соглашение' THEN 0 ELSE 1 END,
+                 pd.doc_id
     """
     all_docs = query_db(docs_query)
 
@@ -126,16 +143,23 @@ def _render_agreement_registry():
                 st.caption("К записям в базе не прикреплено ни одного файла.")
             else:
                 st.markdown("**Прикрепленные документы (Соглашение и Протоколы):**")
-                
+
                 # Выводим документы по одному
                 for _, doc in sup_docs.iterrows():
                     col_icon, col_link = st.columns([0.05, 0.95])
                     with col_icon:
-                        # Если это основное соглашение - выделяем иконкой
-                        st.write("📜" if doc['is_agreement_project'] else "📎")
+                        # Соглашение выделяем иконкой
+                        st.write("📜" if doc['doc_kind'] == 'Соглашение' else "📎")
                     with col_link:
-                        # Подпись ссылки: Дата | Название проекта | Название файла
-                        btn_label = f"{doc['sign_date'].strftime('%d.%m.%Y')} | {doc['project_name']} : {doc['doc_name']}"
+                        num = (str(doc['doc_number']).strip()
+                               if pd.notna(doc['doc_number']) and str(doc['doc_number']).strip() else "")
+                        name = f"{doc['doc_kind']} {num}".strip()
+                        date_txt = (doc['sign_date'].strftime('%d.%m.%Y')
+                                    if pd.notna(doc['sign_date']) else "без даты")
+                        # Подпись: Дата | Документ | к каким видам сведений относится
+                        btn_label = f"{date_txt} | {name}"
+                        if pd.notna(doc['coverage']) and str(doc['coverage']).strip():
+                            btn_label += f" : {doc['coverage']}"
                         st.link_button(btn_label, doc['doc_url'], width='stretch')
 
     # 4. Кнопка экспорта (оставим стандартную таблицу для Excel)
