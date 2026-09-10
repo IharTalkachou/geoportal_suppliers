@@ -157,6 +157,31 @@ class InfoType(Base):
         Index('idx_info_types_dataset', 'dataset_id'),
     )
 
+class InfoTypePart(Base):
+    """Часть вида сведений: единица, которой соответствует один протокол.
+
+    Виды сведений обязательных наборов заданы регламентом, но иногда один вид
+    включает несколько видов информации, передаваемых по отдельности - тогда на
+    вид сведений заключается не один протокол, а несколько (напр. УИВП Минобороны,
+    Национальное агентство по туризму).
+
+    Живёт в справочнике, а не в составе проекта: раз вид сведений одинаков для
+    всех, то и его дробление тоже. А то, как конкретный поставщик передаёт
+    конкретную часть, - в project_item_part_details.
+    Если частей нет, документ покрывает вид сведений целиком.
+    """
+    __tablename__ = 'info_type_parts'
+    __table_args__ = (
+        UniqueConstraint('info_id', 'part_name', name='unique_info_part_name'),
+        Index('idx_info_parts_info', 'info_id'),
+        {'comment': 'Части вида сведений: единица, передаваемая отдельным протоколом. Общая для всех поставщиков'},
+    )
+
+    part_id = Column(Integer, primary_key=True, autoincrement=True)
+    info_id = Column(Integer, ForeignKey('info_types.info_id', ondelete='CASCADE'), nullable=False)
+    part_name = Column(Text, nullable=False)
+    sort_order = Column(Integer)
+
 class ProjectItem(Base):
     __tablename__ = 'project_items'
 
@@ -170,6 +195,8 @@ class ProjectItem(Base):
     data_days = Column(Integer, server_default=text("10"))
     meta_method = Column(Text, server_default=text("'Электронный кабинет'::text"))
     data_method = Column(Text, server_default=text("'Сервис (WMS/WFS)'::text"))
+    format = Column(String(100), comment='Переопределение info_types.format для этого поставщика; NULL - берётся из справочника')
+    update_period = Column(String(100), comment='Переопределение info_types."update" для этого поставщика; NULL - берётся из справочника')
 
     __table_args__ = (
         Index('idx_items_dataset', 'dataset_id'),
@@ -297,6 +324,37 @@ class ProjectItemPart(Base):
     part_name = Column(Text, nullable=False)
     sort_order = Column(Integer)
 
+class ProjectItemPartDetail(Base):
+    """Как конкретный поставщик передаёт конкретную часть вида сведений.
+
+    Состав частей общий для всех (info_type_parts), но часть равна протоколу,
+    а условия от протокола к протоколу различаются - поэтому право предоставления,
+    формат, срок обновления и способ/срок размещения задаются здесь, по каждой
+    части в рамках проекта.
+
+    Наличие строк по item_id означает "этот поставщик разбил вид сведений на части":
+    у разбитого вида значения берутся отсюда, а не из project_items.
+    Пустые поля наследуются: деталь -> project_items -> info_types.
+    """
+    __tablename__ = 'project_item_part_details'
+    __table_args__ = (
+        UniqueConstraint('item_id', 'part_id', name='unique_item_part_detail'),
+        Index('idx_part_details_item', 'item_id'),
+        Index('idx_part_details_part', 'part_id'),
+        {'comment': 'Как ЭТОТ поставщик передаёт ЭТУ часть вида сведений в рамках проекта'},
+    )
+
+    detail_id = Column(Integer, primary_key=True, autoincrement=True)
+    item_id = Column(Integer, ForeignKey('project_items.item_id', ondelete='CASCADE'), nullable=False)
+    part_id = Column(Integer, ForeignKey('info_type_parts.part_id', ondelete='CASCADE'), nullable=False)
+    provision_right = Column(DataProvisionType, comment='Право на предоставление в пользование для этой части')
+    format = Column(String(100), comment='Формат предоставления; по умолчанию копируется из info_types.format')
+    update_period = Column(String(100), comment='Срок обновления; по умолчанию копируется из info_types."update"')
+    meta_days = Column(Integer)
+    meta_method = Column(Text)
+    data_days = Column(Integer)
+    data_method = Column(Text)
+
 class ProjectDocumentItem(Base):
     """Охват документа: какие виды сведений (или их части) покрывает документ.
 
@@ -314,7 +372,7 @@ class ProjectDocumentItem(Base):
     link_id = Column(Integer, primary_key=True, autoincrement=True)
     doc_id = Column(Integer, ForeignKey('project_documents.doc_id', ondelete='CASCADE'), nullable=False)
     item_id = Column(Integer, ForeignKey('project_items.item_id', ondelete='CASCADE'), nullable=False)
-    part_id = Column(Integer, ForeignKey('project_item_parts.part_id', ondelete='CASCADE'),
+    part_id = Column(Integer, ForeignKey('info_type_parts.part_id', ondelete='CASCADE'),
                      comment='NULL - документ покрывает вид сведений целиком')
 
 class AppSetting(Base):
