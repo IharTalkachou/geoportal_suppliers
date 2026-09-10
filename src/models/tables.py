@@ -303,27 +303,6 @@ class ProjectDocumentStage(Base):
                       comment='Готовность документа на этапе "Внесение изменений в протокол" - протокол перезаключён в новой редакции')
     new_url = Column(Text, comment='Ссылка на новую редакцию протокола (заполняется вместе с is_ready)')
 
-class ProjectItemPart(Base):
-    """Часть вида сведений внутри проекта (редкий сценарий).
-
-    Нужна, когда один вид сведений передаётся не одним протоколом, а несколькими
-    (напр. УИВП Минобороны, Национальное агентство по туризму). Живёт на уровне
-    состава конкретного проекта, а не в глобальном справочнике info_types:
-    дробление - свойство договорной работы конкретного поставщика.
-    Если частей нет, документ покрывает вид сведений целиком.
-    """
-    __tablename__ = 'project_item_parts'
-    __table_args__ = (
-        UniqueConstraint('item_id', 'part_name', name='unique_item_part_name'),
-        Index('idx_item_parts_item', 'item_id'),
-        {'comment': 'Части вида сведений в составе проекта, передаваемые отдельными протоколами'},
-    )
-
-    part_id = Column(Integer, primary_key=True, autoincrement=True)
-    item_id = Column(Integer, ForeignKey('project_items.item_id', ondelete='CASCADE'), nullable=False)
-    part_name = Column(Text, nullable=False)
-    sort_order = Column(Integer)
-
 class ProjectItemPartDetail(Base):
     """Как конкретный поставщик передаёт конкретную часть вида сведений.
 
