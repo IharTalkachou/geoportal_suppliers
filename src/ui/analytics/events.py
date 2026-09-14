@@ -86,7 +86,7 @@ def render_events_tab():
 
     events = _build_events(raw_df)
     if events.empty:
-        st.info("Выполненных этапов пока нет.")
+        st.info("Событий пока нет.")
         return
 
     # --- ФИЛЬТРЫ ---
@@ -97,6 +97,14 @@ def render_events_tab():
     with c_period:
         period = st.radio("Период:", ["За неделю", "За месяц", "Всё время"],
                           horizontal=True, key="ev_period")
+
+    # Лента - в первую очередь о том, что уже сделано; незакрытые этапы
+    # показываются по запросу, иначе они занимают верх каждого дня
+    active_n = int(events['is_active'].sum())
+    show_active = st.checkbox(f"Показать события в работе ({active_n})",
+                              value=False, key="ev_show_active")
+    if not show_active:
+        events = events[~events['is_active']]
 
     if sel_sup != "Все":
         events = events[events['supplier_name'] == sel_sup]
