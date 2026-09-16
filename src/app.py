@@ -28,6 +28,93 @@ from ui.requests_tab import render_requests_tab
 # 🌍 1. ИНИЦИАЛИЗАЦИЯ И КЭШИРОВАНИЕ
 # ==========================================
 st.set_page_config(page_title="Поставщики Национального геопортала", layout="wide", page_icon="🌍")
+
+# Верхняя полоса Streamlit скрыта целиком (меню "три точки" с переключателем темы,
+# печатью и "Made with Streamlit", кнопка Deploy, индикатор "Running"). Тема при этом
+# закреплена светлой в .streamlit/config.toml - переключать её больше нечем.
+#
+# Взамен штатного индикатора - оверлей на весь экран, который ловит ЛЮБУЮ перерисовку:
+# Streamlit держит состояние выполнения скрипта в атрибуте data-test-script-state
+# корневого [data-testid="stApp"] (значения running / rerunRequested). Реализация
+# чисто на CSS: во время rerun Python выполняется заново и нарисовать что-либо из
+# Python физически некому - старый DOM заморожен, новый ещё не построен.
+#
+# Оверлей появляется с задержкой 500ms (animation-delay + начальная opacity: 0), поэтому
+# быстрые reruns - переключение вкладок, чекбоксы - его вообще не показывают, а экран
+# не мигает вуалью на каждое действие. pointer-events: all блокирует клики: во время
+# перерисовки они всё равно теряются.
+#
+# ВНИМАНИЕ: data-testid и data-test-script-state - внутреннее API фронтенда Streamlit,
+# не публичный контракт. Проверено на 1.57.0; после мажорного обновления убедиться,
+# что атрибуты на месте (иначе оверлей просто перестанет показываться, интерфейс цел).
+_GLOBAL_CSS = """
+<style>
+    /* --- Скрытие верхней полосы и её содержимого --- */
+    [data-testid="stHeader"] { display: none !important; }
+    [data-testid="stMainMenu"] { display: none !important; }
+    [data-testid="stToolbar"] { display: none !important; }
+    [data-testid="stAppDeployButton"] { display: none !important; }
+    [data-testid="stStatusWidget"] { display: none !important; }
+    footer { visibility: hidden !important; }
+
+    /* Полоса скрыта - возвращаем верхний отступ, иначе контент прилипает к краю */
+    [data-testid="stAppViewContainer"] > .main .block-container,
+    [data-testid="stMainBlockContainer"] { padding-top: 2.5rem !important; }
+
+    /* --- Оверлей загрузки поверх интерфейса --- */
+    [data-testid="stApp"]::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 999990;
+        background: rgba(255, 255, 255, 0.55);
+        backdrop-filter: blur(1.5px);
+        opacity: 0;
+        pointer-events: none;
+    }
+    [data-testid="stApp"]::after {
+        content: "";
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        width: 48px;
+        height: 48px;
+        margin: -24px 0 0 -24px;
+        z-index: 999991;
+        border: 4px solid rgba(49, 51, 63, 0.15);
+        border-top-color: #ff4b4b;      /* акцентный цвет Streamlit */
+        border-radius: 50%;
+        opacity: 0;
+        pointer-events: none;
+    }
+
+    /* Оверлей включается только пока скрипт выполняется */
+    [data-testid="stApp"][data-test-script-state="running"]::before,
+    [data-testid="stApp"][data-test-script-state="rerunRequested"]::before {
+        pointer-events: all;
+        animation: geo-overlay-in 120ms linear 500ms forwards;
+    }
+    [data-testid="stApp"][data-test-script-state="running"]::after,
+    [data-testid="stApp"][data-test-script-state="rerunRequested"]::after {
+        pointer-events: all;
+        animation: geo-overlay-in 120ms linear 500ms forwards,
+                   geo-spin 700ms linear 500ms infinite;
+    }
+
+    @keyframes geo-overlay-in { to { opacity: 1; } }
+    @keyframes geo-spin { to { transform: rotate(360deg); } }
+
+    /* Уважаем системную настройку "уменьшить движение": вуаль остаётся, вращение - нет */
+    @media (prefers-reduced-motion: reduce) {
+        [data-testid="stApp"][data-test-script-state="running"]::after,
+        [data-testid="stApp"][data-test-script-state="rerunRequested"]::after {
+            animation: geo-overlay-in 120ms linear 500ms forwards;
+        }
+    }
+</style>
+"""
+st.markdown(_GLOBAL_CSS, unsafe_allow_html=True)
+
 load_dotenv()
 
 # Попытка загрузки настроек с обработкой ошибки БД
