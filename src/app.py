@@ -241,6 +241,26 @@ st.markdown("""
 
         /* Навигация в шапке: убираем отступ, который segmented_control держит под себя */
         .st-key-geo-header [data-testid="stElementContainer"]:has([data-testid="stSegmentedControl"]) { margin-bottom: 0; }
+
+        /* --- Закрепление шапки при прокрутке ---
+           Прокручивается [data-testid="stMain"], а шапка лежит внутри вложенного
+           stMainBlockContainer, поэтому sticky с top: 0 прилипает именно к верху
+           области прокрутки. Непрозрачный фон обязателен: без него контент
+           просвечивал бы сквозь шапку. Отрицательные отступы с равной им подложкой
+           растягивают фон на всю ширину, иначе по краям остаются просветы. */
+        .st-key-geo-header {
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            background: #ffffff;
+            padding: 0.6rem 1rem 0.5rem 1rem;
+            margin: -0.6rem -1rem 0 -1rem;
+            border-bottom: 1px solid rgba(49, 51, 63, 0.15);
+        }
+
+        /* Разделитель сразу под шапкой больше не нужен - его роль выполняет
+           border-bottom, который в отличие от него не уезжает при прокрутке */
+        .st-key-geo-header + [data-testid="stElementContainer"]:has(hr) { display: none; }
     </style>
 """, unsafe_allow_html=True)
 
