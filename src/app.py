@@ -57,9 +57,8 @@ _GLOBAL_CSS = """
     [data-testid="stStatusWidget"] { display: none !important; }
     footer { visibility: hidden !important; }
 
-    /* Полоса скрыта - возвращаем верхний отступ, иначе контент прилипает к краю */
-    [data-testid="stAppViewContainer"] > .main .block-container,
-    [data-testid="stMainBlockContainer"] { padding-top: 2.5rem !important; }
+    /* Верхний отступ задаётся ниже, в блоке стилизации шапки (.block-container),
+       здесь намеренно не дублируется - иначе два правила спорят за одно значение */
 
     /* --- Оверлей загрузки поверх интерфейса --- */
     [data-testid="stApp"]::before {
@@ -208,7 +207,7 @@ check_session_timeout(st.query_params.get("session"))
 # ==========================================
 st.markdown("""
     <style>
-        .block-container { padding-top: 3rem; padding-bottom: 0rem; }
+        .block-container { padding-top: 1.2rem; padding-bottom: 0rem; }
         h3 { margin-top: -0.5rem; margin-bottom: 0rem; font-size: 1.4rem !important; }
         .user-info { font-size: 0.8rem; line-height: 1.1; margin-bottom: 0.4rem; text-align: right; color: #555; }
         .stButton button {
@@ -219,15 +218,38 @@ st.markdown("""
             margin-top: 0px;
         }
         [data-testid="stHorizontalBlock"] { gap: 0.5rem !important; }
+
+        /* --- Раскладка шапки ---
+           Колонки объявлены в порядке "кнопки -> заголовок -> навигация": именно в этом
+           порядке Streamlit складывает их друг под друга на узком экране. На широком
+           экране порядок разворачивается через order в "заголовок -> навигация -> кнопки".
+           Выравнивание по нижнему краю - чтобы сегменты навигации стояли на одной линии
+           с текстом заголовка, а не висели по центру своей колонки. */
+        .geo-header [data-testid="stHorizontalBlock"] { align-items: flex-end; }
+        .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1) { order: 3; }  /* кнопки  */
+        .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2) { order: 1; }  /* заголовок */
+        .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) { order: 2; }  /* навигация */
+
+        /* Ниже точки, где Streamlit складывает колонки в столбик, order сбрасывается -
+           иначе кнопки уехали бы вниз, а нужен порядок из объявления (кнопки сверху). */
+        @media (max-width: 640px) {
+            .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { order: 0 !important; }
+            .user-info { text-align: left; }
+        }
+
+        /* Навигация в шапке: убираем отступ, который segmented_control держит под себя */
+        .geo-header [data-testid="stElementContainer"]:has([data-testid="stSegmentedControl"]) { margin-bottom: 0; }
     </style>
 """, unsafe_allow_html=True)
 
-h_col1, h_col2 = st.columns([0.6, 0.4])
-with h_col1:
-    st.markdown("### 🗺️ Управление поставщиками Национального геопортала")
+auth = st.session_state['auth']
 
-with h_col2:
-    auth = st.session_state['auth']
+# Шапка: кнопки объявлены первыми (порядок при сужении), на широком экране
+# переставляются вправо через CSS order - см. .geo-header выше
+st.markdown('<div class="geo-header">', unsafe_allow_html=True)
+h_btns, h_title, h_nav = st.columns([0.24, 0.30, 0.46])
+
+with h_btns:
     st.markdown(f'<div class="user-info"><b>{auth["display_name"]}</b> | {auth["role_name"]}</div>', unsafe_allow_html=True)
 
     btn_col1, btn_col2 = st.columns([0.5, 0.5])
@@ -254,6 +276,28 @@ with h_col2:
             st.session_state.clear()
             st.rerun()
 
+with h_title:
+    st.markdown("### 🗺️ Управление поставщиками Национального геопортала")
+
+# Навигация живёт в шапке, но в админ-панели не показывается: там её роль
+# выполняет кнопка "⬅️ Назад" (см. h_btns выше)
+_show_admin = st.session_state.get("show_admin", False)
+nav_options = ["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📩 Заявки", "📊 Аналитика"]
+if "main_nav" not in st.session_state:
+    st.session_state["main_nav"] = nav_options[0]
+
+with h_nav:
+    if not _show_admin:
+        choice = st.segmented_control(
+            "Навигация",
+            options=nav_options,
+            key="main_nav",
+            label_visibility="collapsed"
+        )
+    else:
+        choice = st.session_state["main_nav"]
+
+st.markdown('</div>', unsafe_allow_html=True)
 st.markdown("---")
 
 # ==========================================
@@ -262,24 +306,11 @@ st.markdown("---")
 
 # Оборачиваем весь процесс построения контента в спиннер
 with st.spinner("⏳ Синхронизация данных..."):
-    if st.session_state.get("show_admin", False):
+    if _show_admin:
         with Session(engine) as session:
             render_admin_panel(session)
     else:
-        nav_options = ["📁 Поставщики", "🗄️ Наборы", "📋 Проекты", "📩 Заявки", "📊 Аналитика"]
-        
-        if "main_nav" not in st.session_state:
-            st.session_state["main_nav"] = nav_options[0]
-        
-        # Навигация
-        choice = st.segmented_control(
-            "Навигация",
-            options=nav_options,
-            key="main_nav",
-            label_visibility="collapsed"
-        )
-        st.markdown("<br>", unsafe_allow_html=True)
-
+        # Навигация отрисована выше, в шапке; здесь только диспетчеризация
         user_role = auth["role"]
         
         # Диспетчер вкладок
