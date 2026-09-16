@@ -25,11 +25,19 @@ def render_project_dashboard(session, user_role="user"):
         st.session_state["selected_project_id"] = None
         st.session_state["proj_list_ver"] = st.session_state.get("proj_list_ver", 0) + 1
 
-    only_mandatory = st.checkbox(
-        "⭐ Только поставщики ОНПД", key="only_mandatory_sup",
-        on_change=_on_mandatory_toggle,
-        help="Показывать только поставщиков с признаком «Поставщик ОНПД» и их проекты"
-    )
+    # Панель фильтров и под-навигация лежат в одном контейнере: он служит якорем
+    # для CSS-закрепления (.st-key-proj-toolbar в app.py). Колонки объявляются здесь,
+    # до запросов, потому что чекбокс ОНПД сужает список поставщиков - порядок
+    # ВЫЧИСЛЕНИЙ менять нельзя, а порядок ОТРИСОВКИ задают сами колонки.
+    _toolbar = st.container(key="proj-toolbar")
+    f_sup, f_mand, f_proj = _toolbar.columns([0.38, 0.22, 0.40], vertical_alignment="bottom")
+
+    with f_mand:
+        only_mandatory = st.checkbox(
+            "⭐ Только поставщики ОНПД", key="only_mandatory_sup",
+            on_change=_on_mandatory_toggle,
+            help="Показывать только поставщиков с признаком «Поставщик ОНПД» и их проекты"
+        )
 
     sup_sql = "SELECT supplier_id, supplier_name FROM suppliers"
     if only_mandatory:
@@ -64,13 +72,14 @@ def render_project_dashboard(session, user_role="user"):
         st.session_state["dash_sup_filter"] = "Все"
         st.session_state["selected_project_id"] = None
 
-    selected_sup = st.selectbox(
-        "🏢 Фильтр по поставщику",
-        ["Все"] + list(sup_map.keys()),
-        key="dash_sup_filter",
-        on_change=_on_supplier_change
-    )
-    
+    with f_sup:
+        selected_sup = st.selectbox(
+            "🏢 Фильтр по поставщику",
+            ["Все"] + list(sup_map.keys()),
+            key="dash_sup_filter",
+            on_change=_on_supplier_change
+        )
+
     current_ver = st.session_state["proj_list_ver"]
     if selected_sup == "Все":
         # При включённом чекбоксе "Все" означает "все поставщики ОНПД",
@@ -93,14 +102,15 @@ def render_project_dashboard(session, user_role="user"):
     if current_proj_id not in proj_options:
         current_proj_id = None
 
-    selected_proj_id = st.selectbox(
-        "🔍 Выберите проект", 
-        proj_options, 
-        index=0 if current_proj_id is None else proj_options.index(current_proj_id),
-        format_func=lambda x: proj_map.get(x, "Выберите проект..."), 
-        key=f"dash_project_selector_v{current_ver}" 
-    )
-    
+    with f_proj:
+        selected_proj_id = st.selectbox(
+            "🔍 Выберите проект",
+            proj_options,
+            index=0 if current_proj_id is None else proj_options.index(current_proj_id),
+            format_func=lambda x: proj_map.get(x, "Выберите проект..."),
+            key=f"dash_project_selector_v{current_ver}"
+        )
+
     if selected_proj_id != st.session_state.get("selected_project_id"):
         st.session_state["selected_project_id"] = selected_proj_id
         if selected_proj_id:
@@ -200,13 +210,17 @@ def render_project_dashboard(session, user_role="user"):
     # default= игнорируется, если ключ уже в session_state - ставим значение сами
     if nav_key not in st.session_state:
         st.session_state[nav_key] = "📄 Паспорт"
-    sub_nav = st.segmented_control(
-        "Разделы проекта",
-        options=nav_options,
-        key=nav_key,
-        label_visibility="collapsed"
-    )
-    st.markdown("---")
+    # Под-навигация рисуется внутри _toolbar - того же контейнера, что и фильтры выше,
+    # поэтому закрепляется вместе с ними одним блоком. Появляется только при выбранном
+    # проекте: до этого функция уходит в ветку создания проекта и сюда не доходит.
+    with _toolbar:
+        sub_nav = st.segmented_control(
+            "Разделы проекта",
+            options=nav_options,
+            key=nav_key,
+            label_visibility="collapsed"
+        )
+        st.markdown("---")
 
     if sub_nav == "📄 Паспорт":
         render_passport_subtab(session, proj_id_int, is_readonly, proj_data)

@@ -281,6 +281,27 @@ st.markdown("""
             z-index: 999;
             background: #ffffff;
         }
+
+        /* --- Закрепление панели фильтров вкладки "Проекты" ---
+           Тот же приём, что и для шапки, но top отсчитывается не от нуля, а от нижнего
+           края уже закреплённой шапки - иначе панель уехала бы под неё. z-index ниже
+           шапки, чтобы при прокрутке уходить ПОД неё, а не поверх.
+           Контейнер-якорь создаётся в project_dashboard.py (key="proj-toolbar") и
+           включает и фильтры, и под-навигацию проекта. */
+        [data-testid="stLayoutWrapper"]:has(> .st-key-proj-toolbar) {
+            position: sticky;
+            top: var(--geo-header-h, 5rem);
+            z-index: 998;
+            background: #ffffff;
+            padding: 0.4rem 1rem 0 1rem;
+            margin: 0 -1rem;
+        }
+        [data-testid="stVerticalBlock"] > .st-key-proj-toolbar {
+            position: sticky;
+            top: var(--geo-header-h, 5rem);
+            z-index: 998;
+            background: #ffffff;
+        }
     </style>
 """, unsafe_allow_html=True)
 
