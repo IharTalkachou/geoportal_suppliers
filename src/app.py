@@ -223,31 +223,34 @@ st.markdown("""
            Колонки объявлены в порядке "кнопки -> заголовок -> навигация": именно в этом
            порядке Streamlit складывает их друг под друга на узком экране. На широком
            экране порядок разворачивается через order в "заголовок -> навигация -> кнопки".
-           Выравнивание по нижнему краю - чтобы сегменты навигации стояли на одной линии
-           с текстом заголовка, а не висели по центру своей колонки. */
-        .geo-header [data-testid="stHorizontalBlock"] { align-items: flex-end; }
-        .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1) { order: 3; }  /* кнопки  */
-        .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2) { order: 1; }  /* заголовок */
-        .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) { order: 2; }  /* навигация */
+
+           Якорь - класс st-key-geo-header, который Streamlit вешает на контейнер,
+           созданный через st.container(key="geo-header"). Через <div> из st.markdown
+           это НЕ работает: незакрытый тег Streamlit закрывает сам, div схлопывается
+           в пустой элемент, и колонки становятся его соседом, а не потомком. */
+        .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1) { order: 3; }  /* кнопки  */
+        .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2) { order: 1; }  /* заголовок */
+        .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) { order: 2; }  /* навигация */
 
         /* Ниже точки, где Streamlit складывает колонки в столбик, order сбрасывается -
            иначе кнопки уехали бы вниз, а нужен порядок из объявления (кнопки сверху). */
         @media (max-width: 640px) {
-            .geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { order: 0 !important; }
+            .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { order: 0 !important; }
             .user-info { text-align: left; }
         }
 
         /* Навигация в шапке: убираем отступ, который segmented_control держит под себя */
-        .geo-header [data-testid="stElementContainer"]:has([data-testid="stSegmentedControl"]) { margin-bottom: 0; }
+        .st-key-geo-header [data-testid="stElementContainer"]:has([data-testid="stSegmentedControl"]) { margin-bottom: 0; }
     </style>
 """, unsafe_allow_html=True)
 
 auth = st.session_state['auth']
 
 # Шапка: кнопки объявлены первыми (порядок при сужении), на широком экране
-# переставляются вправо через CSS order - см. .geo-header выше
-st.markdown('<div class="geo-header">', unsafe_allow_html=True)
-h_btns, h_title, h_nav = st.columns([0.24, 0.30, 0.46])
+# переставляются вправо через CSS order - см. .st-key-geo-header выше.
+# Контейнер с key= нужен именно как якорь для этого CSS.
+_header = st.container(key="geo-header")
+h_btns, h_title, h_nav = _header.columns([0.24, 0.30, 0.46], vertical_alignment="bottom")
 
 with h_btns:
     st.markdown(f'<div class="user-info"><b>{auth["display_name"]}</b> | {auth["role_name"]}</div>', unsafe_allow_html=True)
@@ -297,7 +300,6 @@ with h_nav:
     else:
         choice = st.session_state["main_nav"]
 
-st.markdown('</div>', unsafe_allow_html=True)
 st.markdown("---")
 
 # ==========================================
