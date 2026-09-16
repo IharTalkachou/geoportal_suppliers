@@ -243,21 +243,43 @@ st.markdown("""
         .st-key-geo-header [data-testid="stElementContainer"]:has([data-testid="stSegmentedControl"]) { margin-bottom: 0; }
 
         /* --- Закрепление шапки при прокрутке ---
-           ВНИМАНИЕ: само по себе это правило может не сработать. sticky прилипает в
-           пределах высоты РОДИТЕЛЯ: если обёртка контейнера окажется ровно по высоте
-           шапки, прилипать некуда и блок уедет вверх вместе с контентом. Тогда
-           position: sticky нужно поднять на тот предок, который растянут на всю
-           высоту контента (см. комментарий к _STICKY_PARENT ниже).
+           Фактическая иерархия (снята из DevTools на 1.57):
 
-           Непрозрачный фон обязателен - иначе контент просвечивает сквозь шапку.
-           Отрицательные поля с равной им подложкой растягивают фон на всю ширину. */
-        .st-key-geo-header {
+             section[stMain]                  <- прокручивается именно он (overflow: scroll)
+               div[stMainBlockContainer]
+                 div[stVerticalBlock]         <- растянут по высоте контента
+                   div[stElementContainer]    <- <style> с этими правилами
+                   div[stLayoutWrapper]       <- height: auto, обжат по высоте шапки
+                     div.st-key-geo-header    <- сама шапка
+
+           sticky прилипает в пределах высоты РОДИТЕЛЯ. Повесить его на .st-key-geo-header
+           недостаточно: её родитель stLayoutWrapper обжат ровно по ней, прилипать
+           некуда - шапка уезжает вверх вместе с обёрткой. Поэтому sticky ставится на
+           сам stLayoutWrapper, чей родитель stVerticalBlock растянут на всю высоту
+           контента. :has() адресует именно ту обёртку, внутри которой лежит шапка.
+
+           Фон вешается на обёртку вместе с sticky: непрозрачный фон обязателен,
+           иначе контент просвечивает сквозь закреплённую шапку. Отрицательные поля
+           с равной им подложкой растягивают фон на всю ширину. */
+        [data-testid="stLayoutWrapper"]:has(> .st-key-geo-header) {
             position: sticky;
             top: 0;
             z-index: 999;
             background: #ffffff;
             padding: 0.6rem 1rem 0.2rem 1rem;
             margin: -0.6rem -1rem 0 -1rem;
+        }
+
+        /* Запасной вариант: stLayoutWrapper Streamlit рисует не всегда (только когда у
+           блока есть своё оформление). Если обёртки не окажется, sticky ложится на сам
+           блок - его родителем тогда будет растянутый stVerticalBlock, и прилипание
+           сработает. Когда обёртка есть, это правило безвредно: sticky внутри уже
+           закреплённого родителя ничего не меняет, а фон нужен в обоих случаях. */
+        [data-testid="stVerticalBlock"] > .st-key-geo-header {
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            background: #ffffff;
         }
     </style>
 """, unsafe_allow_html=True)
