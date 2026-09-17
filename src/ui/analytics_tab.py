@@ -22,28 +22,39 @@ def render_analytics_tab(user_role="user"):
     """Главная точка входа вкладки Аналитика"""
     
     # 1. ШАПКА И ОБНОВЛЕНИЕ
-    col_h, col_ref = st.columns([0.8, 0.2])
+    # Под-навигация и кнопка обновления лежат в одном контейнере: он служит якорем
+    # для CSS-закрепления при прокрутке (.st-key-analytics-toolbar в app.py)
+    _toolbar = st.container(key="analytics-toolbar")
+    col_nav, col_ref = _toolbar.columns([0.8, 0.2], vertical_alignment="bottom")
+
     with col_ref:
         if st.button("🔄 Обновить данные", width='stretch'):
             clear_analytics_cache()
             st.rerun()
-    
+
     # 1. СИНХРОНИЗАЦИЯ (Один раз при загрузке вкладки)
     with st.spinner("Синхронизация данных..."):
         _sync_planned_to_active()
         _sync_overdue_log_internal()
 
     # 2. ПОД-НАВИГАЦИЯ (Segmented Control)
-    # Используем ключ для сохранения состояния при переключении глобальных вкладок
-    choice = st.segmented_control(
-        "Разделы аналитики",
-        options=["🎯 Задачи", "📅 Календарь", "👥 Загрузка сотрудников", "📊 Прогресс проектов",
-                 "🕘 Последние события", "📄 Отчёты"],
-        default="🎯 Задачи",
-        key="analytics_sub_nav",
-        label_visibility="collapsed"
-    )
-    st.markdown("<br>", unsafe_allow_html=True)
+    # Используем ключ для сохранения состояния при переключении глобальных вкладок.
+    # default= не указываем: он игнорируется, когда ключ уже в session_state -
+    # значение по умолчанию ставим сами (принятый в проекте паттерн, см. main_nav)
+    nav_options = ["🎯 Задачи", "📅 Календарь", "👥 Загрузка сотрудников", "📊 Прогресс проектов",
+                   "🕘 Последние события", "📄 Отчёты"]
+    if "analytics_sub_nav" not in st.session_state:
+        st.session_state["analytics_sub_nav"] = nav_options[0]
+
+    with col_nav:
+        choice = st.segmented_control(
+            "Разделы аналитики",
+            options=nav_options,
+            key="analytics_sub_nav",
+            label_visibility="collapsed"
+        )
+    with _toolbar:
+        st.markdown("<br>", unsafe_allow_html=True)
 
     # 3. РОУТИНГ (Вызов соответствующих модулей)
     if choice == "🎯 Задачи":

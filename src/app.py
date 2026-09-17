@@ -282,13 +282,20 @@ st.markdown("""
             background: #ffffff;
         }
 
-        /* --- Закрепление панели фильтров вкладки "Проекты" ---
+        /* --- Закрепление панелей под-навигации ---
            Тот же приём, что и для шапки, но top отсчитывается не от нуля, а от нижнего
            края уже закреплённой шапки - иначе панель уехала бы под неё. z-index ниже
            шапки, чтобы при прокрутке уходить ПОД неё, а не поверх.
-           Контейнер-якорь создаётся в project_dashboard.py (key="proj-toolbar") и
-           включает и фильтры, и под-навигацию проекта. */
-        [data-testid="stLayoutWrapper"]:has(> .st-key-proj-toolbar) {
+
+           Контейнеры-якоря создаются в модулях вкладок:
+             proj-toolbar      - project_dashboard.py: фильтры + разделы проекта
+             analytics-toolbar - analytics_tab.py: разделы аналитики + кнопка обновления
+
+           Высота шапки (5rem) измерена в браузере - 79px при текущем её содержимом.
+           Если содержимое шапки поменяется, значение нужно пересчитать, иначе панели
+           наедут на неё или между ними появится щель. */
+        [data-testid="stLayoutWrapper"]:has(> .st-key-proj-toolbar),
+        [data-testid="stLayoutWrapper"]:has(> .st-key-analytics-toolbar) {
             position: sticky;
             top: var(--geo-header-h, 5rem);
             z-index: 998;
@@ -296,7 +303,9 @@ st.markdown("""
             padding: 0.4rem 1rem 0 1rem;
             margin: 0 -1rem;
         }
-        [data-testid="stVerticalBlock"] > .st-key-proj-toolbar {
+        /* Запасной вариант на случай, если stLayoutWrapper не отрисуется - см. шапку */
+        [data-testid="stVerticalBlock"] > .st-key-proj-toolbar,
+        [data-testid="stVerticalBlock"] > .st-key-analytics-toolbar {
             position: sticky;
             top: var(--geo-header-h, 5rem);
             z-index: 998;
