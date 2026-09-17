@@ -233,6 +233,8 @@ TECH_FUNNEL_CODES = [
     'WAITING_TEST', 'TESTING', 'TECH_CALL', 'PROTOCOL_APPROVAL',
     'TECH_REG_WAIT', 'TECH_REG_PROC',
     'META_WAIT', 'META_CHECK', 'META_REJECT', 'META_FIX', 'META_PUB',
+    # DATA_TRANSFER - входной этап работы с данными, предшествует "Размещению наборов"
+    'DATA_TRANSFER',
     'DATA_WAIT', 'DATA_CHECK', 'DATA_REJECT', 'DATA_FIX', 'DATA_PUB',
 ]
 

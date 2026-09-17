@@ -277,8 +277,47 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
 
     has_meta = 'META_PUB' in done_codes
     has_data = 'DATA_PUB' in done_codes
-    # Временный маркер для "Передан набор", если у тебя есть такой код, замени 'DATA_WAIT'
-    has_transfer = 'DATA_WAIT' in done_codes 
+
+    # В. "Данные переданы" - входной этап работы с данными, предшествует "Размещению
+    # наборов". В отличие от соседних признаков считается ПО ОХВАТУ: галочка горит,
+    # только когда DATA_TRANSFER закрыт по всем видам сведений проекта. Вид считается
+    # закрытым, если этап нацелен на него целиком (part_id IS NULL) либо закрыты все
+    # его части. Та же форма запроса, что в sync_project_status() для публикации.
+    transfer_check = query_db("""
+        WITH done AS (
+            SELECT (aff ->> 'item_id')::int AS item_id,
+                   (aff ->> 'part_id')::int AS part_id
+            FROM project_stages ps
+            CROSS JOIN LATERAL jsonb_array_elements(ps.affected_item_ids) AS aff
+            JOIN stages s ON ps.stage_id = s.stage_id
+            JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+            WHERE ps.project_id = :pid
+              AND s.stage_code = 'DATA_TRANSFER'
+              AND ms.micro_status_name = 'Выполнено'
+        )
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE
+                 EXISTS (SELECT 1 FROM done WHERE done.item_id = pi.item_id AND done.part_id IS NULL)
+                 OR (
+                   EXISTS (SELECT 1 FROM project_item_part_details pd WHERE pd.item_id = pi.item_id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM project_item_part_details pd
+                     WHERE pd.item_id = pi.item_id
+                       AND NOT EXISTS (
+                         SELECT 1 FROM done
+                         WHERE done.item_id = pi.item_id AND done.part_id = pd.part_id
+                       )
+                   )
+                 )
+               ) AS transferred
+        FROM project_items pi
+        WHERE pi.project_id = :pid
+    """, {"pid": proj_id_int})
+
+    # Пустой состав - галочка не горит: передавать нечего
+    _t_total = int(transfer_check.iloc[0]['total']) if not transfer_check.empty else 0
+    _t_done = int(transfer_check.iloc[0]['transferred']) if not transfer_check.empty else 0
+    has_transfer = _t_total > 0 and _t_done >= _t_total
 
     # 3. ВИЗУАЛИЗАЦИЯ ПАСПОРТА
     # Слева - сведения о проекте и кнопки управления, справа - форма редактирования
@@ -313,7 +352,9 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
             # четыре чекбокса в строку в неё не помещаются
             st.write("")
             st.checkbox("🔑 Админ. зарегистрирован", value=has_admin, disabled=True)
-            st.checkbox("📦 Набор передан", value=has_transfer, disabled=True)
+            st.checkbox("📦 Данные переданы", value=has_transfer, disabled=True,
+                        help="Этап «Передача данных Оператору» выполнен по всем "
+                             "видам сведений проекта")
             st.checkbox("📑 Метаданные опубл.", value=has_meta, disabled=True)
             st.checkbox("🌐 Данные опубликованы", value=has_data, disabled=True)
 
