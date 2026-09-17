@@ -7,9 +7,20 @@ from ui.analytics.kpi_logic import format_date_ru_local # Используем �
 
 TODAY = pd.Timestamp.today().normalize()
 
+# Этапы документарного трека, показываемые в матрице по умолчанию: именно на них
+# обычно копятся задержки, остальные добавляются вручную. В технологическом треке
+# осмысленного короткого списка нет - там по умолчанию показываются все этапы.
+BURO_DEFAULT_STAGES = [
+    "Запрос переговоров", "Переговоры",
+    "Согласование протокола", "Согласование документов",
+]
+
+ALL_STAGES_OPTION = "Все"
+
+
 def render_heatmap_tab():
-    st.subheader("🌡️ Матрицы рисков (Анализ задержек)")
-    
+    st.subheader("🌡️ Матрица задержек")
+
     # 1. Загрузка данных
     df = get_analytics_snapshot()
     if df.empty:
@@ -18,17 +29,23 @@ def render_heatmap_tab():
     # Добавляем UID для идентификации конкретных записей этапов
     df['uid'] = df.apply(lambda x: f"{x['project_id']}_{x['track_type']}_{x['stage_code']}_{x['iteration_count']}", axis=1)
 
-    # 2. Глобальные фильтры
-    with st.expander("🔍 Настройка фильтров", expanded=True):
-        c1, c2, c3 = st.columns([1.5, 1, 1])
-        with c1:
-            all_sups = sorted(df['supplier_name'].unique())
-            sel_sups = st.multiselect("Поставщики:", ["Все"] + all_sups, default="Все")
-        with c2:
-            st.write("")
-            only_mand = st.checkbox("⭐ Только ОНПД")
-        with c3:
-            min_delay = st.number_input("Задержка более (дн.):", min_value=0, value=0)
+    st.caption(
+        "Строка — проект, столбец — этап. Чем насыщеннее клетка, тем больше дней "
+        "этап просрочен: число в клетке — дни сверх плановой даты завершения "
+        "(у незакрытых этапов — на сегодня). Пустая клетка — этап в срок или не заведён. "
+        "Наведите курсор на клетку, чтобы увидеть детали."
+    )
+
+    # 2. Глобальные фильтры (без экспандера: он занимал место, а фильтры нужны всегда)
+    c1, c2, c3 = st.columns([1.5, 1, 1])
+    with c1:
+        all_sups = sorted(df['supplier_name'].unique())
+        sel_sups = st.multiselect("Поставщики:", ["Все"] + all_sups, default="Все")
+    with c2:
+        st.write("")
+        only_mand = st.checkbox("⭐ Только ОНПД")
+    with c3:
+        min_delay = st.number_input("Задержка более (дн.):", min_value=0, value=0)
 
     # Применение первичных фильтров
     f_df = df.copy()
@@ -42,10 +59,28 @@ def render_heatmap_tab():
     mode = st.radio("Срез анализа:", modes, horizontal=True)
     track = "bureaucracy" if "Юридический" in mode else "tech"
 
+    # Фильтр этапов - свой для каждого трека, поэтому и ключ виджета свой:
+    # иначе выбор, сделанный в одном треке, переезжал бы в другой, где таких
+    # этапов нет, и матрица оказывалась бы пустой
+    track_stages = sorted(f_df[f_df['track_type'] == track]['stage_name'].dropna().unique())
+    default_stages = ([s for s in BURO_DEFAULT_STAGES if s in track_stages]
+                      if track == "bureaucracy" else [ALL_STAGES_OPTION])
+    if not default_stages:
+        default_stages = [ALL_STAGES_OPTION]
+
+    sel_stages = st.multiselect(
+        "Этапы в матрице:", [ALL_STAGES_OPTION] + track_stages,
+        default=default_stages, key=f"hm_stages_{track}")
+
     # 3. РАСЧЕТ ОТКЛОНЕНИЙ (Logic 2.0)
     # Фильтруем по треку и наличию плана
     data = f_df[(f_df['track_type'] == track) & (f_df['planned_end'].notna())].copy()
-    
+
+    # Пустой выбор приравниваем к "Все": иначе снятие последней галочки давало бы
+    # пустой экран вместо матрицы
+    if sel_stages and ALL_STAGES_OPTION not in sel_stages:
+        data = data[data['stage_name'].isin(sel_stages)]
+
     if data.empty:
         st.info("В выбранном срезе нет запланированных этапов."); return
 
