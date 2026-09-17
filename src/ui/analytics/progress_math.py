@@ -363,7 +363,9 @@ def calculate_project_progress(df_project):
         "BUREAUCRACY": {"weight": 50.0, "readiness": buro_total / 100.0, "status": "Done" if buro_total >= 100.0 else "Active"},
         "TECHNOLOGY": {"weight": 50.0, "readiness": tech_total / 100.0, "status": "Done" if tech_total >= 100.0 else "Active"}
     }
-    
+
+    phases = _split_into_phases(buro_passed, tech_passed)
+
     return {
         "project_name": df_project['project_name'].iloc[0],
         "supplier": df_project['supplier_name'].iloc[0],
@@ -373,8 +375,47 @@ def calculate_project_progress(df_project):
         "active_task_readiness": round(active_task_readiness, 1),
         "status_text": f"📜 {buro_desc.split(' (')[0]} | ⚙️ {tech_desc.split(' | ')[0]}",
         "audit": audit,
-        "popup_html": popup_html
+        "popup_html": popup_html,
+        "phases": phases,
     }
+
+
+# Фазы прогресса: полоса проекта складывается из них вместо одного серого блока.
+# Границы взяты из самих формул, а не придуманы заново:
+#  - бюро-трек возвращает ПОРОГ достигнутого блока (5 / 25 / 50 / 90 / 100),
+#    поэтому пороги и есть естественные границы фаз;
+#  - техтрек линеен (95% воронки + 5% за администратора), поэтому делится на три
+#    равные по смыслу части: регистрация/тестирование, метаданные, данные.
+# Каждый трек весит 50% проекта, доли фаз заданы внутри своего трека (в сумме 100).
+#
+# Цвета - градация от красного к зелёному: ранние фазы "холоднее" по готовности,
+# поздние - ближе к завершению.
+PHASE_SCHEME = [
+    # (подпись, трек, нижняя граница, верхняя граница, цвет)
+    ("📜 Переговоры",        'buro', 0.0,  50.0,  "#E74C3C"),
+    ("📜 Согласование",      'buro', 50.0, 90.0,  "#E67E22"),
+    ("📜 Подписание",        'buro', 90.0, 100.0, "#F1C40F"),
+    ("⚙️ Регистрация",       'tech', 0.0,  35.0,  "#D4AC0D"),
+    ("⚙️ Метаданные",        'tech', 35.0, 70.0,  "#7DCEA0"),
+    ("⚙️ Данные",            'tech', 70.0, 100.0, "#27AE60"),
+]
+
+
+def _split_into_phases(buro_passed, tech_passed):
+    """Раскладывает пройденный процент по фазам для сегментной полосы.
+
+    На вход - уже посчитанные проценты пройденного по каждому треку (0-100
+    внутри трека). Формулы расчёта не трогаются: здесь только нарезка готового
+    результата по границам фаз, поэтому сумма сегментов всегда равна passed_part.
+    """
+    out = []
+    for label, track, lo, hi, color in PHASE_SCHEME:
+        passed = buro_passed if track == 'buro' else tech_passed
+        # Сколько процентов трека попало в диапазон этой фазы
+        filled = max(0.0, min(passed, hi) - lo)
+        # Вклад в проект: трек весит половину проекта
+        out.append({"label": label, "color": color, "value": round(filled * 0.5, 2)})
+    return out
 
 def render_traffic_light_chart(df):
     """Отрисовка Светофора"""
@@ -407,27 +448,39 @@ def render_traffic_light_chart(df):
         return
 
     res_df = pd.DataFrame(results).sort_values('total', ascending=False)
+    # Фазы лежат в исходных словарях; порядок должен совпасть с res_df, иначе
+    # сегменты достанутся не тем строкам
+    results_sorted = [results[i] for i in res_df.index]
 
-    # ПУНКТ 1: Формируем текстовые метки процента для отображения на столбцах диаграммы
-    # Если active_part > 0, цифру total рисуем на штрихованном баре. Если active_part == 0, рисуем её на сером баре.
-    completed_labels = [f"<b>{t:.1f}%</b>" if p > 0 else "" for t, p in zip(res_df['total'], res_df['passed_part'])]
-    #active_labels = [f"<b>{t:.1f}%</b>" if a > 0 else "" for t, a in zip(res_df['total'], res_df['active_part'])]
+    st.caption(
+        "Полоса складывается из пройденных фаз: документарный трек (📜) и "
+        "технологический (⚙️) весят по 50% проекта. Заштрихованный синий сегмент — "
+        "этап в работе. Незакрашенный остаток — то, что ещё не сделано: у проекта "
+        "без технологического трека правая половина полосы пуста."
+    )
+
+    y_labels = res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>"
 
     fig = go.Figure()
-    
-    # 1. Пройденный путь (серый) — теперь метка ВСЕГДА центрируется внутри него
-    fig.add_trace(go.Bar(
-        y=res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>",
-        x=res_df['passed_part'], name='Завершено', orientation='h',
-        marker=dict(color='#BDC3C7'), hoverinfo='skip',
-        text=completed_labels, 
-        textposition='inside',  # Центрирует текст ровно посередине серого столбика
-        textfont=dict(color='white', size=11)
-    ))
 
-    # 2. Текущая стадия (синий со штриховкой) — убираем отсюда текст, чтобы исключить наслоение на полосы
+    # 1. Пройденный путь - по фазам, вместо одного серого блока. Порядок трасс
+    # задаёт порядок сегментов слева направо, поэтому идём по PHASE_SCHEME.
+    for i, (label, _track, _lo, _hi, color) in enumerate(PHASE_SCHEME):
+        values = [r['phases'][i]['value'] for r in results_sorted]
+        # Подпись процента ставим только на достаточно широких сегментах:
+        # на узких она не помещается и наезжает на соседние
+        seg_text = [f"{v:.0f}" if v >= 6 else "" for v in values]
+        fig.add_trace(go.Bar(
+            y=y_labels, x=values, name=label, orientation='h',
+            marker=dict(color=color),
+            text=seg_text, textposition='inside',
+            textfont=dict(color='white', size=10),
+            hovertemplate=f"<b>%{{y}}</b><br>{label}: <b>%{{x:.1f}}%</b> из 100<extra></extra>",
+        ))
+
+    # 2. Текущая стадия (синий со штриховкой) - как и раньше, поверх пройденного
     fig.add_trace(go.Bar(
-        y=res_df['supplier'] + "<br><sup>" + res_df['project_name'] + "</sup>",
+        y=y_labels,
         x=res_df['active_part'], name='В работе', orientation='h',
         marker=dict(color='#3498DB', pattern_shape="/"),
         customdata=np.stack((res_df['active_task_readiness'], res_df['total'], res_df['popup_html']), axis=-1),
@@ -439,11 +492,24 @@ def render_traffic_light_chart(df):
         )
     ))
 
+    # 3. Итоговый процент - подписью справа от полосы. Раньше он рисовался внутри
+    # серого блока, но на сегментной полосе накладывался бы на подписи фаз.
+    fig.add_trace(go.Scatter(
+        y=y_labels, x=res_df['total'], mode='text',
+        text=[f"<b>{t:.1f}%</b>" for t in res_df['total']],
+        textposition='middle right', textfont=dict(size=11, color='#2C3E50'),
+        showlegend=False, hoverinfo='skip',
+    ))
+
     fig.update_layout(
-        barmode='stack', height=max(400, len(res_df) * 60), 
-        xaxis=dict(title="Процент готовности (%)", range=[0, 100]), 
+        barmode='stack', height=max(400, len(res_df) * 60),
+        # Запас справа под подпись процента, иначе она обрезается у длинных полос
+        xaxis=dict(title="Процент готовности (%)", range=[0, 108]),
         yaxis=dict(autorange="reversed", tickfont=dict(size=11)),
-        showlegend=False, margin=dict(l=20, r=20, t=20, b=20),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    font=dict(size=10)),
+        margin=dict(l=20, r=20, t=20, b=20),
         plot_bgcolor='rgba(0,0,0,0)'
     )
 
