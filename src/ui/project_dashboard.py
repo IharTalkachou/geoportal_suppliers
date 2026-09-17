@@ -55,6 +55,8 @@ def render_project_dashboard(session, user_role="user"):
     if inc_prj_id:
         st.session_state["selected_project_id"] = int(inc_prj_id)
         st.session_state["filter_project_id"] = None
+        # Переход из другого раздела - тоже смена проекта, форму правки закрываем
+        st.session_state["dash_edit_mode"] = False
 
     # 2. ГЛОБАЛЬНЫЕ ФИЛЬТРЫ
     if "proj_list_ver" not in st.session_state:
@@ -113,6 +115,10 @@ def render_project_dashboard(session, user_role="user"):
 
     if selected_proj_id != st.session_state.get("selected_project_id"):
         st.session_state["selected_project_id"] = selected_proj_id
+        # Незакрытая форма правки реквизитов не должна переезжать на другой проект:
+        # иначе она остаётся открытой (пусть и с актуальными данными), хотя её для
+        # этого проекта никто не вызывал. Форма открывается только кнопкой.
+        st.session_state["dash_edit_mode"] = False
         if selected_proj_id:
             log_action(st.session_state["auth"]["user_id"], "VIEW_PROJECT", "projects", int(selected_proj_id))
         st.rerun()
@@ -275,81 +281,85 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
     has_transfer = 'DATA_WAIT' in done_codes 
 
     # 3. ВИЗУАЛИЗАЦИЯ ПАСПОРТА
-    with st.container(border=True):
-        col_main, col_side = st.columns([2, 1])
-        with col_main:
+    # Слева - сведения о проекте и кнопки управления, справа - форма редактирования
+    # (появляется по кнопке). Пока форма закрыта, правая колонка пустует, поэтому
+    # карточка проекта занимает всю ширину.
+    edit_mode = st.session_state.get("dash_edit_mode", False) and not is_readonly
+    if edit_mode:
+        col_card, col_edit = st.columns(2)
+    else:
+        col_card, col_edit = st.container(), None
+
+    with col_card:
+        with st.container(border=True):
             st.markdown(f"### {proj_data['project_name']}")
+
+            if proj_data.get('is_agreement_project'):
+                st.warning("📜 Проект, включающий подписание Соглашения")
+
             st.markdown(f"**🏢 Поставщик:** {proj_data['supplier_name']}")
-            
+
             st.button("🏢 Перейти к поставщику", key="btn_go_to_sup",
                       on_click=lambda sid: st.session_state.update({"main_nav": "📁 Поставщики", "filter_supplier_id": sid}),
                       args=(int(proj_data['supplier_id']),))
-            
+
             st.markdown(f"**📊 Статус:** {proj_data['status_name']}")
             st.markdown(f"**👥 Команда:** {responsibles_str}")
-            
-            # 🟢 ВЫВОД ИНДИКАТОРОВ
-            st.write("")
-            ic1, ic2, ic3, ic4 = st.columns(4)
-            ic1.checkbox("🔑 Админ. зарегистрирован", value=has_admin, disabled=True)
-            ic2.checkbox("📦 Набор передан", value=has_transfer, disabled=True)
-            ic3.checkbox("📑 Метаданные опубл.", value=has_meta, disabled=True)
-            ic4.checkbox("🌐 Данные опубликованы", value=has_data, disabled=True)
 
-        with col_side:
-            if proj_data.get('is_agreement_project'):
-                st.warning("📜 Проект Соглашения")
             st.info(f"📝 {proj_data['notes'] or 'Нет примечаний'}")
-            
-            # SLA Справка
-            #with st.expander("⏳ Параметры SLA"):
-            #    st.caption(f"Метаданные: {proj_data.get('meta_days', 10)} дн. ({proj_data.get('meta_method', '—')})")
-            #    st.caption(f"Данные: {proj_data.get('data_days', 10)} дн. ({proj_data.get('data_method', '—')})")
 
-    with st.container(border=True):
-        render_project_documents(proj_id_int)
+            # 🟢 ВЫВОД ИНДИКАТОРОВ
+            # В одну колонку: рядом с формой редактирования карточка узкая,
+            # четыре чекбокса в строку в неё не помещаются
+            st.write("")
+            st.checkbox("🔑 Админ. зарегистрирован", value=has_admin, disabled=True)
+            st.checkbox("📦 Набор передан", value=has_transfer, disabled=True)
+            st.checkbox("📑 Метаданные опубл.", value=has_meta, disabled=True)
+            st.checkbox("🌐 Данные опубликованы", value=has_data, disabled=True)
+
+            if not is_readonly:
+                st.write("")
+                if st.button("✏️ Изменить реквизиты", type="secondary", width='stretch'):
+                    st.session_state["dash_edit_mode"] = not st.session_state.get("dash_edit_mode", False)
+                    st.rerun()
+                delete_clicked = st.button("🗑 Удалить проект", type="secondary", width='stretch')
+            else:
+                delete_clicked = False
 
     if not is_readonly:
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✏️ Изменить реквизиты", type="secondary", width='stretch'):
-                st.session_state["dash_edit_mode"] = not st.session_state.get("dash_edit_mode", False)
-                st.rerun()
-        with c2:
-            if st.button("🗑 Удалить проект", type="secondary", width='stretch'):
-                has_items = session.execute(text("SELECT 1 FROM project_items WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
-                # Проверяем в новой единой таблице
-                has_stages = session.execute(text("SELECT 1 FROM project_stages WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
-                
-                if has_items or has_stages:
-                    st.error("❌ Нельзя удалить проект: в нем уже есть состав или этапы.")
-                else:
-                    try:
-                        log_action(st.session_state["auth"]["user_id"], "DELETE_PROJECT", "projects", proj_id_int, 
-                                   old={"name": proj_data['project_name']})
-                        session.execute(text("DELETE FROM projects WHERE project_id = :pid"), {"pid": proj_id_int})
-                        session.commit()
-                        clear_cache()
-                        st.session_state["selected_project_id"] = None
-                        st.session_state["proj_list_ver"] += 1 
-                        st.success("Проект успешно удален")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Ошибка удаления: {e}"); session.rollback()
+        if delete_clicked:
+            has_items = session.execute(text("SELECT 1 FROM project_items WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
+            # Проверяем в новой единой таблице
+            has_stages = session.execute(text("SELECT 1 FROM project_stages WHERE project_id = :pid LIMIT 1"), {"pid": proj_id_int}).scalar()
 
-        if st.session_state.get("dash_edit_mode"):  
-            
+            if has_items or has_stages:
+                st.error("❌ Нельзя удалить проект: в нем уже есть состав или этапы.")
+            else:
+                try:
+                    log_action(st.session_state["auth"]["user_id"], "DELETE_PROJECT", "projects", proj_id_int,
+                               old={"name": proj_data['project_name']})
+                    session.execute(text("DELETE FROM projects WHERE project_id = :pid"), {"pid": proj_id_int})
+                    session.commit()
+                    clear_cache()
+                    st.session_state["selected_project_id"] = None
+                    st.session_state["proj_list_ver"] += 1
+                    st.success("Проект успешно удален")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Ошибка удаления: {e}"); session.rollback()
+
+        if edit_mode:
             sup_list = query_db("SELECT supplier_id, supplier_name FROM suppliers ORDER BY supplier_name")
             stat_list = query_db("SELECT status_id, status_name FROM ref_statuses ORDER BY status_name")
-            cont_list = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid ORDER BY full_name", 
+            cont_list = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid ORDER BY full_name",
                                 {"sid": int(proj_data['supplier_id'])})
-            
+
             sup_names = sup_list["supplier_name"].tolist()
             stat_names = stat_list["status_name"].tolist()
             cont_names = ["Не указан"] + cont_list["full_name"].tolist()
-            
-            # 🟢 ОБНОВЛЕННАЯ ФОРМА РЕДАКТИРОВАНИЯ
-            with st.form("edit_proj_form"):
+
+            # 🟢 ОБНОВЛЕННАЯ ФОРМА РЕДАКТИРОВАНИЯ - в правой колонке, рядом с карточкой
+            with col_edit, st.container(border=True), st.form("edit_proj_form"):
                 st.markdown("#### 📝 Редактирование реквизитов")
                 
                 # Соглашение у поставщика одно: если оно уже закреплено за другим
@@ -361,21 +371,21 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
                 """, {"sid": int(proj_data['supplier_id']), "pid": proj_id_int})
                 agr_taken_by = other_agr.iloc[0]['project_name'] if not other_agr.empty else None
 
+                p_name_in = st.text_input("Название проекта", value=proj_data['project_name'])
+                p_sup_in = st.selectbox("Поставщик", sup_names, index=sup_names.index(proj_data['supplier_name']) if proj_data['supplier_name'] in sup_names else 0)
+                p_is_agr = st.checkbox(
+                    "Проект Соглашения", value=bool(proj_data['is_agreement_project']),
+                    disabled=bool(agr_taken_by),
+                    help=(f"Соглашение уже закреплено за проектом «{agr_taken_by}»"
+                          if agr_taken_by else None))
+
                 col_f1, col_f2 = st.columns(2)
                 with col_f1:
-                    p_name_in = st.text_input("Название проекта", value=proj_data['project_name'])
-                    p_sup_in = st.selectbox("Поставщик", sup_names, index=sup_names.index(proj_data['supplier_name']) if proj_data['supplier_name'] in sup_names else 0)
-                    p_is_agr = st.checkbox(
-                        "Проект Соглашения", value=bool(proj_data['is_agreement_project']),
-                        disabled=bool(agr_taken_by),
-                        help=(f"Соглашение уже закреплено за проектом «{agr_taken_by}»"
-                              if agr_taken_by else None))
                     p_stat_in = st.selectbox("Статус", stat_names, index=stat_names.index(proj_data['status_name']) if proj_data['status_name'] in stat_names else 0)
-                
                 with col_f2:
                     current_cont = proj_data.get('full_name', 'Не указан')
                     p_contact_in = st.selectbox("Основной контакт", cont_names, index=cont_names.index(current_cont) if current_cont in cont_names else 0)
-                
+
                 p_notes_in = st.text_area("Примечание", value=proj_data['notes'] or "")
 
                 if st.form_submit_button("💾 Сохранить изменения", type="primary"):
