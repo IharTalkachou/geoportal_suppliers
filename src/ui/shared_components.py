@@ -270,20 +270,49 @@ def render_supplier_documents(supplier_id):
                     st.markdown(f"• {d['title']}{it} — {_link(d['doc_url'], d['doc_name'])}",
                                 unsafe_allow_html=True)
 
-def render_stages_table(df, extra_col=None):
-    """Табличный вид этапов (только для просмотра), общий для обоих треков.
+# Колонки, которые можно править прямо в таблице. Всё остальное - только чтение:
+# название этапа и номер итерации задают идентичность записи (их правка тянет за
+# собой пересчёт итераций), а охват видов сведений хранится как массив объектов
+# affected_item_ids - из текста ячейки его не собрать. Для этого есть форма этапа.
+_EDITABLE_COLS = ["Статус", "Исполнитель", "План. начало", "Дедлайн",
+                  "Факт. начало", "Факт. конец", "Комментарий"]
+
+# Статусы, при которых фактические даты не имеют смысла: "Планируется" и "Отложено".
+# Форма этапа их для этих статусов принудительно обнуляет и блокирует - здесь
+# повторяем ту же проверку, иначе таблица стала бы обходным путём мимо неё.
+_NO_ACTUAL_STATUSES = {1, 5}
+
+
+def render_stages_table(df, extra_col=None, session=None, project_id=None,
+                        is_readonly=True, resync_fn=None, track_key="buro"):
+    """Табличный вид этапов, общий для обоих треков.
 
     Порядок строк тот же, что и в карточках: сначала незакрытые, внутри - по дате
     от свежих к старым (сортировка приходит из SQL вызывающей вкладки).
     extra_col - опциональная пара (заголовок, имя колонки в df) для трек-специфичных
     данных: в технологическом треке это охват видов сведений.
+
+    Если переданы session/project_id и не is_readonly, таблица становится
+    редактируемой: правка безопасных полей (_EDITABLE_COLS) и удаление строк с
+    подтверждением. resync_fn - пересчёт итераций своего трека
+    (_resync_buro_iterations / _resync_tech_iterations), вызывается после записи.
     """
     if df.empty:
         st.info("Этапы не заведены.")
         return
 
+    editable = (session is not None and project_id is not None and not is_readonly
+                and resync_fn is not None)
+
     def _d(v):
         return v.strftime('%d.%m.%Y') if pd.notna(v) else "—"
+
+    # В режиме редактирования даты остаются датами (иначе их нечем править),
+    # в режиме просмотра форматируются в строки - как было раньше
+    def _date_cell(v):
+        if editable:
+            return pd.to_datetime(v).date() if pd.notna(v) else None
+        return _d(v)
 
     rows = []
     for _, r in df.iterrows():
@@ -297,15 +326,190 @@ def render_stages_table(df, extra_col=None):
             header, col = extra_col
             row[header] = r.get(col) or "—"
         row.update({
-            "План. начало": _d(r['planned_start']),
-            "Дедлайн": _d(r['planned_end']),
-            "Факт. начало": _d(r['actual_start']),
-            "Факт. конец": _d(r['actual_end']),
+            "План. начало": _date_cell(r['planned_start']),
+            "Дедлайн": _date_cell(r['planned_end']),
+            "Факт. начало": _date_cell(r['actual_start']),
+            "Факт. конец": _date_cell(r['actual_end']),
             "Комментарий": r['comments'] or "",
         })
         rows.append(row)
 
     table = pd.DataFrame(rows)
     calc_h = (len(table) * 35) + 45
-    st.dataframe(table, width="stretch", hide_index=True,
-                 height=min(700, max(120, calc_h)))
+    height = min(700, max(120, calc_h))
+
+    if not editable:
+        st.dataframe(table, width="stretch", hide_index=True, height=height)
+        return
+
+    _render_editable_stages_table(table, df, session, project_id, extra_col,
+                                  resync_fn, track_key, height)
+
+
+def _render_editable_stages_table(table, df, session, project_id, extra_col,
+                                  resync_fn, track_key, height):
+    """Редактируемая таблица этапов: правка безопасных полей + удаление строк."""
+    m_ref = query_db("SELECT micro_status_id, micro_status_name FROM ref_micro_statuses")
+    micro_map = {r['micro_status_name']: int(r['micro_status_id']) for _, r in m_ref.iterrows()}
+
+    staff_df = query_db("SELECT user_id, display_name FROM users "
+                        "WHERE show_in_staff=True AND is_active=True ORDER BY display_name")
+    staff_map = dict(zip(staff_df["display_name"], staff_df["user_id"]))
+
+    # Идентификаторы строк держим отдельно от таблицы, а не колонкой: скрытая колонка
+    # в data_editor всё равно доступна пользователю через меню, а подмена id сломала
+    # бы адресацию UPDATE/DELETE
+    ids = df['stage_progress_id'].astype(int).tolist()
+
+    ed_key = f"stages_editor_{track_key}_{project_id}"
+    work = table.copy()
+    work.insert(0, "🗑", False)
+
+    ro_cols = [c for c in work.columns if c not in _EDITABLE_COLS and c != "🗑"]
+    col_cfg = {
+        "🗑": st.column_config.CheckboxColumn(
+            "🗑", help="Отметьте строки, которые нужно удалить", width="small"),
+        "Этап": st.column_config.TextColumn("Этап 🔒", disabled=True),
+        "Ит.": st.column_config.NumberColumn("Ит. 🔒", disabled=True, width="small"),
+        "Статус": st.column_config.SelectboxColumn(
+            "Статус ✏️", options=list(micro_map.keys()), required=True),
+        "Исполнитель": st.column_config.SelectboxColumn(
+            "Исполнитель ✏️", options=["Не назначен"] + list(staff_map.keys()), required=True),
+        "План. начало": st.column_config.DateColumn("План. начало ✏️", format="DD.MM.YYYY"),
+        "Дедлайн": st.column_config.DateColumn("Дедлайн ✏️", format="DD.MM.YYYY"),
+        "Факт. начало": st.column_config.DateColumn("Факт. начало ✏️", format="DD.MM.YYYY"),
+        "Факт. конец": st.column_config.DateColumn("Факт. конец ✏️", format="DD.MM.YYYY"),
+        "Комментарий": st.column_config.TextColumn("Комментарий ✏️"),
+    }
+    if extra_col:
+        col_cfg[extra_col[0]] = st.column_config.TextColumn(f"{extra_col[0]} 🔒", disabled=True)
+
+    st.caption("✏️ — поле редактируется прямо в таблице · 🔒 — только чтение, "
+               "правится через форму этапа · отметьте 🗑 для удаления строки")
+
+    edited = st.data_editor(
+        work, key=ed_key, width="stretch", hide_index=True, height=height,
+        disabled=ro_cols, column_config=col_cfg, num_rows="fixed",
+    )
+
+    # Сравниваем с исходной таблицей, а не с состоянием редактора: так одинаково
+    # ловятся и правки ячеек, и отметки на удаление
+    to_delete = [ids[i] for i in range(len(ids)) if bool(edited.iloc[i]["🗑"])]
+    changed = []
+    for i in range(len(ids)):
+        if ids[i] in to_delete:
+            continue
+        diff = {c: edited.iloc[i][c] for c in _EDITABLE_COLS
+                if not _same(edited.iloc[i][c], table.iloc[i][c])}
+        if diff:
+            changed.append((ids[i], i, diff))
+
+    if not changed and not to_delete:
+        return
+
+    parts = []
+    if changed:
+        parts.append(f"изменено строк: {len(changed)}")
+    if to_delete:
+        parts.append(f"будет удалено этапов: {len(to_delete)}")
+    st.info(" · ".join(parts))
+
+    confirm = True
+    if to_delete:
+        confirm = st.checkbox(
+            f"⚠️ Подтверждаю удаление {len(to_delete)} этап(ов) — действие необратимо",
+            key=f"{ed_key}_confirm_del")
+
+    if st.button("💾 Сохранить изменения", type="primary", width="stretch",
+                 key=f"{ed_key}_save", disabled=not confirm):
+        _save_table_changes(session, project_id, changed, to_delete,
+                            micro_map, staff_map, resync_fn, track_key)
+
+
+def _same(a, b):
+    """Сравнение значений ячейки с учётом пустых: NaN/None/'' считаем равными."""
+    a_empty = a is None or (isinstance(a, float) and pd.isna(a)) or a == ""
+    b_empty = b is None or (isinstance(b, float) and pd.isna(b)) or b == ""
+    if a_empty and b_empty:
+        return True
+    if a_empty or b_empty:
+        return False
+    return a == b
+
+
+def _save_table_changes(session, project_id, changed, to_delete,
+                        micro_map, staff_map, resync_fn, track_key):
+    """Запись правок таблицы одной транзакцией + пересчёт итераций и статуса проекта.
+
+    Порядок тот же, что в форме и диалоге удаления: commit -> пересчёт итераций ->
+    commit -> sync_project_status -> clear_cache. Иначе номера итераций и статус
+    проекта разъедутся с данными.
+    """
+    from utils.project_utils import sync_project_status
+    from config.cache import clear_cache
+    from config.auth import log_action
+
+    col_to_field = {
+        "План. начало": "planned_start", "Дедлайн": "planned_end",
+        "Факт. начало": "actual_start", "Факт. конец": "actual_end",
+        "Комментарий": "comments",
+    }
+
+    try:
+        for ps_id, _row_idx, diff in changed:
+            sets, params = [], {"id": int(ps_id)}
+
+            if "Статус" in diff:
+                sets.append("micro_status = :mst")
+                params["mst"] = micro_map[diff["Статус"]]
+                # Фактические даты бессмысленны для "Планируется"/"Отложено" -
+                # форма этапа их обнуляет, повторяем то же самое
+                if params["mst"] in _NO_ACTUAL_STATUSES:
+                    sets += ["actual_start = NULL", "actual_end = NULL"]
+                    diff.pop("Факт. начало", None)
+                    diff.pop("Факт. конец", None)
+
+            if "Исполнитель" in diff:
+                sets.append("responsible_id = :rid")
+                val = diff["Исполнитель"]
+                params["rid"] = staff_map.get(val) if val != "Не назначен" else None
+
+            for col, field in col_to_field.items():
+                if col in diff:
+                    v = diff[col]
+                    if col == "Комментарий":
+                        params[field] = v or None
+                    else:
+                        params[field] = pd.to_datetime(v).date() if pd.notna(v) else None
+                    sets.append(f"{field} = :{field}")
+
+            if not sets:
+                continue
+            session.execute(
+                text(f"UPDATE project_stages SET {', '.join(sets)} WHERE stage_progress_id = :id"),
+                params)
+            log_action(st.session_state["auth"]["user_id"], "UPDATE_STAGE_INLINE",
+                       "project_stages", int(ps_id), new={k: str(v) for k, v in diff.items()})
+
+        for ps_id in to_delete:
+            session.execute(text("DELETE FROM project_stages WHERE stage_progress_id = :id"),
+                            {"id": int(ps_id)})
+            log_action(st.session_state["auth"]["user_id"], "DELETE_STAGE_INLINE",
+                       "project_stages", int(ps_id))
+
+        session.commit()
+        resync_fn(session, project_id)
+        session.commit()
+        sync_project_status(session, project_id)
+        clear_cache()
+
+        msg = []
+        if changed:
+            msg.append(f"изменено: {len(changed)}")
+        if to_delete:
+            msg.append(f"удалено: {len(to_delete)}")
+        st.session_state[f"{track_key}_toast"] = "✅ Сохранено (" + ", ".join(msg) + ")"
+        st.rerun()
+    except Exception as e:
+        session.rollback()
+        st.error(f"Ошибка сохранения: {e}")

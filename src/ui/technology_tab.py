@@ -291,6 +291,11 @@ def render_technology_tab(session, project_id, user_role="user"):
                      s.stage_order DESC
         """, {"pid": project_id})
 
+    # Тост показывается после rerun, вызванного сохранением в табличном виде
+    # (тот же механизм, что buro_toast в бюрократическом треке)
+    if "tech_toast" in st.session_state:
+        st.toast(st.session_state.tech_toast); del st.session_state.tech_toast
+
     h1, h2 = st.columns([0.8, 0.2])
     h1.subheader("⚙️ Технологический цикл")
     if not is_readonly and h2.button("➕ Тех. этап", width='stretch', type="primary"):
@@ -303,7 +308,10 @@ def render_technology_tab(session, project_id, user_role="user"):
                          label_visibility="collapsed")
     if view_mode == "📋 Таблица":
         from ui.shared_components import render_stages_table
-        render_stages_table(df, extra_col=("Виды сведений", "affected_names"))
+        render_stages_table(df, extra_col=("Виды сведений", "affected_names"),
+                            session=session, project_id=project_id,
+                            is_readonly=is_readonly,
+                            resync_fn=_resync_tech_iterations, track_key="tech")
         return
 
     # Канбан

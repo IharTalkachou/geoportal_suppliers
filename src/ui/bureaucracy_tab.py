@@ -845,7 +845,9 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
                          label_visibility="collapsed")
     if view_mode == "📋 Таблица":
         from ui.shared_components import render_stages_table
-        render_stages_table(df)
+        render_stages_table(df, session=session, project_id=project_id,
+                            is_readonly=is_readonly,
+                            resync_fn=_resync_buro_iterations, track_key="buro")
         return
 
     # Распределение
