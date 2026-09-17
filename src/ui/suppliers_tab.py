@@ -531,28 +531,30 @@ def _render_dataset_link_form(session, supplier_id, current_proj_id, projs_df, i
     # 2. НАБОР И ВИД
     dss = query_db("SELECT dataset_id, dataset_name FROM datasets ORDER BY dataset_name")
     ds_names = ["(Новый набор)"] + dss["dataset_name"].tolist()
-    st.selectbox("Набор данных *", ds_names, key="ds_form_ds", disabled=is_edit)
-    
+    st.selectbox("Выберите существующий набор из справочника или (Новый набор) для добавления набора *",
+                 ds_names, key="ds_form_ds", disabled=is_edit)
+
     if st.session_state.get("ds_form_ds") == "(Новый набор)" and not is_edit:
-        st.text_input("Имя нового набора", key="ds_form_new_d")
-        st.text_input("Имя нового вида", key="ds_form_new_i")
+        st.text_input("Название нового набора данных", key="ds_form_new_d")
+        st.text_input("Название нового вида сведений в составе набора", key="ds_form_new_i")
     else:
         d_id_res = dss[dss["dataset_name"] == st.session_state.get("ds_form_ds")]
         if not d_id_res.empty:
             d_id = int(d_id_res.iloc[0]["dataset_id"])
             infos = query_db("SELECT info_id, info_name FROM info_types WHERE dataset_id = :did", {"did": d_id})
             i_names = ["(Новый вид)"] + infos["info_name"].tolist()
-            st.selectbox("Вид сведений *", i_names, key="ds_form_i", disabled=is_edit)
+            st.selectbox("Выберите существующий вид сведений из справочника или (Новый вид) для добавления вида сведений *",
+                         i_names, key="ds_form_i", disabled=is_edit)
             if st.session_state.get("ds_form_i") == "(Новый вид)" and not is_edit:
-                st.text_input("Имя нового вида", key="ds_form_new_i_name")
+                st.text_input("Название нового вида сведений в составе набора", key="ds_form_new_i_name")
 
-    # 3. ДОП ПАРАМЕТРЫ
+    # 3. ДОП ПАРАМЕТРЫ (общие для всех веток выбора набора/вида)
     conts = query_db("SELECT contact_id, full_name FROM contacts WHERE supplier_id = :sid", {"sid": int(supplier_id)})
     c_names = ["Не выбран"] + conts["full_name"].tolist()
-    st.selectbox("Тех. контакт", c_names, key="ds_form_cont")
-    
+    st.selectbox("Выберите контактное лицо по набору", c_names, key="ds_form_cont")
+
     prov_opts = ['Протокол не заключён', 'Оператор и Поставщик', 'Только Поставщик', 'Не предоставляется']
-    st.selectbox("Право предоставления", prov_opts, key="ds_form_prov")
+    st.selectbox("Выберите вариант прав предоставления набора пользователя", prov_opts, key="ds_form_prov")
 
     # --- СОХРАНЕНИЕ ---
     btn_txt = "💾 Сохранить изменения" if is_edit else "🚀 Создать связь"
