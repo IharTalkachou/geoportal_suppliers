@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 from sqlalchemy import text
 from config.cache import query_db
 
@@ -513,3 +514,189 @@ def _save_table_changes(session, project_id, changed, to_delete,
     except Exception as e:
         session.rollback()
         st.error(f"Ошибка сохранения: {e}")
+
+
+# ==========================================
+# 📊 ДИАГРАММА ГАНТА (третий вид этапов)
+# ==========================================
+
+# Цвет полосы факта = микростатус этапа. Ключи - значения micro_status_name
+# из ref_micro_statuses; неизвестный статус получает серый, а не падает.
+_GANTT_STATUS_COLORS = {
+    'Выполнено': '#27AE60',
+    'В работе': '#3498DB',
+    'Ожидание': '#E67E22',
+    'Просрочено': '#E74C3C',
+    'Планируется': '#95A5A6',
+    'Отложено': '#B39DDB',
+}
+_GANTT_FALLBACK_COLOR = '#7F8C8D'
+_GANTT_PLAN_COLOR = '#CFD8DC'
+_DAY_MS = 24 * 60 * 60 * 1000
+
+
+def _gantt_span(start, end, today):
+    """Начало и длительность полосы в миллисекундах для оси времени plotly.
+
+    Этап длиной в один день дал бы нулевую ширину и стал невидимым, поэтому
+    минимальная длительность - сутки. Незакрытый этап тянется до сегодня.
+    """
+    if pd.isna(start):
+        return None, None
+    start = pd.to_datetime(start)
+    end = pd.to_datetime(end) if pd.notna(end) else today
+    if end < start:
+        end = start
+    return start, max((end - start).total_seconds() * 1000, _DAY_MS)
+
+
+def render_stages_gantt(df, extra_col=None):
+    """Диаграмма Ганта по этапам трека: план и факт двумя полосами.
+
+    На каждую итерацию этапа приходится строка: сверху бледная полоса плана
+    (planned_start..planned_end), под ней плотная полоса факта
+    (actual_start..actual_end, у незакрытого - до сегодня), окрашенная по
+    микростатусу. Вид только для чтения: правка этапов - в карточках и таблице.
+
+    extra_col - та же пара (заголовок, колонка), что у render_stages_table:
+    в технологическом треке это охват видов сведений, он уходит в подсказку.
+    """
+    if df.empty:
+        st.info("Этапы не заведены.")
+        return
+
+    today = pd.Timestamp.today().normalize()
+
+    # Итерации одного этапа - отдельные строки, поэтому в подпись добавляется
+    # номер; без него две итерации слились бы в одну категорию оси Y
+    iter_counts = df.groupby('stage_name')['stage_progress_id'].count().to_dict()
+
+    rows, skipped = [], []
+    for _, r in df.sort_values(['stage_order', 'iteration_count']).iterrows():
+        label = r['stage_name']
+        if iter_counts.get(r['stage_name'], 1) > 1:
+            label = f"{label} · ит. {int(r['iteration_count']) if pd.notna(r['iteration_count']) else '?'}"
+
+        p_start, p_dur = _gantt_span(r['planned_start'], r['planned_end'], today)
+        # Плановая полоса рисуется только когда обе даты заданы: одна лишь дата
+        # старта даёт полосу произвольной длины, которой в плане не было
+        if pd.isna(r['planned_end']):
+            p_start, p_dur = None, None
+        f_start, f_dur = _gantt_span(r['actual_start'], r['actual_end'], today)
+
+        if p_start is None and f_start is None:
+            skipped.append(label)
+            continue
+
+        extra_txt = ""
+        if extra_col:
+            val = r.get(extra_col[1])
+            if val and str(val) != '—':
+                extra_txt = f"<br>{extra_col[0]}: {val}"
+
+        rows.append({
+            'label': label,
+            'status': r['micro_status_name'],
+            'responsible': r['responsible_name'] or "Не назначен",
+            'comment': (r['comments'] or "").strip(),
+            'extra': extra_txt,
+            'p_start': p_start, 'p_dur': p_dur,
+            'f_start': f_start, 'f_dur': f_dur,
+            'p_end': r['planned_end'], 'f_end': r['actual_end'],
+            'a_start': r['actual_start'],
+        })
+
+    if not rows:
+        st.info("У этапов не заполнены даты — диаграмму построить не из чего.")
+        return
+
+    # Порядок категорий задаётся явно: без этого plotly расставит их сам,
+    # и этапы перестанут идти в порядке процесса
+    labels = [x['label'] for x in rows]
+
+    fig = go.Figure()
+
+    # Порядок добавления трасс задаёт вертикальный порядок полос внутри строки:
+    # трасса, добавленная позже, оказывается ВЫШЕ. Поэтому факт добавляется
+    # первым, план - последним, и план читается верхней полосой.
+
+    # 1. Факт - отдельная трасса на каждый статус, чтобы в легенде появились
+    # названия статусов, а не безымянная разноцветная полоса
+    fact_rows = [x for x in rows if x['f_start'] is not None]
+    for status in sorted({x['status'] for x in fact_rows}):
+        part = [x for x in fact_rows if x['status'] == status]
+        fig.add_trace(go.Bar(
+            y=[x['label'] for x in part],
+            x=[x['f_dur'] for x in part],
+            base=[x['f_start'] for x in part],
+            orientation='h', name=status, offsetgroup='fact',
+            marker=dict(color=_GANTT_STATUS_COLORS.get(status, _GANTT_FALLBACK_COLOR)),
+            customdata=[[
+                _fmt_d(x['a_start']),
+                _fmt_d(x['f_end']) if pd.notna(x['f_end']) else "по настоящее время",
+                x['responsible'],
+                x['comment'] or x['label'],
+                x['extra'],
+            ] for x in part],
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Факт: %{customdata[0]} – %{customdata[1]}<br>"
+                f"Статус: {status}<br>"
+                "Исполнитель: %{customdata[2]}<br>"
+                "%{customdata[3]}%{customdata[4]}<extra></extra>"
+            ),
+        ))
+
+    # 2. План - бледная полоса, добавляется последней и потому идёт сверху
+    plan_rows = [x for x in rows if x['p_start'] is not None]
+    if plan_rows:
+        fig.add_trace(go.Bar(
+            y=[x['label'] for x in plan_rows],
+            x=[x['p_dur'] for x in plan_rows],
+            base=[x['p_start'] for x in plan_rows],
+            orientation='h', name='План', offsetgroup='plan',
+            marker=dict(color=_GANTT_PLAN_COLOR),
+            customdata=[[_fmt_d(x['p_start']), _fmt_d(x['p_end'])] for x in plan_rows],
+            hovertemplate="<b>%{y}</b><br>План: %{customdata[0]} – %{customdata[1]}<extra></extra>",
+        ))
+
+    fig.add_vline(x=today.timestamp() * 1000, line_width=2,
+                  line_dash="dash", line_color="#E74C3C")
+
+    # Легенда и подписи оси дат живут в одном верхнем поле, поэтому её отступ
+    # считается в пикселях, а не задаётся долей "на глаз": доля от высоты у
+    # диаграммы на 3 этапа и на 30 даёт совершенно разный зазор, и легенда
+    # наезжает на подписи дат.
+    top_margin, bottom_margin = 95, 20
+    height = max(280, len(labels) * 46 + 150)
+    plot_h = max(1, height - top_margin - bottom_margin)
+    legend_y = 1 + (52 / plot_h)   # ~52px над областью графика: две строки подписей оси
+
+    fig.update_layout(
+        barmode='group', bargap=0.25,
+        height=height,
+        # Ось дат сверху: у длинного списка этапов она остаётся на виду, не уезжая
+        # вниз вместе с концом диаграммы
+        xaxis=dict(type='date', side='top', showgrid=True, gridcolor='#ECEFF1'),
+        # categoryarray в обратном порядке: первый по процессу этап должен быть сверху
+        yaxis=dict(categoryorder='array', categoryarray=labels[::-1],
+                   tickfont=dict(size=11)),
+        legend=dict(orientation="h", yanchor="bottom", y=legend_y, xanchor="left", x=0,
+                    font=dict(size=10)),
+        margin=dict(l=10, r=20, t=top_margin, b=bottom_margin),
+        plot_bgcolor='white',
+    )
+
+    st.plotly_chart(fig, width='stretch')
+    st.caption(
+        "Бледная полоса — план, цветная под ней — факт (цвет по статусу); "
+        "пунктир — сегодня. Незакрытый этап тянется до сегодняшнего дня. "
+        "Диаграмма только для просмотра — этапы правятся в карточках и таблице."
+    )
+
+    if skipped:
+        st.caption(f"⚠️ Без дат и потому не показаны: {', '.join(skipped)}")
+
+
+def _fmt_d(v):
+    return pd.to_datetime(v).strftime('%d.%m.%Y') if pd.notna(v) else "—"

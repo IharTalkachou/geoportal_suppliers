@@ -840,7 +840,7 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
             clear_stage_form_state()
             stage_mgmt_dialog(session, project_id, stage_map, micro_map)
 
-    view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица"],
+    view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица", "📊 Диаграмма Ганта"],
                          key=f"buro_view_{project_id}", horizontal=True,
                          label_visibility="collapsed")
     if view_mode == "📋 Таблица":
@@ -848,6 +848,10 @@ def render_bureaucracy_tab(session, project_id, user_role="user"):
         render_stages_table(df, session=session, project_id=project_id,
                             is_readonly=is_readonly,
                             resync_fn=_resync_buro_iterations, track_key="buro")
+        return
+    if view_mode == "📊 Диаграмма Ганта":
+        from ui.shared_components import render_stages_gantt
+        render_stages_gantt(df)
         return
 
     # Распределение

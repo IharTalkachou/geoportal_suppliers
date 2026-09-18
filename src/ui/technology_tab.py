@@ -303,7 +303,7 @@ def render_technology_tab(session, project_id, user_role="user"):
             if k in st.session_state: del st.session_state[k]
         tech_mgmt_dialog(session, project_id, stage_map, micro_map, project_items)
 
-    view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица"],
+    view_mode = st.radio("Вид отображения", ["🗂 Карточки", "📋 Таблица", "📊 Диаграмма Ганта"],
                          key=f"tech_view_{project_id}", horizontal=True,
                          label_visibility="collapsed")
     if view_mode == "📋 Таблица":
@@ -312,6 +312,10 @@ def render_technology_tab(session, project_id, user_role="user"):
                             session=session, project_id=project_id,
                             is_readonly=is_readonly,
                             resync_fn=_resync_tech_iterations, track_key="tech")
+        return
+    if view_mode == "📊 Диаграмма Ганта":
+        from ui.shared_components import render_stages_gantt
+        render_stages_gantt(df, extra_col=("Виды сведений", "affected_names"))
         return
 
     # Канбан
