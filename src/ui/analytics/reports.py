@@ -204,8 +204,12 @@ def clean_comment(raw):
 
 def _render_bureaucracy_progress():
     df_raw = get_analytics_snapshot()
-    df = df_raw[(df_raw['track_type'] == 'bureaucracy') &
-                (df_raw['is_agreement_project'] == True)].copy()
+    # Раньше здесь стоял фильтр is_agreement_project == True, из-за чего в отчёт
+    # попадал ровно один проект на поставщика (соглашение у поставщика одно), а все
+    # проекты-протоколы выпадали целиком. Теперь берутся все проекты документарного
+    # трека, а разделение между ними выражено вторым уровнем группировки:
+    # поставщик -> проект -> этапы.
+    df = df_raw[df_raw['track_type'] == 'bureaucracy'].copy()
 
     if df.empty:
         st.info("Нет данных о пройденных этапах бюрократии.")
@@ -217,8 +221,14 @@ def _render_bureaucracy_progress():
     done_mask = df['status'] == 'Выполнено'
     df.loc[~done_mask, ['actual_start', 'actual_end']] = pd.NaT
 
-    # Проект считается завершённым только когда "Документ подписан" реально выполнен
-    completed_ids = df[(df['stage_order'] == 8) & done_mask]['project_id'].unique()
+    # Проект завершён, когда выполнен этап подписания. Проверка идёт по коду этапа,
+    # а не по stage_order == 8, как было раньше: порядковый номер - "магическое
+    # число", которое молча разъедется при любой перенумерации справочника. У
+    # соглашения подписание - CONTRACT_SIGNED, у протокола - PROTOCOL_SIGNED
+    # (см. "Разделение этапов документарного трека по типу проекта" в CLAUDE.md);
+    # протокольные проекты раньше сюда не доходили из-за фильтра выше.
+    SIGNING_CODES = ['CONTRACT_SIGNED', 'PROTOCOL_SIGNED']
+    completed_ids = df[df['stage_code'].isin(SIGNING_CODES) & done_mask]['project_id'].unique()
 
     show_done = st.checkbox("Показать завершенные проекты", value=False)
     if not show_done:
@@ -256,8 +266,14 @@ def _render_bureaucracy_progress():
     # этапа после другого этапа (например, второй заход "Переговоров" после
     # "Согласования документа") сознательно даёт отдельный остров - в реальности
     # это разные по смыслу заходы, разнесённые другим этапом процесса.
-    df = df.sort_values(['is_mandatory', 'supplier_name', 'sort_date', 'stage_order'])
-    df['new_grp'] = (df['stage_name'] != df['stage_name'].shift()) | (df['supplier_name'] != df['supplier_name'].shift())
+    # Проект входит и в сортировку, и в признак разрыва острова: без этого этапы
+    # двух проектов одного поставщика перемешались бы по датам и слиплись в один
+    # остров, хотя относятся к разным договорным историям.
+    df = df.sort_values(['is_mandatory', 'supplier_name', 'project_name',
+                         'sort_date', 'stage_order'])
+    df['new_grp'] = ((df['stage_name'] != df['stage_name'].shift())
+                     | (df['supplier_name'] != df['supplier_name'].shift())
+                     | (df['project_id'] != df['project_id'].shift()))
     df['grp_id'] = df['new_grp'].cumsum()
 
     islands = []
@@ -296,6 +312,9 @@ def _render_bureaucracy_progress():
 
         islands.append({
             'supplier': first['supplier_name'],
+            'project': first['project_name'],
+            'project_id': first['project_id'],
+            'is_agreement': bool(first['is_agreement_project']),
             'is_mand': first['is_mandatory'],
             'sort_date': first['sort_date'],
             'Этап': text,
@@ -303,7 +322,11 @@ def _render_bureaucracy_progress():
             'item_lines': item_lines,
         })
 
-    grouped = pd.DataFrame(islands).sort_values(['is_mand', 'supplier', 'sort_date'])
+    # Внутри поставщика проекты идут подряд: сначала соглашение (первичное
+    # подключение), затем протокольные - в порядке своей первой даты
+    grouped = (pd.DataFrame(islands)
+               .sort_values(['is_mand', 'supplier', 'is_agreement', 'project', 'sort_date'],
+                            ascending=[True, True, False, True, True]))
 
     # ОТРИСОВКА В ЭКСПАНДЕРАХ С УМНЫМ РАСЧЕТОМ ВЫСОТЫ
     # Фильтр поставщиков - свой у каждой группы, поэтому отобранные строки
@@ -329,18 +352,10 @@ def _render_bureaucracy_progress():
             selected_parts[mand_status] = sub
 
             if not sub.empty:
-                disp = sub.copy()
-                disp['Поставщик'] = disp['supplier']
-                disp.loc[disp.duplicated('supplier'), 'Поставщик'] = ""
-
-                # --- УМНЫЙ РАСЧЕТ ВЫСОТЫ ---
-                # 35px за строку текста (island-текст может занимать несколько строк) + запас
-                lines_per_row = disp['Этап'].str.count('\n') + 1
-                calculated_h = int((lines_per_row * 35).sum()) + 40
-                final_h = min(600, max(100, calculated_h))
-
-                st.dataframe(disp[['Поставщик', 'Этап']],
-                             width="stretch", hide_index=True, height=final_h)
+                # Таблица заменена иерархическим текстом: три уровня (поставщик ->
+                # проект -> этапы) в две колонки не укладываются, а markdown
+                # одинаково читается и в браузере, и при печати страницы
+                st.markdown(_islands_to_markdown(sub), unsafe_allow_html=True)
 
                 st.caption("Выгрузки ниже включают только выбранных выше поставщиков.")
                 _render_export_buttons(sub, f"{exp_key}_only",
@@ -360,6 +375,48 @@ def _render_bureaucracy_progress():
         st.info("Ни одного поставщика не выбрано — выгружать нечего.")
     else:
         _render_export_buttons(both, "both", "all")
+
+
+def _iter_supplier_projects(df):
+    """Обходит срез отчёта по уровням: поставщик -> проект -> его острова.
+
+    Порядок строк уже задан сортировкой grouped, поэтому groupby идёт с
+    sort=False - иначе pandas переставил бы проекты по алфавиту и соглашение
+    перестало бы открывать список.
+    """
+    for supplier, sup_rows in df.groupby('supplier', sort=False):
+        projects = [(pname, prows) for pname, prows
+                    in sup_rows.groupby('project', sort=False)]
+        yield supplier, projects
+
+
+def _md_escape(text):
+    """Экранирует markdown-разметку в данных: названия проектов и комментарии
+    приходят из БД и могут содержать *, _, [ ] - без экранирования они съедаются
+    разметкой или ломают вёрстку списка."""
+    out = str(text)
+    for ch in ('\\', '*', '_', '`', '[', ']', '<', '>'):
+        out = out.replace(ch, '\\' + ch)
+    return out
+
+
+def _islands_to_markdown(df):
+    """Иерархический markdown: поставщик -> проект -> этапы с подпунктами."""
+    lines = []
+    for supplier, projects in _iter_supplier_projects(df):
+        lines.append(f"**{_md_escape(supplier)}**")
+        lines.append("")
+        for pname, prows in projects:
+            is_agr = bool(prows['is_agreement'].iloc[0])
+            badge = "📜" if is_agr else "📄"
+            lines.append(f"&nbsp;&nbsp;&nbsp;&nbsp;{badge} *{_md_escape(pname)}*")
+            lines.append("")
+            for _, row in prows.iterrows():
+                lines.append(f"- {_md_escape(row['header_line'])}")
+                for item in row['item_lines']:
+                    lines.append(f"    - {_md_escape(item)}")
+            lines.append("")
+    return "\n".join(lines)
 
 
 def _render_export_buttons(df, key_suffix, file_tag):
@@ -415,25 +472,44 @@ def _export_bureaucracy_islands_docx_table(df):
         h.paragraph_format.space_before = Pt(12)
         h.paragraph_format.space_after = Pt(6)
 
-        table = doc.add_table(rows=1, cols=3)
+        # Колонка "Проект" - второй уровень группировки. Ячейки поставщика
+        # объединяются по всем его проектам, ячейки проекта - по его этапам,
+        # поэтому иерархия читается и в таблице.
+        table = doc.add_table(rows=1, cols=4)
         table.style = 'Table Grid'
         hdr = table.rows[0].cells
-        hdr[0].text, hdr[1].text, hdr[2].text = '№ п/п', 'Поставщик', 'Этап'
+        hdr[0].text, hdr[1].text = '№ п/п', 'Поставщик'
+        hdr[2].text, hdr[3].text = 'Проект', 'Этап'
 
-        for i, (name, group) in enumerate(sub.groupby('supplier', sort=False)):
-            rows_in_group = list(group.iterrows())
-            first_row_idx = None
-            for j, (_, row) in enumerate(rows_in_group):
-                cells = table.add_row().cells
-                if j == 0:
-                    cells[0].text = str(i + 1)
-                    cells[1].text = name
-                    first_row_idx = len(table.rows) - 1
-                cells[2].text = row['Этап']
-            if len(rows_in_group) > 1:
-                last_row_idx = len(table.rows) - 1
-                table.cell(first_row_idx, 0).merge(table.cell(last_row_idx, 0))
-                table.cell(first_row_idx, 1).merge(table.cell(last_row_idx, 1))
+        for i, (name, projects) in enumerate(_iter_supplier_projects(sub)):
+            sup_first_idx = None
+            sup_row_count = 0
+
+            for pname, prows in projects:
+                proj_first_idx = None
+                rows_in_proj = list(prows.iterrows())
+
+                for j, (_, row) in enumerate(rows_in_proj):
+                    cells = table.add_row().cells
+                    cur_idx = len(table.rows) - 1
+                    if sup_first_idx is None:
+                        cells[0].text = str(i + 1)
+                        cells[1].text = name
+                        sup_first_idx = cur_idx
+                    if j == 0:
+                        cells[2].text = pname
+                        proj_first_idx = cur_idx
+                    cells[3].text = row['Этап']
+                    sup_row_count += 1
+
+                if len(rows_in_proj) > 1:
+                    last_idx = len(table.rows) - 1
+                    table.cell(proj_first_idx, 2).merge(table.cell(last_idx, 2))
+
+            if sup_row_count > 1:
+                last_idx = len(table.rows) - 1
+                table.cell(sup_first_idx, 0).merge(table.cell(last_idx, 0))
+                table.cell(sup_first_idx, 1).merge(table.cell(last_idx, 1))
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -454,21 +530,31 @@ def _export_bureaucracy_islands_docx_text(df):
         h.paragraph_format.space_before = Pt(12)
         h.paragraph_format.space_after = Pt(6)
 
-        for name, group in sub.groupby('supplier', sort=False):
+        for name, projects in _iter_supplier_projects(sub):
             p_sup = doc.add_paragraph()
             p_sup_run = p_sup.add_run(name)
             p_sup_run.bold = True
             p_sup.paragraph_format.space_before = Pt(6)
             p_sup.paragraph_format.space_after = Pt(2)
 
-            for _, row in group.iterrows():
-                p = doc.add_paragraph(style='List Bullet')
-                p.add_run(row['header_line'])
-                p.paragraph_format.space_after = Pt(0)
-                for line in row['item_lines']:
-                    p2 = doc.add_paragraph(style='List Bullet 2')
-                    p2.add_run(line)
-                    p2.paragraph_format.space_after = Pt(0)
+            # Второй уровень - проект: курсивом и с отступом, чтобы визуально
+            # отделяться и от названия поставщика, и от списка этапов
+            for pname, prows in projects:
+                p_proj = doc.add_paragraph()
+                p_proj_run = p_proj.add_run(pname)
+                p_proj_run.italic = True
+                p_proj.paragraph_format.left_indent = Cm(0.75)
+                p_proj.paragraph_format.space_before = Pt(4)
+                p_proj.paragraph_format.space_after = Pt(2)
+
+                for _, row in prows.iterrows():
+                    p = doc.add_paragraph(style='List Bullet')
+                    p.add_run(row['header_line'])
+                    p.paragraph_format.space_after = Pt(0)
+                    for line in row['item_lines']:
+                        p2 = doc.add_paragraph(style='List Bullet 2')
+                        p2.add_run(line)
+                        p2.paragraph_format.space_after = Pt(0)
 
     buffer = io.BytesIO()
     doc.save(buffer)
