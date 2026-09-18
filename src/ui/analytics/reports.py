@@ -306,10 +306,28 @@ def _render_bureaucracy_progress():
     grouped = pd.DataFrame(islands).sort_values(['is_mand', 'supplier', 'sort_date'])
 
     # ОТРИСОВКА В ЭКСПАНДЕРАХ С УМНЫМ РАСЧЕТОМ ВЫСОТЫ
-    for mand_status, title, exp_key, is_exp in [(True, "⭐ Поставщики ОНПД", "exp_mand", True),
-                                                (False, "📂 Прочие поставщики", "exp_other", False)]:
+    # Фильтр поставщиков - свой у каждой группы, поэтому отобранные строки
+    # собираются здесь: по ним же формируются и выгрузки, чтобы файл содержал
+    # ровно то, что видно на экране
+    selected_parts = {}
+
+    for mand_status, title, exp_key, is_exp in [
+            (True, "⭐ Просмотр отчёта по поставщикам ОНПД", "exp_mand", False),
+            (False, "📂 Просмотр отчёта по поставщикам не из перечня ОНПД", "exp_other", False)]:
         sub = grouped[grouped['is_mand'] == mand_status].copy()
         with st.expander(title, expanded=is_exp):
+            if not sub.empty:
+                sup_names = sorted(sub['supplier'].unique())
+                sel_sups = st.multiselect(
+                    "Поставщики в отчёте:", ["Все"] + sup_names, default=["Все"],
+                    key=f"brp_sup_{exp_key}")
+                # Пустой выбор приравниваем к "Все": снятие последней галочки не
+                # должно давать пустой отчёт вместо полного
+                if sel_sups and "Все" not in sel_sups:
+                    sub = sub[sub['supplier'].isin(sel_sups)]
+
+            selected_parts[mand_status] = sub
+
             if not sub.empty:
                 disp = sub.copy()
                 disp['Поставщик'] = disp['supplier']
@@ -323,19 +341,48 @@ def _render_bureaucracy_progress():
 
                 st.dataframe(disp[['Поставщик', 'Этап']],
                              width="stretch", hide_index=True, height=final_h)
+
+                st.caption("Выгрузки ниже включают только выбранных выше поставщиков.")
+                _render_export_buttons(sub, f"{exp_key}_only",
+                                       "mand" if mand_status else "other")
             else:
                 st.write("Данные отсутствуют")
 
     st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("##### 📦 Общая выгрузка по обеим группам")
+    st.caption(
+        "Файл соберёт отчёт по обеим группам сразу, но только по тем поставщикам, "
+        "которые выбраны в фильтрах внутри блоков выше."
+    )
+    both = pd.concat([p for p in selected_parts.values() if not p.empty], ignore_index=True) \
+        if any(not p.empty for p in selected_parts.values()) else pd.DataFrame()
+    if both.empty:
+        st.info("Ни одного поставщика не выбрано — выгружать нечего.")
+    else:
+        _render_export_buttons(both, "both", "all")
+
+
+def _render_export_buttons(df, key_suffix, file_tag):
+    """Пара кнопок «таблица / текст» для переданного среза отчёта.
+
+    Вынесена в отдельную функцию, потому что используется трижды (две группы
+    по отдельности и обе вместе) - иначе три копии одного кода разошлись бы
+    при первой же правке формата выгрузки.
+    """
+    stamp = datetime.now().strftime('%d_%m')
     col_tbl, col_txt = st.columns(2)
     with col_tbl:
-        if st.button("🚀 Сгенерировать (таблица)", type="primary"):
-            docx = _export_bureaucracy_islands_docx_table(grouped)
-            st.download_button("📥 Скачать файл", docx, f"progress_report_{datetime.now().strftime('%d_%m')}.docx")
+        if st.button("🚀 Сгенерировать (таблица)", type="primary", key=f"brp_btn_tbl_{key_suffix}"):
+            docx = _export_bureaucracy_islands_docx_table(df)
+            st.download_button("📥 Скачать файл", docx,
+                               f"progress_report_{file_tag}_{stamp}.docx",
+                               key=f"brp_dl_tbl_{key_suffix}")
     with col_txt:
-        if st.button("📝 Сгенерировать (текст)"):
-            docx = _export_bureaucracy_islands_docx_text(grouped)
-            st.download_button("📥 Скачать файл", docx, f"progress_report_text_{datetime.now().strftime('%d_%m')}.docx")
+        if st.button("📝 Сгенерировать (текст)", key=f"brp_btn_txt_{key_suffix}"):
+            docx = _export_bureaucracy_islands_docx_text(df)
+            st.download_button("📥 Скачать файл", docx,
+                               f"progress_report_text_{file_tag}_{stamp}.docx",
+                               key=f"brp_dl_txt_{key_suffix}")
 
 def _docx_base():
     doc = Document()
