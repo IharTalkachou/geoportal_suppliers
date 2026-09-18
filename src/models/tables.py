@@ -629,3 +629,26 @@ class SurveyLink(Base):
     survey_id = Column(Integer, ForeignKey('surveys.survey_id', ondelete='CASCADE'), nullable=False, comment='Идентификатор опросника')
     survey_link = Column(Text, nullable=False, comment='Ссылка поставщика на НПД, сервис или вариант доступа')
 
+
+class ReportSupplierSelection(Base):
+    """Именованная выборка поставщиков для фильтра отчётов.
+
+    Сущность чисто вспомогательная: в самих отчётах выборка никак не
+    отображается и не идентифицируется - она только избавляет от повторного
+    ручного выбора одного и того же набора поставщиков (напр. «Банки»).
+    Состав хранится массивом supplier_id в JSONB, а не таблицей-связкой:
+    выборка всегда читается и переписывается целиком, join-ов по ней нет.
+    """
+    __tablename__ = 'report_supplier_selections'
+    __table_args__ = (
+        UniqueConstraint('selection_name', name='unique_report_selection_name'),
+        {'comment': 'Именованные выборки поставщиков для фильтров отчётов (общие для всех пользователей)'},
+    )
+
+    selection_id = Column(Integer, primary_key=True, autoincrement=True, comment='Идентификатор выборки')
+    selection_name = Column(Text, nullable=False, comment='Название выборки, например «Банки»')
+    supplier_ids = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"),
+                          comment='Массив supplier_id, входящих в выборку')
+    created_by = Column(Integer, ForeignKey('users.user_id', ondelete='SET NULL'),
+                        comment='Автор выборки; выборка общая, автор нужен только для справки')
+    created_at = Column(DateTime(timezone=True), server_default=text("now()"), comment='Дата создания выборки')

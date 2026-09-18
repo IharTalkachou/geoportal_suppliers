@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 import io
+import json
+import sys
 from datetime import datetime
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from config.database import engine
 from docx import Document
@@ -9,7 +12,8 @@ from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
 
-from config.cache import query_db
+from config.cache import query_db, clear_cache
+from config.auth import log_action
 from config.settings_handler import load_settings
 from ui.analytics.data_provider import get_analytics_snapshot
 from ui.shared_components import render_survey_viewer
@@ -312,6 +316,9 @@ def _render_bureaucracy_progress():
 
         islands.append({
             'supplier': first['supplier_name'],
+            # id нужен именованным выборкам: он переживает переименование поставщика,
+            # в отличие от названия, по которому идёт отображение
+            'supplier_id': int(first['supplier_id']),
             'project': first['project_name'],
             'project_id': first['project_id'],
             'is_agreement': bool(first['is_agreement_project']),
@@ -328,53 +335,240 @@ def _render_bureaucracy_progress():
                .sort_values(['is_mand', 'supplier', 'is_agreement', 'project', 'sort_date'],
                             ascending=[True, True, False, True, True]))
 
-    # ОТРИСОВКА В ЭКСПАНДЕРАХ С УМНЫМ РАСЧЕТОМ ВЫСОТЫ
+    # ОТРИСОВКА ПО ГРУППАМ
     # Фильтр поставщиков - свой у каждой группы, поэтому отобранные строки
     # собираются здесь: по ним же формируются и выгрузки, чтобы файл содержал
     # ровно то, что видно на экране
+    selections = _load_supplier_selections()
     selected_parts = {}
 
-    for mand_status, title, exp_key, is_exp in [
-            (True, "⭐ Просмотр отчёта по поставщикам ОНПД", "exp_mand", False),
-            (False, "📂 Просмотр отчёта по поставщикам не из перечня ОНПД", "exp_other", False)]:
-        sub = grouped[grouped['is_mand'] == mand_status].copy()
-        with st.expander(title, expanded=is_exp):
-            if not sub.empty:
-                sup_names = sorted(sub['supplier'].unique())
-                sel_sups = st.multiselect(
-                    "Поставщики в отчёте:", ["Все"] + sup_names, default=["Все"],
-                    key=f"brp_sup_{exp_key}")
-                # Пустой выбор приравниваем к "Все": снятие последней галочки не
-                # должно давать пустой отчёт вместо полного
-                if sel_sups and "Все" not in sel_sups:
-                    sub = sub[sub['supplier'].isin(sel_sups)]
+    for mand_status, title, exp_key in [
+            (True, "⭐ Просмотр отчёта по поставщикам ОНПД", "mand"),
+            (False, "📂 Просмотр отчёта по поставщикам не из перечня ОНПД", "other")]:
+        sub_all = grouped[grouped['is_mand'] == mand_status].copy()
+
+        with st.expander(title, expanded=False):
+            if sub_all.empty:
+                st.write("Данные отсутствуют")
+                selected_parts[mand_status] = sub_all
+                continue
+
+            group_sups = (sub_all[['supplier_id', 'supplier']]
+                          .drop_duplicates()
+                          .sort_values('supplier'))
+
+            # None - "все поставщики группы" (состояние по умолчанию);
+            # множество id - явный выбор; пустое множество - не выбрано ничего
+            state_key = f"brp_pick_{exp_key}"
+            if state_key not in st.session_state:
+                st.session_state[state_key] = None
+            picked = st.session_state[state_key]
+
+            c_btn, c_info = st.columns([1, 2.4], vertical_alignment="center")
+            with c_btn:
+                if st.button("🎯 Выбрать поставщиков", width="stretch",
+                             key=f"brp_open_{exp_key}"):
+                    _supplier_picker_dialog(state_key, group_sups, selections, exp_key)
+            with c_info:
+                st.caption(_describe_pick(picked, group_sups))
+
+            if picked is None:
+                sub = sub_all
+            else:
+                sub = sub_all[sub_all['supplier_id'].isin(picked)]
 
             selected_parts[mand_status] = sub
 
-            if not sub.empty:
-                # Таблица заменена иерархическим текстом: три уровня (поставщик ->
-                # проект -> этапы) в две колонки не укладываются, а markdown
-                # одинаково читается и в браузере, и при печати страницы
-                st.markdown(_islands_to_markdown(sub), unsafe_allow_html=True)
+            if sub.empty:
+                # Пустой выбор больше НЕ означает "все": раньше снятие всех галочек
+                # молча возвращало полный отчёт, то есть фильтр делал обратное тому,
+                # что показывал
+                st.warning("Выберите поставщиков для формирования отчёта")
+            else:
+                # Сам текст отчёта - во вложенном экспандере: он длинный, а фильтр
+                # и кнопки выгрузки должны оставаться на виду
+                with st.expander("📄 Текст отчёта", expanded=False):
+                    # Таблица заменена иерархическим текстом: три уровня (поставщик ->
+                    # проект -> этапы) в две колонки не укладываются, а markdown
+                    # одинаково читается и в браузере, и при печати страницы
+                    st.markdown(_islands_to_markdown(sub), unsafe_allow_html=True)
 
                 st.caption("Выгрузки ниже включают только выбранных выше поставщиков.")
-                _render_export_buttons(sub, f"{exp_key}_only",
-                                       "mand" if mand_status else "other")
-            else:
-                st.write("Данные отсутствуют")
+                _render_export_buttons(sub, f"{exp_key}_only", exp_key)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("##### 📦 Общая выгрузка по обеим группам")
     st.caption(
         "Файл соберёт отчёт по обеим группам сразу, но только по тем поставщикам, "
-        "которые выбраны в фильтрах внутри блоков выше."
+        "которые выбраны в фильтрах внутри блоков выше. Группа, где не выбран ни один "
+        "поставщик, в файл не попадёт."
     )
-    both = pd.concat([p for p in selected_parts.values() if not p.empty], ignore_index=True) \
-        if any(not p.empty for p in selected_parts.values()) else pd.DataFrame()
+    parts = [p for p in selected_parts.values() if not p.empty]
+    both = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if both.empty:
-        st.info("Ни одного поставщика не выбрано — выгружать нечего.")
+        st.warning("Не выбран ни один из поставщиков — выгружать нечего.")
     else:
         _render_export_buttons(both, "both", "all")
+
+
+# --- ИМЕНОВАННЫЕ ВЫБОРКИ ПОСТАВЩИКОВ -------------------------------------------
+# Выборка - вспомогательная сущность фильтра: в отчёте она никак не отображается
+# и не идентифицируется, только избавляет от повторного ручного выбора одного и
+# того же набора поставщиков. Хранится в report_supplier_selections (общая для
+# всех пользователей), состав - массив supplier_id в JSONB.
+
+def _load_supplier_selections():
+    """Все сохранённые выборки; id хранятся как JSONB-массив.
+
+    Ошибка чтения гасится пустым списком: до применения миграции таблицы ещё
+    нет, и отчёт должен работать без выборок, а не падать целиком.
+    """
+    try:
+        df = query_db("SELECT selection_id, selection_name, supplier_ids "
+                      "FROM report_supplier_selections ORDER BY selection_name")
+    except Exception as e:
+        print(f"⚠️ Выборки поставщиков недоступны: {e}", file=sys.stderr)
+        return []
+    out = []
+    for _, r in df.iterrows():
+        raw = r['supplier_ids'] or []
+        out.append({
+            "id": int(r['selection_id']),
+            "name": r['selection_name'],
+            "supplier_ids": {int(x) for x in raw},
+        })
+    return out
+
+
+def _describe_pick(picked, group_sups):
+    """Подпись рядом с кнопкой: что именно сейчас отобрано."""
+    total = len(group_sups)
+    if picked is None:
+        return f"Сейчас в отчёте: все поставщики группы ({total})"
+    in_group = [s for s in picked if s in set(group_sups['supplier_id'])]
+    if not in_group:
+        return "Не выбран ни один поставщик"
+    if len(in_group) == total:
+        return f"Сейчас в отчёте: все поставщики группы ({total})"
+    names = group_sups[group_sups['supplier_id'].isin(in_group)]['supplier'].tolist()
+    shown = ", ".join(names[:3])
+    tail = f" и ещё {len(names) - 3}" if len(names) > 3 else ""
+    return f"Сейчас в отчёте ({len(names)}): {shown}{tail}"
+
+
+@st.dialog("Выбор поставщиков для отчёта", width="large")
+def _supplier_picker_dialog(state_key, group_sups, selections, exp_key):
+    st.caption(
+        "Можно набрать список из сохранённых выборок, добавить отдельных поставщиков "
+        "или совместить то и другое. Поставщик, попавший в отчёт дважды, учитывается "
+        "один раз."
+    )
+
+    id_by_name = dict(zip(group_sups['supplier'], group_sups['supplier_id']))
+    name_by_id = {v: k for k, v in id_by_name.items()}
+    group_ids = set(group_sups['supplier_id'])
+
+    current = st.session_state.get(state_key)
+    take_all = st.checkbox("Все поставщики этой группы", value=(current is None),
+                           key=f"brp_all_{exp_key}")
+
+    chosen_ids = set()
+    if not take_all:
+        if selections:
+            # В выборку могли попасть поставщики другой группы - показываем, сколько
+            # из неё реально относится к этой, иначе выбор выглядел бы неисправным
+            def _label(s):
+                hit = len(s['supplier_ids'] & group_ids)
+                return f"{s['name']} ({hit} из {len(s['supplier_ids'])} в этой группе)"
+
+            picked_sel = st.multiselect(
+                "Сохранённые выборки:", [s['name'] for s in selections],
+                key=f"brp_selnames_{exp_key}",
+                format_func=lambda n: _label(next(s for s in selections if s['name'] == n)))
+            for s in selections:
+                if s['name'] in picked_sel:
+                    chosen_ids |= (s['supplier_ids'] & group_ids)
+        else:
+            st.caption("Сохранённых выборок пока нет — их можно создать ниже.")
+
+        extra = st.multiselect("Отдельные поставщики:", sorted(id_by_name.keys()),
+                               key=f"brp_extra_{exp_key}")
+        chosen_ids |= {id_by_name[n] for n in extra}
+
+        if chosen_ids:
+            preview = sorted(name_by_id[i] for i in chosen_ids)
+            st.success(f"Будет включено поставщиков: {len(preview)}")
+            st.caption(", ".join(preview))
+        else:
+            st.info("Пока не выбрано ни одного поставщика.")
+
+    st.divider()
+    with st.expander("💾 Сохранить текущий набор как выборку", expanded=False):
+        if take_all or not chosen_ids:
+            st.caption("Сначала отметьте конкретных поставщиков выше.")
+        else:
+            new_name = st.text_input("Название выборки", key=f"brp_newname_{exp_key}",
+                                     placeholder="например: Банки")
+            if st.button("💾 Сохранить выборку", key=f"brp_save_{exp_key}"):
+                _save_supplier_selection(new_name, chosen_ids)
+
+    if selections:
+        with st.expander("🗑 Удалить выборку", expanded=False):
+            to_del = st.selectbox("Выборка:", [s['name'] for s in selections],
+                                  key=f"brp_del_sel_{exp_key}")
+            if st.button("🗑 Удалить", key=f"brp_del_{exp_key}"):
+                _delete_supplier_selection(to_del)
+
+    st.divider()
+    if st.button("✅ Применить", type="primary", width="stretch", key=f"brp_apply_{exp_key}"):
+        st.session_state[state_key] = None if take_all else chosen_ids
+        st.rerun()
+
+
+def _save_supplier_selection(name, supplier_ids):
+    name = (name or "").strip()
+    if not name:
+        st.error("Укажите название выборки")
+        return
+    try:
+        with Session(engine) as s:
+            exists = s.execute(
+                text("SELECT 1 FROM report_supplier_selections WHERE selection_name = :n"),
+                {"n": name}).scalar()
+            if exists:
+                st.error(f"Выборка «{name}» уже есть — выберите другое название")
+                return
+            s.execute(text("""
+                INSERT INTO report_supplier_selections (selection_name, supplier_ids, created_by)
+                VALUES (:n, CAST(:ids AS jsonb), :uid)
+            """), {"n": name, "ids": json.dumps(sorted(int(i) for i in supplier_ids)),
+                   "uid": st.session_state.get("auth", {}).get("user_id")})
+            s.commit()
+        log_action(st.session_state["auth"]["user_id"], "CREATE_REPORT_SELECTION",
+                   "report_supplier_selections", new={"name": name, "count": len(supplier_ids)})
+        clear_cache()
+        # Намеренно без st.rerun(): он закрыл бы диалог (содержимое диалога -
+        # фрагмент, а rerun по умолчанию app-scoped), и собранный набор пришлось
+        # бы набирать заново, чтобы его применить. Новая выборка появится в
+        # списке при следующем открытии диалога - кэш уже сброшен.
+        st.success(f"Выборка «{name}» сохранена. Нажмите «Применить», чтобы построить отчёт.")
+    except Exception as e:
+        st.error(f"Не удалось сохранить выборку: {e}")
+
+
+def _delete_supplier_selection(name):
+    try:
+        with Session(engine) as s:
+            s.execute(text("DELETE FROM report_supplier_selections WHERE selection_name = :n"),
+                      {"n": name})
+            s.commit()
+        log_action(st.session_state["auth"]["user_id"], "DELETE_REPORT_SELECTION",
+                   "report_supplier_selections", old={"name": name})
+        clear_cache()
+        st.success(f"Выборка «{name}» удалена")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Не удалось удалить выборку: {e}")
 
 
 def _iter_supplier_projects(df):
