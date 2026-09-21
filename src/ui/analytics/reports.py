@@ -1200,6 +1200,10 @@ def _render_survey_explorer():
 # 8. РЕЕСТР УЧЁТНЫХ ЗАПИСЕЙ ПОЛЬЗОВАТЕЛЕЙ
 # ==========================================
 OPERATOR_NAME = 'Государственное предприятие "Белгеодезия"'
+# Для поиска Оператора среди поставщиков: кавычки в названии в БД могут
+# отличаться от OPERATOR_NAME, поэтому сравнивается только ключевое слово
+# (так же исключается в staff.py)
+_OPERATOR_MARKER = 'Белгеодезия'
 
 def _render_accounts_registry():
     """
@@ -1323,6 +1327,20 @@ def _build_accounts_registry_docx(today_str, total_accounts, z_org_accounts, a_l
 # "Размещение метаданных Поставщиком", см. комментарий в technology_tab.py) выполнены -
 # т.е. поставщик передал материал. "...опубликованы" = финальные DATA_PUB/META_PUB.
 # Эти флаги берутся ПО НАБОРУ (через affected_item_ids), а не по проекту целиком.
+#
+# Строка отчёта = вид сведений ПОСТАВЩИКА, а не проекта: один и тот же вид может
+# быть заведён в нескольких его проектах (соглашение + протокол). Такие строки
+# схлопываются, флаги объединяются по ИЛИ - вид считается переданным, если это
+# отмечено хотя бы в одном проекте.
+#
+# "Примечание" - projects.notes + открытые этапы в формате
+# "Дата — Этап — Комментарий". Документарный этап относится ко всем видам
+# сведений своего проекта, технологический - только к своему охвату
+# (affected_item_ids); технологический этап без охвата - ко всему проекту.
+#
+# Оператор (ГП "Белгеодезия") в отчёт не попадает: соглашений и протоколов с ним
+# не оформляется, данные переданы до начала работы геопортала.
+_SUMMARY_OPEN_STATUSES = ('В работе', 'Ожидание', 'Просрочено')
 _SUMMARY_GREEN = RGBColor(0x27, 0xAE, 0x60)
 _SUMMARY_RED = RGBColor(0xE7, 0x4C, 0x3C)
 
@@ -1344,7 +1362,8 @@ def _fetch_summary_rows():
     items_df = query_db("""
         SELECT s.supplier_id, s.supplier_name, s.is_mandatory AS supplier_mandatory,
                p.project_id, p.project_name, p.notes AS project_notes,
-               pi.item_id, d.dataset_name, d.is_mandatory AS dataset_mandatory,
+               pi.item_id, pi.dataset_id, pi.info_id,
+               d.dataset_name, d.is_mandatory AS dataset_mandatory,
                i.info_name,
                pd.part_id, itp.part_name,
                -- Условия передачи: часть -> проект -> справочник вида сведений
@@ -1360,9 +1379,10 @@ def _fetch_summary_rows():
         JOIN info_types i ON pi.info_id = i.info_id
         LEFT JOIN project_item_part_details pd ON pd.item_id = pi.item_id
         LEFT JOIN info_type_parts itp ON itp.part_id = pd.part_id
+        WHERE s.supplier_name NOT ILIKE :operator
         ORDER BY s.is_mandatory DESC, s.supplier_name, d.dataset_name,
                  i.info_name, itp.sort_order NULLS LAST, itp.part_id
-    """)
+    """, {"operator": f"%{_OPERATOR_MARKER}%"})
 
     # Поставщики с подписанным соглашением
     agreement_ids = set(query_db("""
@@ -1423,25 +1443,52 @@ def _fetch_summary_rows():
             return True
         return part_id is not None and (item_id, part_id, code) in tech_by_part
 
-    # Примечание: projects.notes как основа + свежие комментарии незакрытых этапов
+    # Примечание: открытые этапы с комментарием, "Дата — Этап — Комментарий"
     notes_df = query_db("""
-        SELECT ps.project_id, ps.comments,
+        SELECT ps.stage_progress_id, ps.project_id, ps.comments, ps.affected_item_ids,
+               stg.stage_name, stg.track_category,
                COALESCE(ps.actual_start, ps.planned_start) AS ref_date
         FROM project_stages ps
-        WHERE ps.micro_status <> 4
+        JOIN stages stg ON ps.stage_id = stg.stage_id
+        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
+        WHERE ms.micro_status_name IN :open_statuses
+          AND stg.track_category IN ('1. Документарный', '2. Технологический')
           AND ps.comments IS NOT NULL AND btrim(ps.comments) <> ''
-        ORDER BY ps.project_id, COALESCE(ps.actual_start, ps.planned_start) DESC NULLS LAST
-    """)
+    """, {"open_statuses": _SUMMARY_OPEN_STATUSES})
 
-    notes_by_project = {}
-    for pid, group in notes_df.groupby('project_id'):
-        lines = []
-        for _, r in group.iterrows():
-            prefix = f"{r['ref_date'].strftime('%d.%m.%Y')}: " if pd.notna(r['ref_date']) else ""
-            lines.append(f"{prefix}{r['comments'].strip()}")
-        notes_by_project[pid] = lines
+    # Запись примечания: (дата для сортировки, id этапа, текст строки).
+    # id этапа нужен, чтобы при схлопывании строк один этап не вошёл дважды.
+    stage_notes_by_project = {}   # project_id -> [запись]
+    stage_notes_by_item = {}      # item_id -> [(part_id | None, запись)]
+    for _, s in notes_df.iterrows():
+        ref_date = s['ref_date'] if pd.notna(s['ref_date']) else None
+        prefix = f"{ref_date.strftime('%d.%m.%Y')} — " if ref_date else ""
+        note = (ref_date, int(s['stage_progress_id']),
+                f"{prefix}{s['stage_name']} — {clean_comment(s['comments'])}")
 
-    rows = []
+        coverage = s['affected_item_ids']
+        if isinstance(coverage, str):
+            coverage = json.loads(coverage)
+        if s['track_category'] == '1. Документарный' or not coverage:
+            stage_notes_by_project.setdefault(int(s['project_id']), []).append(note)
+            continue
+        for aff in coverage:
+            aff_part = aff.get('part_id')
+            stage_notes_by_item.setdefault(int(aff['item_id']), []).append(
+                (int(aff_part) if aff_part is not None else None, note))
+
+    def stage_notes_for(pid, item_id, part_id):
+        notes = list(stage_notes_by_project.get(pid, []))
+        for aff_part, note in stage_notes_by_item.get(item_id, []):
+            # Этап на весь вид сведений относится и к каждой его части;
+            # этап на часть - к этой части и к строке вида сведений целиком
+            if aff_part is None or part_id is None or aff_part == part_id:
+                notes.append(note)
+        return notes
+
+    # Схлопывание: одна строка на вид сведений (часть) поставщика,
+    # в каком бы количестве его проектов этот вид ни был заведён
+    merged = {}
     for _, r in items_df.iterrows():
         item_id = int(r['item_id'])
         pid = int(r['project_id'])
@@ -1457,25 +1504,44 @@ def _fetch_summary_rows():
             protocol_ok = (pid in proto_whole_projects or item_id in proto_items_whole)
             info_label = r['info_name']
 
-        note_parts = []
-        if pd.notna(r['project_notes']) and str(r['project_notes']).strip():
-            note_parts.append(str(r['project_notes']).strip())
-        note_parts.extend(notes_by_project.get(pid, []))
+        key = (int(r['supplier_id']), int(r['dataset_id']), int(r['info_id']), part_id)
+        row = merged.get(key)
+        if row is None:
+            row = merged[key] = {
+                'supplier_id': int(r['supplier_id']),
+                'supplier_name': r['supplier_name'],
+                'agreement_signed': int(r['supplier_id']) in agreement_ids,
+                'dataset_name': r['dataset_name'],
+                'dataset_mandatory': bool(r['dataset_mandatory']),
+                'info_label': info_label,
+                'protocol_signed': False,
+                'data_received': False,
+                'data_published': False,
+                'meta_received': False,
+                'meta_published': False,
+                'project_notes': [],
+                'stage_notes': {},
+            }
+        row['protocol_signed'] |= protocol_ok
+        row['data_received'] |= tech_done(item_id, part_id, 'DATA_WAIT')
+        row['data_published'] |= tech_done(item_id, part_id, 'DATA_PUB')
+        row['meta_received'] |= tech_done(item_id, part_id, 'META_WAIT')
+        row['meta_published'] |= tech_done(item_id, part_id, 'META_PUB')
 
-        rows.append({
-            'supplier_id': int(r['supplier_id']),
-            'supplier_name': r['supplier_name'],
-            'agreement_signed': int(r['supplier_id']) in agreement_ids,
-            'dataset_name': r['dataset_name'],
-            'dataset_mandatory': bool(r['dataset_mandatory']),
-            'info_label': info_label,
-            'protocol_signed': protocol_ok,
-            'data_received': tech_done(item_id, part_id, 'DATA_WAIT'),
-            'data_published': tech_done(item_id, part_id, 'DATA_PUB'),
-            'meta_received': tech_done(item_id, part_id, 'META_WAIT'),
-            'meta_published': tech_done(item_id, part_id, 'META_PUB'),
-            'note': "\n".join(note_parts),
-        })
+        project_note = str(r['project_notes']).strip() if pd.notna(r['project_notes']) else ""
+        if project_note and project_note not in row['project_notes']:
+            row['project_notes'].append(project_note)
+        for note in stage_notes_for(pid, item_id, part_id):
+            row['stage_notes'][note[1]] = note
+
+    rows = []
+    for row in merged.values():
+        # Свежие этапы сверху; этап без даты - в конце
+        stage_notes = sorted(row.pop('stage_notes').values(),
+                             key=lambda n: pd.Timestamp(n[0]) if n[0] else pd.Timestamp.min,
+                             reverse=True)
+        row['note'] = "\n".join(row.pop('project_notes') + [n[2] for n in stage_notes])
+        rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -1576,13 +1642,22 @@ def _export_supplier_projects_summary_docx(df):
         hrun = p.add_run(h)
         hrun.bold = True
 
-    for n, (_, row) in enumerate(df.iterrows(), 1):
+    # Ячейки, которые ниже объединяются по вертикали, заполняются только в первой
+    # строке группы: merge() в python-docx не заменяет содержимое, а склеивает
+    # тексты всех объединяемых ячеек - поставщик повторялся бы по числу строк.
+    # Пустая ячейка (без run-ов) при объединении пропускается.
+    first_sup = ~df.duplicated('supplier_id')
+    first_ds = ~df.duplicated(['supplier_id', 'dataset_name'])
+
+    for n, (idx, row) in enumerate(df.iterrows(), 1):
         cells = table.add_row().cells
         cells[0].text = str(n)
-        cells[1].text = row['supplier_name']
-        _write_summary_flag_cell(cells[2], row['agreement_signed'])
-        cells[3].text = row['dataset_name']
-        _write_summary_flag_cell(cells[4], row['dataset_mandatory'])
+        if first_sup[idx]:
+            cells[1].text = row['supplier_name']
+            _write_summary_flag_cell(cells[2], row['agreement_signed'])
+        if first_ds[idx]:
+            cells[3].text = row['dataset_name']
+            _write_summary_flag_cell(cells[4], row['dataset_mandatory'])
         cells[5].text = row['info_label']
         _write_summary_flag_cell(cells[6], row['protocol_signed'])
         _write_summary_flag_cell(cells[7], row['data_received'])
