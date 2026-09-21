@@ -69,6 +69,7 @@ _GLOBAL_CSS = """
         background: rgba(255, 255, 255, 0.55);
         backdrop-filter: blur(1.5px);
         opacity: 0;
+        visibility: hidden;
         pointer-events: none;
     }
     [data-testid="stApp"]::after {
@@ -84,10 +85,16 @@ _GLOBAL_CSS = """
         border-top-color: #ff4b4b;      /* акцентный цвет Streamlit */
         border-radius: 50%;
         opacity: 0;
+        visibility: hidden;
         pointer-events: none;
     }
 
-    /* Оверлей включается только пока скрипт выполняется */
+    /* Оверлей включается только пока скрипт выполняется.
+       Перехватывать клики он начинает вместе с появлением, а не сразу:
+       visibility переключается той же анимацией, что и opacity, после задержки.
+       Иначе невидимая вуаль ловила клик, запустивший rerun: ввод в поле ->
+       нажатие кнопки -> blur поля запускает rerun -> отпускание мыши попадает
+       на вуаль, и кнопку приходилось нажимать второй раз. */
     [data-testid="stApp"][data-test-script-state="running"]::before,
     [data-testid="stApp"][data-test-script-state="rerunRequested"]::before {
         pointer-events: all;
@@ -100,7 +107,7 @@ _GLOBAL_CSS = """
                    geo-spin 700ms linear 500ms infinite;
     }
 
-    @keyframes geo-overlay-in { to { opacity: 1; } }
+    @keyframes geo-overlay-in { to { opacity: 1; visibility: visible; } }
     @keyframes geo-spin { to { transform: rotate(360deg); } }
 
     /* Уважаем системную настройку "уменьшить движение": вуаль остаётся, вращение - нет */

@@ -31,6 +31,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       PYTHONUNBUFFERED: "1"
+      # Время контейнера = Минск: datetime.now() в формах заявок и т.п. иначе даёт UTC (на 3 ч меньше)
+      TZ: "Europe/Minsk"
       SESSION_DIR: "/app/app_data/sessions"
     volumes:
       - ./app_data:/app/app_data
