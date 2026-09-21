@@ -11,6 +11,8 @@ from docx import Document
 from docx.shared import Pt, Cm, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 from config.cache import query_db, clear_cache
 from config.auth import log_action
@@ -1350,6 +1352,14 @@ _SUMMARY_HEADERS = [
     'Метаданные получены', 'Метаданные опубликованы', 'Примечание',
 ]
 
+# Оформление выгрузки в Word: A4 альбомная (размеры заданы пользователем).
+# Ширины - в порядке _SUMMARY_HEADERS. Сумма 28,33 см шире области текста
+# (29,7 - 2 x 1,2 = 27,3 см): таблица заходит на правое поле примерно на 1 см.
+_SUMMARY_COL_WIDTHS_CM = [0.63, 3.6, 1.3, 3.0, 1.3, 6.0, 1.3, 1.3, 1.3, 1.3, 1.3, 6.0]
+_SUMMARY_MARGIN_CM = 1.2
+_SUMMARY_FONT_PT = 9
+_SUMMARY_HEADER_INDENT_CM = -0.2
+
 
 def _fetch_summary_rows():
     """Собирает плоскую таблицу отчёта: одна строка на вид сведений (или его часть)."""
@@ -1615,17 +1625,56 @@ def _merge_column_runs(table, col_idx, start_row, keys):
             run_start = i
 
 
+def _set_docx_language(doc, lang='ru-RU'):
+    """Язык текста по умолчанию для всего документа.
+
+    Шаблон python-docx объявляет en-US - Word проверяет орфографию и
+    расставляет переносы в русском тексте как в английском.
+    """
+    rpr = doc.styles.element.find(qn('w:docDefaults')).find(qn('w:rPrDefault')).find(qn('w:rPr'))
+    lang_el = rpr.find(qn('w:lang'))
+    if lang_el is None:
+        lang_el = OxmlElement('w:lang')
+        rpr.append(lang_el)
+    lang_el.set(qn('w:val'), lang)
+    lang_el.set(qn('w:eastAsia'), lang)
+
+
+def _repeat_table_header(row):
+    """Строка повторяется вверху каждой страницы, на которую переходит таблица."""
+    tbl_header = OxmlElement('w:tblHeader')
+    tbl_header.set(qn('w:val'), 'true')
+    row._tr.get_or_add_trPr().append(tbl_header)
+
+
+def _set_column_widths(table, widths_cm):
+    """Фиксированная ширина колонок.
+
+    Word берёт ширину и из сетки таблицы (tblGrid), и из каждой ячейки (tcW),
+    а при автоподборе пересчитывает её по содержимому - поэтому задаётся всё
+    сразу и автоподбор выключается.
+    """
+    table.autofit = False
+    for grid_col, w in zip(table._tbl.tblGrid.findall(qn('w:gridCol')), widths_cm):
+        grid_col.set(qn('w:w'), str(int(Cm(w).twips)))
+    for row in table.rows:
+        for cell, w in zip(row.cells, widths_cm):
+            cell.width = Cm(w)
+
+
 def _export_supplier_projects_summary_docx(df):
     doc = Document()
+    _set_docx_language(doc)
     style = doc.styles['Normal']
     style.font.name = 'Times New Roman'
-    style.font.size = Pt(9)
+    style.font.size = Pt(_SUMMARY_FONT_PT)
 
+    # A4 альбомная: размер задаётся явно - шаблон python-docx по умолчанию Letter
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
-    section.page_width, section.page_height = section.page_height, section.page_width
-    section.top_margin = section.bottom_margin = Cm(1.5)
-    section.left_margin = section.right_margin = Cm(1.5)
+    section.page_width, section.page_height = Cm(29.7), Cm(21.0)
+    section.top_margin = section.bottom_margin = Cm(_SUMMARY_MARGIN_CM)
+    section.left_margin = section.right_margin = Cm(_SUMMARY_MARGIN_CM)
 
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1634,11 +1683,17 @@ def _export_supplier_projects_summary_docx(df):
 
     table = doc.add_table(rows=1, cols=len(_SUMMARY_HEADERS))
     table.style = 'Table Grid'
+    header_row = table.rows[0]
+    _repeat_table_header(header_row)
     for i, h in enumerate(_SUMMARY_HEADERS):
-        cell = table.rows[0].cells[i]
+        cell = header_row.cells[i]
         cell.text = ""
         p = cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Отрицательный отступ выводит текст в поля ячейки: заголовки узких
+        # колонок ("Метаданные опубликованы" в 1,3 см) иначе рвутся посреди слова
+        p.paragraph_format.left_indent = Cm(_SUMMARY_HEADER_INDENT_CM)
+        p.paragraph_format.right_indent = Cm(_SUMMARY_HEADER_INDENT_CM)
         hrun = p.add_run(h)
         hrun.bold = True
 
@@ -1665,6 +1720,9 @@ def _export_supplier_projects_summary_docx(df):
         _write_summary_flag_cell(cells[9], row['meta_received'])
         _write_summary_flag_cell(cells[10], row['meta_published'])
         cells[11].text = row['note'] or ""
+
+    # Ширины - до объединения: объединённая ячейка берёт ширину первой
+    _set_column_widths(table, _SUMMARY_COL_WIDTHS_CM)
 
     # Объединение ячеек: поставщик/соглашение - по поставщику,
     # набор/обязательный - по набору внутри поставщика (как в форме отчёта)
