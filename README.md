@@ -49,6 +49,8 @@ Web-интерфейс построен на **Streamlit**, база данны�
 ├── 📄 README.md                  # Документация (этот файл)
 ├── 📄 CLAUDE.md                  # Подробная карта кода для разработки/агентов
 ├── 📄 docker-compose.yml         # Оркестрация сервисов (единственный, и на проде, и локально)
+├── 📁 docs/
+│   └── 📄 migration.md           # Перенос приложения на новую ВМ
 ├── 📄 alembic/                   # Миграции схемы БД
 ├── 📄 requirements.txt           # Python-зависимости
 ├── 📁 src/
@@ -77,6 +79,8 @@ Web-интерфейс построен на **Streamlit**, база данны�
 | **Тест/отладка** | машина разработчика | http://localhost:8501 | разработка и проверка изменений |
 
 > ⚠️ Адрес ВМ временный и скоро изменится. Внешний адрес (доступ извне контура) тоже меняется — актуальный уточняйте у владельца системы.
+
+Перенос прода на другую ВМ (заявка сисадмину, аудит, перенос данных, проверка, откат) — пошагово в [docs/migration.md](docs/migration.md).
 
 ### Обновление прода
 ```bash
@@ -129,7 +133,7 @@ streamlit run src/app.py --server.port 8501
 - **Динамическая навигация:** Кнопка в хедере меняет состояние в зависимости от контекста: `⚙️ Админ-панель` ↔ `⬅️ Назад к проектам`. При выходе сессия и флаг навигации полностью очищаются.
 
 ## 💾 Автоматические Бэкапы PostgreSQL
-- **Архитектура:** Изолированный контейнер `geodata_db_backup` на базе `postgres:16-alpine`. Использует `pg_dump -Fc` (сжатый бинарный формат, оптимизирован для PostgreSQL).
+- **Архитектура:** Изолированный контейнер `geodata_db_backup` на базе `postgres:17-alpine`. Использует `pg_dump -Fc` (сжатый бинарный формат, оптимизирован для PostgreSQL). ⚠️ Сама БД работает на `postgres:16`, а дампы сделаны `pg_dump` 17 (формат архива 1.16): восстанавливать их можно только `pg_restore` версии 17 и новее — то есть через контейнер `db-backup`, а не через `db`.
 - **Расписание:** Дамп снимается раз в сутки в заданный час (переменная `BACKUP_HOUR`, по умолчанию 3:00), а не через 24 часа от старта контейнера. Каждое воскресенье создаётся отдельная копия в `weekly/`. Неудачный или пустой дамп удаляется, ротация выполняется только после удачного (подробности — в CLAUDE.md, раздел про миграции и бэкапы).
 - **Хранение и ротация:**
   - `./backups/daily/` — хранит последние **7** ежедневных дампов.
@@ -139,20 +143,15 @@ streamlit run src/app.py --server.port 8501
 
 ### Восстановление из бэкапа
 
-1. Query Tool для базы:
+Остановить приложение (`docker compose stop app`), затем очистить схему и восстановить дамп:
 
-```sql
-DROP TABLE IF EXISTS audit_log, users CASCADE;
--- Допиши сюда остальные таблицы
+```bash
+docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"'
+docker compose run --rm db-backup sh -c 'pg_restore -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" --no-owner --no-privileges /backups/daily/имя_файла.dump'
+docker compose start app
 ```
 
-2. Выбрать public, правой кнопкой мыши -> Restore...
-
-3. Выбрать формат Custom or tar, выбрать файл из локальной папки backups/daily
-
-4. Вкладка Restore Options: "Do not save" включи Owner = Yes. Privilege = Yes
-
-5. Кнопка Restore
+Тот же порядок, со сверкой данных до и после, подробно расписан в [docs/migration.md](docs/migration.md) (разделы 4.5–4.7).
 
 ## 🔧 Архитектурные особенности
 - **Реактивные формы CRUD:** Во всех вкладках (`suppliers`, `datasets`, `projects`, `bureaucracy`, `technology`) создание/редактирование реализовано через модальные окна `@st.dialog(...)` и формы с `st.session_state`, а не построчное редактирование таблиц. Зависимые списки (например, Виды → Набор, Контакты → Поставщик) обновляются мгновенно без перезагрузки.
@@ -170,23 +169,20 @@ docker compose restart db-backup   # Перезапуск сервиса бэк�
 ```
 
 ### Работа с бэкапами
-```powershell
-# Ручной запуск создания дампа
-docker exec geodata_db_backup /usr/local/bin/backup.sh
+```bash
+# Ручной дамп вне расписания (в ./backups/, вне ротации daily/)
+# backup.sh для этого не подходит: после дампа он уходит в бесконечный цикл ожидания
+docker compose exec db-backup sh -c 'pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -Fc -f /backups/manual_$(date +%Y%m%d_%H%M).dump'
 
-# Просмотр структуры последнего дампа (версия клиента должна совпадать с версией БД)
-$latest = (Get-ChildItem ".\backups\daily\*.dump" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name
-docker run --rm -v "./backups:/backups" postgres:16 pg_restore -l "/backups/daily/$latest"
-
-# Восстановление БД из дампа (остановите приложение перед выполнением!)
-docker run --rm -it -v ./backups:/backups -e PGPASSWORD=your_password postgres:16 `
-  pg_restore -h geodata_db -U "имя_роли" -d "имя_базы" --clean --if-exists /backups/daily/имя_файла.dump
+# Оглавление последнего дампа (pg_restore нужен версии 17, как у образа бэкапов)
+docker compose run --rm db-backup sh -c 'pg_restore -l "$(ls -t /backups/daily/*.dump | head -1)"'
 ```
+Восстановление — см. раздел «Восстановление из бэкапа» выше.
 
 ### Сброс состояний
-```powershell
-# Удаление всех сохранённых серверных сессий
-Remove-Item -Recurse -Force ./app_data/sessions/
+```bash
+# Удаление всех сохранённых серверных сессий (все пользователи войдут заново)
+rm -f app_data/sessions/*.json
 
 # Очистка кэша Streamlit и перезапуск
 docker compose restart app
