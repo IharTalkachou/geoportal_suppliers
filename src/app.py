@@ -82,7 +82,7 @@ _GLOBAL_CSS = """
         margin: -24px 0 0 -24px;
         z-index: 999991;
         border: 4px solid rgba(49, 51, 63, 0.15);
-        border-top-color: #ff4b4b;      /* акцентный цвет Streamlit */
+        border-top-color: #347BB2;      /* = primaryColor в .streamlit/config.toml */
         border-radius: 50%;
         opacity: 0;
         visibility: hidden;
@@ -216,12 +216,17 @@ st.markdown("""
     <style>
         .block-container { padding-top: 1.2rem; padding-bottom: 0rem; }
         h3 { margin-top: -0.5rem; margin-bottom: 0rem; font-size: 1.4rem !important; }
-        .user-info { font-size: 0.8rem; line-height: 1.1; margin-bottom: 0.4rem; text-align: right; color: #555; }
+        /* Название в шапке мельче остальных h3: Montserrat (headingFont темы) шире
+           прежнего шрифта, и на экране 1280px название вставало в три строки -
+           шапка вырастала выше отступа закреплённых панелей (5rem) и накрывала их */
+        .st-key-geo-header h3 { font-size: 1.2rem !important; }
+        .user-info { font-size: 0.8rem; line-height: 1.1; margin-bottom: 0.4rem; text-align: right; color: #4E5D73; }
+        /* Скругление кнопок здесь не задаётся - оно в теме (buttonRadius в
+           .streamlit/config.toml); border-radius с !important его перебивал */
         .stButton button {
             height: 1.6rem !important;
             font-size: 0.75rem !important;
             padding: 0px 8px !important;
-            border-radius: 4px !important;
             margin-top: 0px;
         }
         [data-testid="stHorizontalBlock"] { gap: 0.5rem !important; }
@@ -275,6 +280,11 @@ st.markdown("""
             background: #ffffff;
             padding: 0.6rem 1rem 0.2rem 1rem;
             margin: -0.6rem -1rem 0 -1rem;
+            /* Обёртка border-box с width: 100%: отрицательные поля её только
+               сдвигают влево, а справа оставалась непокрытая полоса в 1rem, из-под
+               которой при прокрутке выглядывал контент. Ширину расширяем явно. */
+            width: calc(100% + 2rem);
+            max-width: none;            /* Streamlit ограничивает обёртку max-width: 100% */
         }
 
         /* Запасной вариант: stLayoutWrapper Streamlit рисует не всегда (только когда у
@@ -298,23 +308,30 @@ st.markdown("""
              proj-toolbar      - project_dashboard.py: фильтры + разделы проекта
              analytics-toolbar - analytics_tab.py: разделы аналитики + кнопка обновления
 
-           Высота шапки (5rem) измерена в браузере - 79px при текущем её содержимом.
-           Если содержимое шапки поменяется, значение нужно пересчитать, иначе панели
+           Высота шапки (4.6rem) измерена в браузере при теме из config.toml
+           (baseFontSize 14 -> 1rem = 14px): закреплённая шапка 64px на экранах от
+           1500px, 69px на 1366, 71px на 1280. Отступ взят по минимуму: на узких
+           экранах панель на несколько пикселей уходит под шапку, но их съедает её
+           собственный верхний padding (0.4rem); щель же показала бы прокручиваемый
+           контент. Если содержимое шапки, шрифт или baseFontSize поменяются,
+           значение нужно пересчитать, иначе панели
            наедут на неё или между ними появится щель. */
         [data-testid="stLayoutWrapper"]:has(> .st-key-proj-toolbar),
         [data-testid="stLayoutWrapper"]:has(> .st-key-analytics-toolbar) {
             position: sticky;
-            top: var(--geo-header-h, 5rem);
+            top: var(--geo-header-h, 4.6rem);
             z-index: 998;
             background: #ffffff;
             padding: 0.4rem 1rem 0 1rem;
             margin: 0 -1rem;
+            width: calc(100% + 2rem);   /* см. шапку выше */
+            max-width: none;
         }
         /* Запасной вариант на случай, если stLayoutWrapper не отрисуется - см. шапку */
         [data-testid="stVerticalBlock"] > .st-key-proj-toolbar,
         [data-testid="stVerticalBlock"] > .st-key-analytics-toolbar {
             position: sticky;
-            top: var(--geo-header-h, 5rem);
+            top: var(--geo-header-h, 4.6rem);
             z-index: 998;
             background: #ffffff;
         }

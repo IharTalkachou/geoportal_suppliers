@@ -9,7 +9,9 @@ env/
 *.egg-info/
 dist/
 build/
-.streamlit/
+#.streamlit/
+# config.toml (тема, сервер) коммитится; секреты Streamlit - никогда
+.streamlit/secrets.toml
 app_data/sessions/
 sessions/
 certbot/
