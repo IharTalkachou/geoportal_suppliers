@@ -98,7 +98,7 @@ Don't assume these are dead ends to fix; confirm with a repo-wide grep for the m
 ### Known inconsistencies to be aware of
 - **Import style split**: most of `src/` uses bare imports (`config.*`, `models.*`, `ui.*`) because Streamlit runs with `src/` as the path root. But `src/utils/maintenance.py` and `alembic/env.py` use root-relative imports (`src.config.*`, `src.models.*`) because they're invoked from the project root. If you add a new module that needs to work in both contexts, check how it's actually invoked rather than copying a neighboring file's import style.
 - `requirements.txt` is saved as UTF-16 — reading it with a plain UTF-8 tool may render it unreadable; decode as UTF-16 if you need to parse it programmatically.
-- Сборка идёт по `dockerfile` — он единственный рабочий. Лежащий рядом `dockerfile copy for prod` остался от удалённого `docker-compose.prod.yml` и ничем не используется.
+- Сборка идёт по `dockerfile` — он единственный. Прежний `dockerfile copy for prod` удалён вместе с `docker-compose.prod.yml`.
 
 ## Auth & roles
 Three roles, hierarchical: `user` < `editor` < `admin` (see `config/auth.py::require_role()`). Role gates are enforced per-render-function (e.g. `render_admin_panel` calls `require_role("admin")` at the top), not via a central router — new admin-only screens must call this themselves.
@@ -378,11 +378,9 @@ All login/logout and CRUD actions that call `log_action()` write to `audit_log` 
 
 Рабочая БД одна — в контейнере `db` на ВМ `172.30.12.33` (`docker-compose.yml`). Копии в Supabase больше нет, она удалена; если в старом чекауте попадётся `.env` с хостом `aws-1-eu-central-1.pooler.supabase.com` — он мёртв.
 
-**`.env` на каждой машине свой** (файл в `.gitignore`), и отличаются они как раз `DB_HOST`:
-- на ВМ приложение ходит в БД по внутренней сети Compose — `DB_HOST=db`;
-- локально в `.env` стоит адрес ВМ (`DB_HOST=172.30.12.33`), чтобы отлаживаться на реальных данных.
+**`.env` на каждой машине свой** (файл в `.gitignore`), отличается в первую очередь `DB_HOST`: внутри Compose это имя сервиса `db`, снаружи — адрес хоста с БД. Порт стандартный, 5432.
 
-⚠️ **Порт 5432 наружу не опубликован**: в `docker-compose.yml` секция `ports` у сервиса `db` закомментирована, поэтому подключение к `172.30.12.33:5432` с машины разработчика даёт `connection refused` (проверено 25.09.2026). Варианты, если локальный доступ к данным всё же нужен: раскомментировать проброс порта на ВМ (тогда БД становится доступна всему контуру — решение по безопасности за владельцем), либо поднять локальный контейнер `db` с `DB_HOST=db` и развернуть в него свежий дамп из `backups/daily`.
+⚠️ **БД доступна только из локальной сети ВМ.** В `docker-compose.yml` проброс порта у сервиса `db` закомментирован, так что подключение извне сети Compose зависит от настройки конкретной машины; из-за VPN проверить это со стороны агента нельзя — `connection refused` в такой проверке ничего не доказывает. Если БД нужна локально, а сети нет: поднять свой контейнер `db` с `DB_HOST=db` и развернуть в него дамп из `backups/daily`.
 
 **Часовой пояс.** Контейнер `app` работает с `TZ: "Europe/Minsk"` (оба compose-файла). Без этой переменной контейнер жил в UTC, и `datetime.now()` (время поступления в формах заявок, время обработки, дедлайны SLA) отставало на 3 часа. tzdata в образе `python:*-slim` есть. Переменная применяется только при пересоздании контейнера (`docker compose up -d app`), обычный `restart` её не подхватывает. Проверка: `docker compose exec app date`. Не затронуто: `NOW()`/`CURRENT_DATE` на стороне Postgres (журнал действий `audit_log`, `server_default now()`) идут по часовому поясу самой БД. Уже введённые записи не пересчитывались.
 
