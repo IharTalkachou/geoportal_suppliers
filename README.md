@@ -1,14 +1,3 @@
----
-title: National Geoportal Suppliers Manage System
-emoji: 🌍
-colorFrom: blue
-colorTo: indigo
-sdk: streamlit
-sdk_version: 1.57.0
-app_file: src/app.py
-pinned: false
----
-
 # Система управления поставщиками Национального геопортала
 
 Система управления поставщиками, проектами и этапами сотрудничества Оператора Национального геопортала и Поставщиков пространственных данных. 
@@ -59,8 +48,7 @@ Web-интерфейс построен на **Streamlit**, база данны�
 📦 geodata-suppliers-app/
 ├── 📄 README.md                  # Документация (этот файл)
 ├── 📄 CLAUDE.md                  # Подробная карта кода для разработки/агентов
-├── 📄 docker-compose.yml         # Оркестрация сервисов (dev)
-├── 📄 docker-compose.prod.yml    # Оркестрация сервисов (prod)
+├── 📄 docker-compose.yml         # Оркестрация сервисов (единственный, и на проде, и локально)
 ├── 📄 alembic/                   # Миграции схемы БД
 ├── 📄 requirements.txt           # Python-зависимости
 ├── 📁 src/
@@ -74,30 +62,48 @@ Web-интерфейс построен на **Streamlit**, база данны�
 │       ├── 📄 admin_panel.py     # Пользователи, аудит, настройки (только admin)
 │       └── 📁 analytics/         # KPI, календарь, отчёты, ежемесячный отчёт НИПД
 └── 📁 nginx/
-    └── 📄 default.conf           # Конфиг проксирования (для prod)
+    └── 📄 nginx.conf             # Конфиг проксирования
 ```
 
 ---
 
 ## 🚀 Запуск и развертывание
 
-### Локальный запуск (Docker)
+Контуров два, compose-файл у них общий — `docker-compose.yml`. Отличаются только файлом `.env` (он не коммитится, на каждой машине свой).
+
+| Контур | Где | Адрес | Назначение |
+|---|---|---|---|
+| **Прод** | ВМ `172.30.12.33` | http://172.30.12.33:8501 | рабочий контур, живая БД |
+| **Тест/отладка** | машина разработчика | http://localhost:8501 | разработка и проверка изменений |
+
+> ⚠️ Адрес ВМ временный и скоро изменится. Внешний адрес (доступ извне контура) тоже меняется — актуальный уточняйте у владельца системы.
+
+### Обновление прода
 ```bash
-# 1. Собрать и запустить контейнеры
-docker compose up -d --build
-
-# 2. Открыть приложение
-http://localhost:8501
-
-# 3. Доступ к БД (pgAdmin)
-http://localhost:5050
+git pull                         # код обновляется из GitHub
+docker compose restart app       # папка примонтирована в контейнер, пересборка не нужна
 ```
+Пересобирать (`docker compose up -d --build`) нужно только при изменении `requirements.txt` или `dockerfile`.
+Если менялись `docker-compose.yml` или переменные окружения — `docker compose up -d app`: `restart` окружение не перечитывает.
+
+### Первый запуск на новой машине
+1. Создать в корне файл `.env` (в репозиторий не коммитится):
+   ```env
+   DB_USER=...
+   DB_PASS=...
+   DB_HOST=db          # имя сервиса внутри Compose; для отладки - адрес хоста с БД
+   DB_PORT=5432
+   DB_NAME=...
+   APP_SECRET_KEY=...
+   ```
+2. `docker compose up -d --build` — поднимет `db`, `app`, `nginx`, `db-backup`.
 
 ### Ручной запуск (без Docker, для отладки)
 ```bash
 pip install -r requirements.txt
 streamlit run src/app.py --server.port 8501
 ```
+БД при этом берётся из `.env`. Порт 5432 контейнера `db` наружу не опубликован, поэтому подключиться к БД прода с машины разработчика по `172.30.12.33:5432` нельзя, пока проброс порта не включён в `docker-compose.yml`.
 
 ---
 
@@ -124,7 +130,7 @@ streamlit run src/app.py --server.port 8501
 
 ## 💾 Автоматические Бэкапы PostgreSQL
 - **Архитектура:** Изолированный контейнер `geodata_db_backup` на базе `postgres:16-alpine`. Использует `pg_dump -Fc` (сжатый бинарный формат, оптимизирован для PostgreSQL).
-- **Расписание:** Запускается мгновенно при старте контейнера, далее каждые 24 часа. Каждое воскресенье создаётся отдельная копия в `weekly/`.
+- **Расписание:** Дамп снимается раз в сутки в заданный час (переменная `BACKUP_HOUR`, по умолчанию 3:00), а не через 24 часа от старта контейнера. Каждое воскресенье создаётся отдельная копия в `weekly/`. Неудачный или пустой дамп удаляется, ротация выполняется только после удачного (подробности — в CLAUDE.md, раздел про миграции и бэкапы).
 - **Хранение и ротация:**
   - `./backups/daily/` — хранит последние **7** ежедневных дампов.
   - `./backups/weekly/` — хранит последние **4** еженедельных снапшота.
@@ -151,7 +157,7 @@ DROP TABLE IF EXISTS audit_log, users CASCADE;
 ## 🔧 Архитектурные особенности
 - **Реактивные формы CRUD:** Во всех вкладках (`suppliers`, `datasets`, `projects`, `bureaucracy`, `technology`) создание/редактирование реализовано через модальные окна `@st.dialog(...)` и формы с `st.session_state`, а не построчное редактирование таблиц. Зависимые списки (например, Виды → Набор, Контакты → Поставщик) обновляются мгновенно без перезагрузки.
 - **Чистый UI:** Кнопка `Deploy` скрыта через `.streamlit/config.toml`. Сайдбар убран, профиль и навигация вынесены в фиксированный правый верхний хедер.
-- **Docker-сеть:** Все сервисы должны находиться в одной Compose-сети (например, `github_app_net`). Изоляция контейнеров вне одной сети приведёт к ошибке резолвинга `DB_HOST=db`.
+- **Docker-сеть:** Все сервисы должны находиться в одной Compose-сети (`app_net`). Изоляция контейнеров вне одной сети приведёт к ошибке резолвинга `DB_HOST=db`.
 
 ## 📋 Основные команды для администрирования
 
@@ -174,7 +180,7 @@ docker run --rm -v "./backups:/backups" postgres:16 pg_restore -l "/backups/dail
 
 # Восстановление БД из дампа (остановите приложение перед выполнением!)
 docker run --rm -it -v ./backups:/backups -e PGPASSWORD=your_password postgres:16 `
-  pg_restore -h geodata_db -U app_user_dev -d geodata_suppliers_dev --clean --if-exists /backups/daily/имя_файла.dump
+  pg_restore -h geodata_db -U "имя_роли" -d "имя_базы" --clean --if-exists /backups/daily/имя_файла.dump
 ```
 
 ### Сброс состояний
@@ -190,7 +196,7 @@ docker compose restart app
 ## 📜 Система аудита и логирования
 
 ### 🔐 Архитектура
-- **Таблица:** `audit_log` в основной БД (`geodata_suppliers_dev`).
+- **Таблица:** `audit_log` в основной БД (реквизиты — в `.env`).
 - **Изоляция:** Запись логов выполняется через **отдельное подключение** к БД (`log_action()`), что гарантирует:
   - Логи не блокируют основную бизнес-транзакцию.
   - Ошибки аудита не роняют приложение.
@@ -212,13 +218,13 @@ docker compose restart app
 #### Прямой запрос к БД (для разработчиков)
 ```powershell
 # Последние 10 записей
-docker exec geodata_db psql -U app_user_dev -d geodata_suppliers_dev -c "SELECT created_at, action, target_table, old_value, new_value FROM audit_log ORDER BY created_at DESC LIMIT 10;"
+docker compose exec db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT created_at, action, target_table, old_value, new_value FROM audit_log ORDER BY created_at DESC LIMIT 10;"
 
 # Все действия конкретного пользователя за сегодня
-docker exec geodata_db psql -U app_user_dev -d geodata_suppliers_dev -c "SELECT action, target_table, created_at FROM audit_log WHERE user_id = 1 AND created_at::date = CURRENT_DATE ORDER BY created_at DESC;"
+docker compose exec db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT action, target_table, created_at FROM audit_log WHERE user_id = 1 AND created_at::date = CURRENT_DATE ORDER BY created_at DESC;"
 
 # Поиск по изменению конкретного поля (JSONB-оператор)
-docker exec geodata_db psql -U app_user_dev -d geodata_suppliers_dev -c "SELECT * FROM audit_log WHERE new_value->>'status' = 'approved';"
+docker compose exec db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM audit_log WHERE new_value->>'status' = 'approved';"
 ```
 
 ### 🛡 Безопасность и хранение
@@ -267,4 +273,4 @@ log_action(..., "DELETE_ENTITY", "table_name", int(target_id), old={...})
 
 
 ---
-> 📅 *Последнее обновление: 2026-07-13 | Версия: 1.0.0-rc*
+> 📅 *Последнее обновление: 2026-09-25 | Версия: 1.0.0-rc*

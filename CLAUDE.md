@@ -4,18 +4,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Streamlit web app for managing suppliers, projects, and data-provision workflows for the National Geoportal (Belarus NSDI — НИПД). Backend is PostgreSQL (в контейнере `db` на локальном сервере внутри ВМ — Supabase выведен из эксплуатации, см. «Где живёт БД» в конце файла), accessed via SQLAlchemy Core (raw `text()` SQL, not the ORM query layer) plus a small set of Alembic-managed models for schema tracking.
+Streamlit web app for managing suppliers, projects, and data-provision workflows for the National Geoportal (Belarus NSDI — НИПД). Backend is PostgreSQL (в контейнере `db` на ВМ — см. «Где что развёрнуто» ниже), accessed via SQLAlchemy Core (raw `text()` SQL, not the ORM query layer) plus a small set of Alembic-managed models for schema tracking.
+
+## Где что развёрнуто (актуально на 25.09.2026)
+
+| Контур | Где | Чем запускается | Для чего |
+|---|---|---|---|
+| **Прод** | ВМ `172.30.12.33` | `docker-compose.yml` | рабочий контур, единственная живая БД |
+| **Тест/отладка** | `localhost` (машина разработчика) | тот же `docker-compose.yml` | разработка и проверка изменений |
+
+- **Compose-файл один — `docker-compose.yml`**, и на ВМ, и локально. `docker-compose.prod.yml` удалён: отдельный файл под прод оказался не нужен. Осталась только разница в `.env` (файл в `.gitignore`, на каждой машине свой).
+- **Код на ВМ обновляется через `git pull`** из `origin` (GitHub). Папка проекта примонтирована в контейнер (`./:/app`), поэтому после `git pull` достаточно `docker compose restart app`; пересборка нужна только при изменении `requirements.txt` или `dockerfile`.
+- ⚠️ **Изменения в `docker-compose.yml` и переменных окружения** (например `TZ`) требуют `docker compose up -d app` — `restart` перечитывает код, но не окружение.
+- **Адрес ВМ временный**: 172.30.12.33 скоро поменяется. Внешний адрес доступа (извне контура) тоже меняется, поэтому здесь он намеренно не записан — плейсхолдер до появления постоянного.
+- **Выведено из эксплуатации**: БД в Supabase и приложение в Hugging Face Space (`feb29th/geoportal-test`) — оба удалены, это были временные площадки для внешнего доступа. Remote `hf` в git может остаться в старых клонах; пушить туда нечего.
 
 ## Commands
 
-### Run locally (Docker — primary way this app is deployed)
+### Run with Docker (одинаково на ВМ и локально)
 ```bash
 docker compose up -d --build          # build & start db, app, nginx, db-backup
 docker compose logs -f app            # tail app logs
 docker compose restart app            # restart after code change (folder is bind-mounted)
+docker compose up -d app              # recreate after .env / compose changes
 docker compose down                   # stop & remove containers
 ```
-App: http://localhost:8501 · pgAdmin/DB access: see `.env` for credentials.
+App: http://localhost:8501 (на ВМ — http://172.30.12.33:8501) · креды БД — в `.env`.
 
 ### Run locally without Docker (debugging)
 ```bash
@@ -84,7 +98,7 @@ Don't assume these are dead ends to fix; confirm with a repo-wide grep for the m
 ### Known inconsistencies to be aware of
 - **Import style split**: most of `src/` uses bare imports (`config.*`, `models.*`, `ui.*`) because Streamlit runs with `src/` as the path root. But `src/utils/maintenance.py` and `alembic/env.py` use root-relative imports (`src.config.*`, `src.models.*`) because they're invoked from the project root. If you add a new module that needs to work in both contexts, check how it's actually invoked rather than copying a neighboring file's import style.
 - `requirements.txt` is saved as UTF-16 — reading it with a plain UTF-8 tool may render it unreadable; decode as UTF-16 if you need to parse it programmatically.
-- There are two Dockerfiles: `dockerfile` (dev, used by `docker-compose.yml`) and `dockerfile copy for prod` (used by `docker-compose.prod.yml`) — check which compose file you're targeting before editing build steps.
+- Сборка идёт по `dockerfile` — он единственный рабочий. Лежащий рядом `dockerfile copy for prod` остался от удалённого `docker-compose.prod.yml` и ничем не используется.
 
 ## Auth & roles
 Three roles, hierarchical: `user` < `editor` < `admin` (see `config/auth.py::require_role()`). Role gates are enforced per-render-function (e.g. `render_admin_panel` calls `require_role("admin")` at the top), not via a central router — new admin-only screens must call this themselves.
@@ -113,7 +127,7 @@ All login/logout and CRUD actions that call `log_action()` write to `audit_log` 
 
 > ⚠️ Раздел описывает состояние на момент, когда БД жила в Supabase. После переезда на локальный сервер PostgREST-канала (`anon`/`authenticated`) больше нет, а роль называется `postgres.htntksregdvkfullycit` — она и владеет таблицами. Сами `ENABLE ROW LEVEL SECURITY` приехали вместе с дампом и по-прежнему включены, но практического эффекта теперь не имеют.
 
-Все 34 таблицы `public`-схемы (плюс `alembic_version`) имеют `ENABLE ROW LEVEL SECURITY` **без единой политики** (миграция `4c9745be22b9_enable_row_level_security_on_all_public_.py`) — это закрывает Supabase PostgREST API (роли `anon`/`authenticated`) от прямого доступа к данным, минуя приложение. Это **не влияет** на работу самого приложения: роль `postgres`, от имени которой подключается и локальный, и HF Space инстанс (`DATABASE_URL`), владеет всеми таблицами и имеет `rolbypassrls = true` — RLS для нее полностью прозрачен, проверено вживую (SELECT/UPDATE на RLS-таблице без политик прошли без ошибок). Если когда-то появится второй канал доступа к БД (не через текущий `DATABASE_URL`/роль `postgres`) — для него RLS-политики придётся создавать явно, иначе доступ будет запрещён по умолчанию.
+Все 34 таблицы `public`-схемы (плюс `alembic_version`) имеют `ENABLE ROW LEVEL SECURITY` **без единой политики** (миграция `4c9745be22b9_enable_row_level_security_on_all_public_.py`) — это закрывает Supabase PostgREST API (роли `anon`/`authenticated`) от прямого доступа к данным, минуя приложение. Это **не влияет** на работу самого приложения: роль, от имени которой оно подключается, владеет всеми таблицами и имеет `rolbypassrls = true` — RLS для нее полностью прозрачен, проверено вживую (SELECT/UPDATE на RLS-таблице без политик прошли без ошибок). Если когда-то появится второй канал доступа к БД (не через текущий `DATABASE_URL`/роль `postgres`) — для него RLS-политики придётся создавать явно, иначе доступ будет запрещён по умолчанию.
 
 Отдельно: view `public.v_bi_flat_export` (ручная BI-выгрузка из `db/schema.sql`, не используется кодом приложения) переведена на `security_invoker = true` (миграция `3dfa3c81c583_set_security_invoker_on_v_bi_flat_.py`) — без этой опции view по умолчанию выполняется с правами создателя (`SECURITY DEFINER`), что обходит RLS-политики любой вызывающей роли.
 
@@ -360,9 +374,15 @@ All login/logout and CRUD actions that call `log_action()` write to `audit_log` 
 
 Если в `backups/daily` всё же появятся файлы нулевого размера — смотреть `docker compose logs db-backup`; при смене реквизитов БД контейнер нужно пересоздать (`docker compose up -d --force-recreate db-backup`), обычный restart не перечитывает `.env`.
 
-### Где живёт БД (актуально на 10.09.2026)
+### Где живёт БД (актуально на 25.09.2026)
 
-Рабочая БД — **на локальном сервере внутри ВМ**, в контейнере `db` из `docker-compose.yml`; тестового и продового контуров отдельно нет, это одна точка. Supabase (`aws-1-eu-central-1.pooler.supabase.com`) выведен из эксплуатации: доступ к нему с ВМ закрыт по IP, и он отстал на пять миграций. Если в чекауте попадётся `.env` с Supabase-хостом — он устарел.
+Рабочая БД одна — в контейнере `db` на ВМ `172.30.12.33` (`docker-compose.yml`). Копии в Supabase больше нет, она удалена; если в старом чекауте попадётся `.env` с хостом `aws-1-eu-central-1.pooler.supabase.com` — он мёртв.
+
+**`.env` на каждой машине свой** (файл в `.gitignore`), и отличаются они как раз `DB_HOST`:
+- на ВМ приложение ходит в БД по внутренней сети Compose — `DB_HOST=db`;
+- локально в `.env` стоит адрес ВМ (`DB_HOST=172.30.12.33`), чтобы отлаживаться на реальных данных.
+
+⚠️ **Порт 5432 наружу не опубликован**: в `docker-compose.yml` секция `ports` у сервиса `db` закомментирована, поэтому подключение к `172.30.12.33:5432` с машины разработчика даёт `connection refused` (проверено 25.09.2026). Варианты, если локальный доступ к данным всё же нужен: раскомментировать проброс порта на ВМ (тогда БД становится доступна всему контуру — решение по безопасности за владельцем), либо поднять локальный контейнер `db` с `DB_HOST=db` и развернуть в него свежий дамп из `backups/daily`.
 
 **Часовой пояс.** Контейнер `app` работает с `TZ: "Europe/Minsk"` (оба compose-файла). Без этой переменной контейнер жил в UTC, и `datetime.now()` (время поступления в формах заявок, время обработки, дедлайны SLA) отставало на 3 часа. tzdata в образе `python:*-slim` есть. Переменная применяется только при пересоздании контейнера (`docker compose up -d app`), обычный `restart` её не подхватывает. Проверка: `docker compose exec app date`. Не затронуто: `NOW()`/`CURRENT_DATE` на стороне Postgres (журнал действий `audit_log`, `server_default now()`) идут по часовому поясу самой БД. Уже введённые записи не пересчитывались.
 
