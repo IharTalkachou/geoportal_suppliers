@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Streamlit web app for managing suppliers, projects, and data-provision workflows for the National Geoportal (Belarus NSDI — НИПД). Backend is PostgreSQL (в контейнере `db` на ВМ — см. «Где что развёрнуто» ниже), accessed via SQLAlchemy Core (raw `text()` SQL, not the ORM query layer) plus a small set of Alembic-managed models for schema tracking.
 
+**План и история задач** — [`progress.md`](progress.md): что в работе, что запланировано (в том числе визуальное обновление и будущая сущность «внешние поставки на Геопортал СНГ»), открытые вопросы, выполненное. Обновляется в конце каждой доработки.
+
 ## Где что развёрнуто (актуально на 25.09.2026)
 
 | Контур | Где | Чем запускается | Для чего |
