@@ -102,6 +102,16 @@ docker compose restart app       # папка примонтирована в к
    ```
 2. `docker compose up -d --build` — поднимет `db`, `app`, `nginx`, `db-backup`.
 
+### Локальный тестовый контур (Windows, без Docker)
+Копия прод-БД на переносимом PostgreSQL 17 (`D:\tools\pgsql`), управление — `scripts\local-db.ps1`:
+```powershell
+.\scripts\local-db.ps1 init       # один раз: создать сервер (роль и пароль - из .env)
+.\scripts\local-db.ps1 start      # после каждой перезагрузки компьютера
+.\scripts\local-db.ps1 restore    # залить backups\local\prod.dump (копия стирается и заливается заново)
+streamlit run src/app.py --server.port 8502    # из корня проекта; в .env DB_HOST=localhost
+```
+Обновить копию: скопировать свежий дамп с ВМ в `backups\local\prod.dump` и выполнить `restore`. Подробности — в CLAUDE.md, «Локальный тестовый контур».
+
 ### Ручной запуск (без Docker, для отладки)
 ```bash
 pip install -r requirements.txt
