@@ -138,6 +138,16 @@ def _startup_session_cleanup():
 
 _startup_session_cleanup()
 
+_STATIC_IMG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "img")
+
+def _static_img(name):
+    # Адрес относительный (без ведущего "/"): так он работает и при доступе
+    # через внешний прокси по пути вида /projects/
+    for ext in ("svg", "png", "webp", "jpg", "jpeg"):
+        if os.path.exists(os.path.join(_STATIC_IMG_DIR, f"{name}.{ext}")):
+            return f"app/static/img/{name}.{ext}"
+    return None
+
 # ==========================================
 # 🛡️ 2. РЕЖИМ ОБСЛУЖИВАНИЯ И АВТОРИЗАЦИЯ
 # ==========================================
@@ -164,18 +174,65 @@ if "auth" not in st.session_state:
 
     # Форма входа (если авторизации нет)
     if "auth" not in st.session_state:
-        st.title("🔐 Вход в систему")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.markdown("### 🗺️ Национальный геопортал")
-            st.caption("Система управления поставщиками пространственных данных")
-        
-        with col2:
+        login_bg = _static_img("login-bg")
+        login_logo = _static_img("logo")
+
+        # Стили живут только на странице входа: после входа этот блок не выполняется
+        # (st.stop ниже), и фон с разметкой исчезают вместе с ним
+        bg_css = ""
+        if login_bg:
+            bg_css = f"""
+            [data-testid="stApp"] {{
+                background: url("{login_bg}") center / cover no-repeat fixed !important;
+            }}
+            [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
+                background: transparent !important;
+            }}"""
+        st.markdown(f"""
+        <style>{bg_css}
+            .st-key-login-box {{
+                max-width: 34rem;
+                margin: 6vh auto 0;
+            }}
+            .login-head {{ text-align: center; }}
+            .login-head img {{ max-width: 100%; width: 24rem; }}
+            .login-head .login-brand {{
+                font-family: "Montserrat", sans-serif;
+                font-weight: 700;
+                font-size: 1.6rem;
+            }}
+            .login-head .login-subtitle {{
+                font-family: "Montserrat", sans-serif;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.02em;
+                color: #1f2328;
+                margin: 0.4rem 0 1.6rem;
+            }}
+            .login-head h1 {{ padding: 0 0 1rem; }}
+            /* На фоне-картинке карточка формы должна оставаться читаемой */
+            .st-key-login-box [data-testid="stForm"] {{
+                background: rgba(255, 255, 255, 0.94);
+            }}
+        </style>
+        """, unsafe_allow_html=True)
+
+        with st.container(key="login-box"):
+            brand = (f'<img src="{login_logo}" alt="Национальный геопортал">' if login_logo
+                     else '<div class="login-brand">Национальный геопортал</div>')
+            st.markdown(f"""
+            <div class="login-head">
+                {brand}
+                <div class="login-subtitle">Система управления проектами</div>
+                <h1>Вход в систему</h1>
+            </div>
+            """, unsafe_allow_html=True)
+
             with st.form("login_form"):
-                username = st.text_input("👤 Имя пользователя")
-                password = st.text_input("🔑 Пароль", type="password")
+                username = st.text_input("Имя пользователя")
+                password = st.text_input("Пароль", type="password")
                 submit = st.form_submit_button("🚪 Войти", type="primary", width="stretch")
-                
+
                 if submit:
                     if not username or not password:
                         st.error("❌ Введите имя и пароль")
