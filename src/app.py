@@ -214,24 +214,18 @@ if "auth" not in st.session_state:
                 border-radius: 1rem;
                 padding: 1.6rem 2rem 2rem;
             }}
-            .login-head {{ text-align: center; }}
-            .login-head .login-subtitle {{
-                font-family: "Montserrat", sans-serif;
-                font-weight: 600;
-                font-size: 0.8rem;
-                text-transform: uppercase;
-                letter-spacing: 0.08em;
-                color: #4E5D73;
-                margin-bottom: 0.5rem;
-            }}
-            /* Заголовок как «Войти в свой аккаунт» на сайте: светлое начертание,
-               фирменный синий #4590C9 - для текста такого кегля контраста хватает */
-            .login-head h1 {{
+            /* Обе строки - как «Войти в свой аккаунт» на сайте: светлое начертание,
+               фирменный синий #4590C9 (для текста такого кегля контраста хватает).
+               Заголовок - не <h1>: к заголовкам Streamlit добавляет значок-ссылку,
+               который смещал текст от оси симметрии */
+            .login-head {{
+                text-align: center;
                 font-family: "Inter", sans-serif;
                 font-weight: 400;
-                font-size: 2rem;
+                font-size: 1.5rem;
+                line-height: 1.3;
                 color: #4590C9;
-                padding: 0 0 1rem;
+                padding-bottom: 1rem;
             }}
         </style>
         """, unsafe_allow_html=True)
@@ -244,8 +238,8 @@ if "auth" not in st.session_state:
             with st.container(key="login-frame"), st.container(key="login-card"):
                 st.markdown("""
                 <div class="login-head">
-                    <div class="login-subtitle">Система управления проектами</div>
-                    <h1>Вход в систему</h1>
+                    <div>Система управления проектами</div>
+                    <div role="heading" aria-level="1">Вход в систему</div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -473,6 +467,41 @@ with h_nav:
         choice = st.session_state["main_nav"]
 
 st.markdown("---")
+
+# ПРОБА: фон страницы входа внутри приложения - пока только в разделе «Проекты».
+# Картинка разбавлена белым (слой-градиент поверх неё), чтобы таблицы читались;
+# закреплённые шапка и панели - полупрозрачные с размытием вместо плотно-белых.
+# Правила повторяют селекторы блока стилизации выше и стоят в DOM позже - поэтому
+# перебивают его белый фон без !important.
+_app_bg = _static_img("login-bg")
+if _app_bg and not _show_admin and choice == "📋 Проекты":
+    st.markdown(f"""
+    <style>
+        [data-testid="stApp"] {{
+            background:
+                linear-gradient(rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.72)),
+                url("{_app_bg}") center / cover no-repeat fixed !important;
+        }}
+        [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
+            background: transparent !important;
+        }}
+        /* Подложка шапки и панели до краёв экрана: тень без размытия с огромным
+           разносом того же цвета, обрезанная clip-path по вертикали - иначе на
+           полях страницы виден край полупрозрачного прямоугольника. Размытие
+           (backdrop-filter) работает только в пределах самого блока, но на полях
+           контента нет - прятать там нечего */
+        [data-testid="stLayoutWrapper"]:has(> .st-key-geo-header),
+        [data-testid="stVerticalBlock"] > .st-key-geo-header,
+        [data-testid="stLayoutWrapper"]:has(> .st-key-proj-toolbar),
+        [data-testid="stVerticalBlock"] > .st-key-proj-toolbar {{
+            background: rgba(255, 255, 255, 0.72);
+            box-shadow: 0 0 0 100vmax rgba(255, 255, 255, 0.72);
+            clip-path: inset(0 -100vmax);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }}
+    </style>
+    """, unsafe_allow_html=True)
 
 # ==========================================
 # 🧭 4. РОУТИНГ И НАВИГАЦИЯ (СО СПИННЕРОМ)
