@@ -288,10 +288,22 @@ st.markdown("""
     <style>
         .block-container { padding-top: 1.2rem; padding-bottom: 0rem; }
         h3 { margin-top: -0.5rem; margin-bottom: 0rem; font-size: 1.4rem !important; }
-        /* Название в шапке мельче остальных h3: Montserrat (headingFont темы) шире
-           прежнего шрифта, и на экране 1280px название вставало в три строки -
-           шапка вырастала выше отступа закреплённых панелей (5rem) и накрывала их */
-        .st-key-geo-header h3 { font-size: 1.2rem !important; }
+        /* Логотип и название в шапке - как на странице входа. Высота логотипа
+           задаёт высоту шапки, от которой отсчитан отступ закреплённых панелей
+           (--geo-header-h ниже) - при изменении пересчитать */
+        .geo-brand { display: flex; align-items: center; gap: 0.75rem; }
+        /* У контейнера st.markdown нижний отступ -1rem (компенсирует поле абзаца).
+           У блока без абзацев он вытягивал логотип на 14px ниже колонки - низ
+           логотипа обрезался краем закреплённой шапки */
+        [data-testid="stMarkdownContainer"]:has(> .geo-brand) { margin-bottom: 0; }
+        .geo-brand img { height: 3.4rem; width: auto; flex: none; }
+        .geo-brand span {
+            font-family: "Inter", sans-serif;
+            font-weight: 400;
+            font-size: 1.1rem;
+            line-height: 1.25;
+            color: #4590C9;
+        }
         .user-info { font-size: 0.8rem; line-height: 1.1; margin-bottom: 0.4rem; text-align: right; color: #4E5D73; }
         /* Скругление кнопок здесь не задаётся - оно в теме (buttonRadius в
            .streamlit/config.toml); border-radius с !important его перебивал */
@@ -315,6 +327,9 @@ st.markdown("""
         .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(1) { order: 3; }  /* кнопки  */
         .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(2) { order: 1; }  /* заголовок */
         .st-key-geo-header [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:nth-child(3) { order: 2; }  /* навигация */
+        /* Правила выше задевают и вложенную пару колонок с кнопками - без этого сброса
+           они тоже менялись местами, и "Выход" вставал левее "Админ-панели" */
+        .st-key-geo-header [data-testid="stColumn"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { order: 0; }
 
         /* Ниже точки, где Streamlit складывает колонки в столбик, order сбрасывается -
            иначе кнопки уехали бы вниз, а нужен порядок из объявления (кнопки сверху). */
@@ -424,15 +439,15 @@ with h_btns:
     btn_col1, btn_col2 = st.columns([0.5, 0.5])
     with btn_col1:
         if st.session_state.get("show_admin", False):
-            if st.button("⬅️ Назад", width='stretch', key="btn_back"):
+            if st.button("Назад", width='stretch', key="btn_back"):
                 st.session_state["show_admin"] = False
                 st.rerun()
         elif auth["role"] == "admin":
-            if st.button("⚙️ Админ-панель", width='stretch', key="btn_admin"):
+            if st.button("Админ-панель", width='stretch', key="btn_admin"):
                 st.session_state["show_admin"] = True
                 st.rerun()
     with btn_col2:
-        if st.button("🚪 Выход", width='stretch', type="primary", key="btn_logout"):
+        if st.button("Выход", width='stretch', type="primary", key="btn_logout"):
             uid = st.session_state.get("auth", {}).get("user_id")
             token = st.query_params.get("session")
             if uid and token:
@@ -446,7 +461,10 @@ with h_btns:
             st.rerun()
 
 with h_title:
-    st.markdown("### 🗺️ Управление поставщиками Национального геопортала")
+    _logo = _static_img("logo")
+    _logo_html = f'<img src="{_logo}" alt="Национальный геопортал">' if _logo else ""
+    st.markdown(f'<div class="geo-brand">{_logo_html}<span>Система управления проектами</span></div>',
+                unsafe_allow_html=True)
 
 # Навигация живёт в шапке, но в админ-панели не показывается: там её роль
 # выполняет кнопка "⬅️ Назад" (см. h_btns выше)
