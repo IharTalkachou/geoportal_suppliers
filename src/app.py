@@ -192,27 +192,46 @@ if "auth" not in st.session_state:
         <style>{bg_css}
             .st-key-login-box {{
                 max-width: 34rem;
-                margin: 6vh auto 0;
+                margin: 4vh auto 0;
             }}
-            .login-head {{ text-align: center; }}
-            .login-head img {{ max-width: 100%; width: 24rem; }}
-            .login-head .login-brand {{
+            .login-logo {{ text-align: center; }}
+            .login-logo img {{ max-width: 100%; width: 22rem; }}
+            .login-logo .login-brand {{
                 font-family: "Montserrat", sans-serif;
                 font-weight: 700;
                 font-size: 1.6rem;
             }}
+            /* Подложка в два слоя, как на странице входа геопортала:
+               полупрозрачная рамка с тенью и белая карточка внутри */
+            .st-key-login-frame {{
+                background: rgba(226, 232, 243, 0.75);
+                border-radius: 1.75rem;
+                padding: 0.9rem;
+                box-shadow: 0 0.5rem 1.5rem rgba(40, 70, 120, 0.12);
+            }}
+            .st-key-login-card {{
+                background: #FFFFFF;
+                border-radius: 1rem;
+                padding: 1.6rem 2rem 2rem;
+            }}
+            .login-head {{ text-align: center; }}
             .login-head .login-subtitle {{
                 font-family: "Montserrat", sans-serif;
-                font-weight: 700;
+                font-weight: 600;
+                font-size: 0.8rem;
                 text-transform: uppercase;
-                letter-spacing: 0.02em;
-                color: #1f2328;
-                margin: 0.4rem 0 1.6rem;
+                letter-spacing: 0.08em;
+                color: #4E5D73;
+                margin-bottom: 0.5rem;
             }}
-            .login-head h1 {{ padding: 0 0 1rem; }}
-            /* На фоне-картинке карточка формы должна оставаться читаемой */
-            .st-key-login-box [data-testid="stForm"] {{
-                background: rgba(255, 255, 255, 0.94);
+            /* Заголовок как «Войти в свой аккаунт» на сайте: светлое начертание,
+               фирменный синий #4590C9 - для текста такого кегля контраста хватает */
+            .login-head h1 {{
+                font-family: "Inter", sans-serif;
+                font-weight: 400;
+                font-size: 2rem;
+                color: #4590C9;
+                padding: 0 0 1rem;
             }}
         </style>
         """, unsafe_allow_html=True)
@@ -220,40 +239,42 @@ if "auth" not in st.session_state:
         with st.container(key="login-box"):
             brand = (f'<img src="{login_logo}" alt="Национальный геопортал">' if login_logo
                      else '<div class="login-brand">Национальный геопортал</div>')
-            st.markdown(f"""
-            <div class="login-head">
-                {brand}
-                <div class="login-subtitle">Система управления проектами</div>
-                <h1>Вход в систему</h1>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="login-logo">{brand}</div>', unsafe_allow_html=True)
 
-            with st.form("login_form"):
-                username = st.text_input("Имя пользователя")
-                password = st.text_input("Пароль", type="password")
-                submit = st.form_submit_button("🚪 Войти", type="primary", width="stretch")
+            with st.container(key="login-frame"), st.container(key="login-card"):
+                st.markdown("""
+                <div class="login-head">
+                    <div class="login-subtitle">Система управления проектами</div>
+                    <h1>Вход в систему</h1>
+                </div>
+                """, unsafe_allow_html=True)
 
-                if submit:
-                    if not username or not password:
-                        st.error("❌ Введите имя и пароль")
-                    else:
-                        try:
-                            with Session(engine) as session:
-                                user = authenticate_user(username, password, session)
-                            if user:
-                                # Проверка режима обслуживания
-                                if app_settings.get("maintenance_mode", False) and user["role"] != "admin":
-                                    st.error(f"🏗️ {app_settings.get('lockout_message')}")
+                with st.form("login_form", border=False):
+                    username = st.text_input("Имя пользователя")
+                    password = st.text_input("Пароль", type="password")
+                    submit = st.form_submit_button("🚪 Войти", type="primary", width="stretch")
+
+                    if submit:
+                        if not username or not password:
+                            st.error("❌ Введите имя и пароль")
+                        else:
+                            try:
+                                with Session(engine) as session:
+                                    user = authenticate_user(username, password, session)
+                                if user:
+                                    # Проверка режима обслуживания
+                                    if app_settings.get("maintenance_mode", False) and user["role"] != "admin":
+                                        st.error(f"🏗️ {app_settings.get('lockout_message')}")
+                                    else:
+                                        init_session(user)
+                                        new_token = create_token(st.session_state["auth"])
+                                        st.query_params["session"] = new_token
+                                        st.success("✅ Вход выполнен!")
+                                        st.rerun()
                                 else:
-                                    init_session(user)
-                                    new_token = create_token(st.session_state["auth"])
-                                    st.query_params["session"] = new_token
-                                    st.success("✅ Вход выполнен!")
-                                    st.rerun()
-                            else:
-                                st.error("❌ Неверное имя или пароль")
-                        except Exception as e:
-                            st.error(f"❌ Ошибка подключения: {e}")
+                                    st.error("❌ Неверное имя или пароль")
+                            except Exception as e:
+                                st.error(f"❌ Ошибка подключения: {e}")
         st.stop()
 
 # Проверка режима обслуживания для уже вошедших пользователей (не админов)
