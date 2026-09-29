@@ -468,18 +468,17 @@ with h_nav:
 
 st.markdown("---")
 
-# ПРОБА: фон страницы входа внутри приложения - пока только в разделе «Проекты».
-# Картинка разбавлена белым (слой-градиент поверх неё), чтобы таблицы читались;
-# закреплённые шапка и панели - полупрозрачные с размытием вместо плотно-белых.
-# Правила повторяют селекторы блока стилизации выше и стоят в DOM позже - поэтому
-# перебивают его белый фон без !important.
+# Фон страницы входа и внутри приложения. Картинка разбавлена белым (слой-градиент
+# поверх неё), чтобы таблицы читались; закреплённые шапка и панели - полупрозрачные
+# с размытием вместо плотно-белых. Правила повторяют селекторы блока стилизации
+# выше и стоят в DOM позже - поэтому перебивают его белый фон без !important.
 _app_bg = _static_img("login-bg")
-if _app_bg and not _show_admin and choice == "📋 Проекты":
+if _app_bg:
     st.markdown(f"""
     <style>
         [data-testid="stApp"] {{
             background:
-                linear-gradient(rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.72)),
+                linear-gradient(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.6)),
                 url("{_app_bg}") center / cover no-repeat fixed !important;
         }}
         [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
@@ -493,7 +492,9 @@ if _app_bg and not _show_admin and choice == "📋 Проекты":
         [data-testid="stLayoutWrapper"]:has(> .st-key-geo-header),
         [data-testid="stVerticalBlock"] > .st-key-geo-header,
         [data-testid="stLayoutWrapper"]:has(> .st-key-proj-toolbar),
-        [data-testid="stVerticalBlock"] > .st-key-proj-toolbar {{
+        [data-testid="stVerticalBlock"] > .st-key-proj-toolbar,
+        [data-testid="stLayoutWrapper"]:has(> .st-key-analytics-toolbar),
+        [data-testid="stVerticalBlock"] > .st-key-analytics-toolbar {{
             background: rgba(255, 255, 255, 0.72);
             box-shadow: 0 0 0 100vmax rgba(255, 255, 255, 0.72);
             clip-path: inset(0 -100vmax);
