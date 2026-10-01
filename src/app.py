@@ -157,6 +157,13 @@ if app_settings.get("maintenance_warning", False):
     st.warning(f"⚠️ {app_settings.get('maintenance_message')}")
 
 if "auth" not in st.session_state:
+    # Вся страница входа - в одном контейнере без ключа, чтобы занимать в корне
+    # ровно одну позицию при любом наборе элементов. Иначе предупреждение об
+    # истёкшей сессии сдвигало login-box на позицию, где после входа рисуется
+    # обычный элемент, и Streamlit оставлял на экране блёклый контейнер с ключом
+    # до обновления страницы. Контейнер без ключа заменяется целиком.
+    _login_page = st.container()
+
     # Проверка существующего токена в URL
     token = st.query_params.get("session")
     if token:
@@ -170,7 +177,7 @@ if "auth" not in st.session_state:
             st.rerun()
         else:
             st.query_params.pop("session", None)
-            st.warning("⚠️ Сессия истекла или недействительна. Пожалуйста, войдите снова.")
+            _login_page.warning("⚠️ Сессия истекла или недействительна. Пожалуйста, войдите снова.")
 
     # Форма входа (если авторизации нет)
     if "auth" not in st.session_state:
@@ -188,7 +195,7 @@ if "auth" not in st.session_state:
             [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
                 background: transparent !important;
             }}"""
-        st.markdown(f"""
+        _login_page.markdown(f"""
         <style>{bg_css}
             .st-key-login-box {{
                 max-width: 34rem;
@@ -230,7 +237,7 @@ if "auth" not in st.session_state:
         </style>
         """, unsafe_allow_html=True)
 
-        with st.container(key="login-box"):
+        with _login_page.container(key="login-box"):
             brand = (f'<img src="{login_logo}" alt="Национальный геопортал">' if login_logo
                      else '<div class="login-brand">Национальный геопортал</div>')
             st.markdown(f'<div class="login-logo">{brand}</div>', unsafe_allow_html=True)
