@@ -108,7 +108,8 @@ docker compose restart app       # папка примонтирована в к
 .\scripts\local-db.ps1 init       # один раз: создать сервер (роль и пароль - из .env)
 .\scripts\local-db.ps1 start      # после каждой перезагрузки компьютера
 .\scripts\local-db.ps1 restore    # залить backups\local\prod.dump (копия стирается и заливается заново)
-streamlit run src/app.py --server.port 8502    # из корня проекта; в .env DB_HOST=localhost
+.venv\Scripts\python.exe -m streamlit run src/app.py --server.port 8503    # из корня проекта; в .env DB_HOST=localhost
+# 8501 и 8502 на машине разработчика может держать проброс портов VS Code (Remote-SSH) - там видна версия с ВМ
 ```
 Обновить копию: скопировать свежий дамп с ВМ в `backups\local\prod.dump` и выполнить `restore`. Подробности — в CLAUDE.md, «Локальный тестовый контур».
 
