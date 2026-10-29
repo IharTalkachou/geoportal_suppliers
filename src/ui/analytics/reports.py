@@ -1544,14 +1544,61 @@ def _fetch_summary_rows():
         for note in stage_notes_for(pid, item_id, part_id):
             row['stage_notes'][note[1]] = note
 
+    # Поставщики без состава (нет проекта или в проектах не заведены виды сведений):
+    # одна строка на поставщика, флаги по видам сведений неприменимы ("—").
+    # Без этого они выпадали из отчёта целиком - запрос выше строится от project_items.
+    suppliers_df = query_db("""
+        SELECT s.supplier_id, s.supplier_name, p.project_id, p.notes AS project_notes
+        FROM suppliers s
+        LEFT JOIN projects p ON p.supplier_id = s.supplier_id
+        WHERE s.supplier_name NOT ILIKE :operator
+        ORDER BY s.is_mandatory DESC, s.supplier_name, p.project_id
+    """, {"operator": f"%{_OPERATOR_MARKER}%"})
+    with_items = set(items_df['supplier_id'].astype(int))
+    empty_rows = {}
+    for _, r in suppliers_df.iterrows():
+        sid = int(r['supplier_id'])
+        if sid in with_items:
+            continue
+        row = empty_rows.get(sid)
+        if row is None:
+            row = empty_rows[sid] = {
+                'supplier_id': sid,
+                'supplier_name': r['supplier_name'],
+                'agreement_signed': sid in agreement_ids,
+                'dataset_name': "",
+                'dataset_mandatory': None,
+                'info_label': "Состав наборов не заведён",
+                'protocol_signed': None,
+                'data_received': None,
+                'data_published': None,
+                'meta_received': None,
+                'meta_published': None,
+                'project_notes': [],
+                'stage_notes': {},
+            }
+        if pd.isna(r['project_id']):
+            continue
+        project_note = str(r['project_notes']).strip() if pd.notna(r['project_notes']) else ""
+        if project_note and project_note not in row['project_notes']:
+            row['project_notes'].append(project_note)
+        for note in stage_notes_by_project.get(int(r['project_id']), []):
+            row['stage_notes'][note[1]] = note
+
+    # Порядок поставщиков - как в SQL (обязательные сверху, затем по названию
+    # с сортировкой БД); сортировка устойчивая, порядок строк внутри поставщика сохраняется
+    supplier_rank = {sid: n for n, sid in
+                     enumerate(dict.fromkeys(suppliers_df['supplier_id'].astype(int)))}
+
     rows = []
-    for row in merged.values():
+    for row in list(merged.values()) + list(empty_rows.values()):
         # Свежие этапы сверху; этап без даты - в конце
         stage_notes = sorted(row.pop('stage_notes').values(),
                              key=lambda n: pd.Timestamp(n[0]) if n[0] else pd.Timestamp.min,
                              reverse=True)
         row['note'] = "\n".join(row.pop('project_notes') + [n[2] for n in stage_notes])
         rows.append(row)
+    rows.sort(key=lambda r: supplier_rank.get(r['supplier_id'], len(supplier_rank)))
 
     return pd.DataFrame(rows)
 
@@ -1565,6 +1612,9 @@ def _render_supplier_projects_summary():
         return
 
     def yn(v):
+        # None - флаг неприменим (поставщик без состава наборов)
+        if v is None or (not isinstance(v, bool) and pd.isna(v)):
+            return "—"
         return "Да" if v else "Нет"
 
     disp = pd.DataFrame()
