@@ -6,6 +6,22 @@ from ui.bureaucracy_tab import render_bureaucracy_tab
 from ui.technology_tab import render_technology_tab
 from ui.shared_components import render_project_documents
 from config.auth import log_action
+from utils.tech_flags import project_tech_flags
+from utils.ref_lists import load_data_methods, options_with_current, DATA_METHOD_NOT_TRANSMITTED
+
+# Признаки технологического трека в паспорте проекта - в порядке колонок отчёта №9
+PASSPORT_TECH_FLAGS = (
+    ('data_received', "📦 Данные получены"),
+    ('data_published', "🌐 Данные опубликованы"),
+    ('meta_received', "📝 Метаданные получены"),
+    ('meta_published', "📑 Метаданные опубликованы"),
+)
+TECH_FLAG_STAGE_NAMES = {
+    'data_received': "Передача данных Оператору",
+    'data_published': "Наборы опубликованы",
+    'meta_received': "Размещение метаданных Поставщиком",
+    'meta_published': "Метаданные опубликованы",
+}
 
 def render_project_dashboard(session, user_role="user"):
     st.subheader("📂 Управление проектами")
@@ -265,59 +281,10 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
     """, {"sid": int(proj_data['supplier_id'])})
     has_admin = not admin_check.empty
 
-    # Б. Стадии (Метаданные/Данные)
-    # Ищем выполненные (micro_status=4) этапы с конкретными кодами
-    stage_checks = query_db("""
-        SELECT s.stage_code 
-        FROM project_stages ps 
-        JOIN stages s ON ps.stage_id = s.stage_id 
-        WHERE ps.project_id = :pid AND ps.micro_status = 4
-    """, {"pid": proj_id_int})
-    done_codes = stage_checks['stage_code'].tolist() if not stage_checks.empty else []
-
-    has_meta = 'META_PUB' in done_codes
-    has_data = 'DATA_PUB' in done_codes
-
-    # В. "Данные переданы" - входной этап работы с данными, предшествует "Размещению
-    # наборов". В отличие от соседних признаков считается ПО ОХВАТУ: галочка горит,
-    # только когда DATA_TRANSFER закрыт по всем видам сведений проекта. Вид считается
-    # закрытым, если этап нацелен на него целиком (part_id IS NULL) либо закрыты все
-    # его части. Та же форма запроса, что в sync_project_status() для публикации.
-    transfer_check = query_db("""
-        WITH done AS (
-            SELECT (aff ->> 'item_id')::int AS item_id,
-                   (aff ->> 'part_id')::int AS part_id
-            FROM project_stages ps
-            CROSS JOIN LATERAL jsonb_array_elements(ps.affected_item_ids) AS aff
-            JOIN stages s ON ps.stage_id = s.stage_id
-            JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-            WHERE ps.project_id = :pid
-              AND s.stage_code = 'DATA_TRANSFER'
-              AND ms.micro_status_name = 'Выполнено'
-        )
-        SELECT COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE
-                 EXISTS (SELECT 1 FROM done WHERE done.item_id = pi.item_id AND done.part_id IS NULL)
-                 OR (
-                   EXISTS (SELECT 1 FROM project_item_part_details pd WHERE pd.item_id = pi.item_id)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM project_item_part_details pd
-                     WHERE pd.item_id = pi.item_id
-                       AND NOT EXISTS (
-                         SELECT 1 FROM done
-                         WHERE done.item_id = pi.item_id AND done.part_id = pd.part_id
-                       )
-                   )
-                 )
-               ) AS transferred
-        FROM project_items pi
-        WHERE pi.project_id = :pid
-    """, {"pid": proj_id_int})
-
-    # Пустой состав - галочка не горит: передавать нечего
-    _t_total = int(transfer_check.iloc[0]['total']) if not transfer_check.empty else 0
-    _t_done = int(transfer_check.iloc[0]['transferred']) if not transfer_check.empty else 0
-    has_transfer = _t_total > 0 and _t_done >= _t_total
+    # Б. Данные/метаданные получены и опубликованы - тот же расчёт, что в сводном
+    # отчёте №9 (utils/tech_flags.py): признак горит, только когда этап закрыт
+    # по ВСЕМ видам сведений проекта (у разбитого вида - по всем его частям)
+    tech_flags, tech_conflicts = project_tech_flags(proj_id_int)
 
     # 3. ВИЗУАЛИЗАЦИЯ ПАСПОРТА
     # Слева - сведения о проекте и кнопки управления, справа - форма редактирования
@@ -349,14 +316,24 @@ def render_passport_subtab(session, proj_id_int, is_readonly, proj_data):
 
             # 🟢 ВЫВОД ИНДИКАТОРОВ
             # В одну колонку: рядом с формой редактирования карточка узкая,
-            # четыре чекбокса в строку в неё не помещаются
+            # пять чекбоксов в строку в неё не помещаются
             st.write("")
             st.checkbox("🔑 Админ. зарегистрирован", value=has_admin, disabled=True)
-            st.checkbox("📦 Данные переданы", value=has_transfer, disabled=True,
-                        help="Этап «Передача данных Оператору» выполнен по всем "
+            for flag, label in PASSPORT_TECH_FLAGS:
+                help_text = (f"Этап «{TECH_FLAG_STAGE_NAMES[flag]}» выполнен по всем "
                              "видам сведений проекта")
-            st.checkbox("📑 Метаданные опубл.", value=has_meta, disabled=True)
-            st.checkbox("🌐 Данные опубликованы", value=has_data, disabled=True)
+                # Временная сигнализация: публикация закрыта при незакрытом получении.
+                # Защиты на уровне этапов пока нет - противоречие только подсвечивается
+                conflict = tech_conflicts.get(flag)
+                if conflict:
+                    label = f"{label} ⚠️"
+                    # Названия видов сведений бывают в несколько строк - показываем первые три
+                    shown = [n if len(n) <= 90 else n[:90] + "…" for n in conflict[:3]]
+                    more = f" и ещё {len(conflict) - 3}" if len(conflict) > 3 else ""
+                    help_text += (". ⚠️ Публикация закрыта, а этап получения — нет "
+                                  f"({len(conflict)} шт.): " + "; ".join(shown) + more)
+                st.checkbox(label, value=tech_flags[flag], disabled=True,
+                            key=f"passport_flag_{flag}", help=help_text)
 
             if not is_readonly:
                 st.write("")
@@ -558,9 +535,10 @@ def render_part_details_manager(session, proj_id_int, items_flat, formats_list, 
             st.session_state["pd_meta_d"] = int(curr["meta_days"]) if pd.notna(curr["meta_days"]) else 10
             st.session_state["pd_meta_m"] = curr["meta_method"] or "Электронный кабинет"
             st.session_state["pd_data_d"] = int(curr["data_days"]) if pd.notna(curr["data_days"]) else 10
-            st.session_state["pd_data_m"] = curr["data_method"] or "Сервис (WMS/WFS)"
+            st.session_state["pd_data_m"] = curr["data_method"] or data_methods[0]
             st.session_state["pd_sel_prev"] = sentinel
 
+        data_methods = load_data_methods()
         st.selectbox("Право предоставления", prov_options, key="pd_prov_in")
         pc1, pc2 = st.columns(2)
         with pc1:
@@ -572,7 +550,7 @@ def render_part_details_manager(session, proj_id_int, items_flat, formats_list, 
             st.selectbox("Срок обновления", options=periods_list, key="pd_upd_in")
             st.number_input("Срок данных (дн.)", min_value=0, key="pd_data_d")
             st.selectbox("Способ (данные)",
-                         ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель", "Не передаются"],
+                         options_with_current(data_methods, st.session_state.get("pd_data_m")),
                          key="pd_data_m")
 
         if st.button("💾 Сохранить параметры части", type="primary", width='stretch', key="pd_save_btn"):
@@ -619,6 +597,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
     # Справочники форматов и сроков обновления (те же, что в справочнике видов сведений)
     formats_list = query_db("SELECT format_name FROM ref_file_formats ORDER BY format_name")["format_name"].tolist()
     periods_list = query_db("SELECT period_name FROM ref_update_periods ORDER BY period_name")["period_name"].tolist()
+    data_methods = load_data_methods()
 
     # 2a. Плоский состав: строка на вид сведений. Используется для выпадающих
     # списков редактирования и проверки дублей - там разворот по частям только
@@ -741,7 +720,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                     st.session_state["c_meta_d"] = 10
                     st.session_state["c_meta_m"] = "Электронный кабинет"
                     st.session_state["c_data_d"] = 0
-                    st.session_state["c_data_m"] = "Сервис (WMS/WFS)"
+                    st.session_state["c_data_m"] = data_methods[0]
                     st.session_state["c_fmt_in"] = []
                     st.session_state["c_upd_in"] = "(из справочника)"
 
@@ -783,7 +762,7 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                             ["Электронный кабинет", "Передача XML", "API", "Другой"], 
                             key="c_meta_m")
             with csla2:
-                is_not_transmitted = (st.session_state.get("c_data_m") == "Не передаются")
+                is_not_transmitted = (st.session_state.get("c_data_m") == DATA_METHOD_NOT_TRANSMITTED)
                 if is_not_transmitted:
                     st.session_state["c_data_d"] = 0
                 
@@ -798,8 +777,8 @@ def render_composition_subtab(session, proj_id_int, is_readonly, proj_data):
                 if is_not_transmitted:
                     st.caption("🚫 **Срок не требуется:** выбран режим без передачи данных")
                     
-                st.selectbox("Способ (данные)", 
-                            ["Сервис (WMS/WFS)", "Ссылка на облако", "Прямая загрузка", "Носитель", "Не передаются"], 
+                st.selectbox("Способ (данные)",
+                            options_with_current(data_methods, st.session_state.get("c_data_m")),
                             key="c_data_m")
 
             c_btn, c_del = st.columns([3, 1])

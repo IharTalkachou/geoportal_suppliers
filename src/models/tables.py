@@ -488,6 +488,17 @@ class RefFileFormat(Base):
     format_id = Column(Integer, primary_key=True, autoincrement=True)
     format_name = Column(String(50), unique=True)
 
+class RefDataMethod(Base):
+    __tablename__ = 'ref_data_methods'
+    __table_args__ = (
+        UniqueConstraint('method_name', name='unique_data_method_name'),
+        {'comment': 'Справочник способов передачи данных (Способ (данные) в составе проекта)'},
+    )
+
+    method_id = Column(Integer, primary_key=True, autoincrement=True, comment='Идентификатор способа')
+    method_name = Column(String(50), nullable=False, comment='Способ передачи данных, например «Сервис (WMS/WFS)»')
+    sort_order = Column(Integer, nullable=False, server_default=text("0"), comment='Порядок в выпадающем списке')
+
 class RefUpdatePeriod(Base):
     __tablename__ = 'ref_update_periods'
 

@@ -20,6 +20,7 @@ from config.settings_handler import load_settings
 from ui.analytics.data_provider import get_analytics_snapshot
 from ui.shared_components import render_survey_viewer
 from ui.analytics.report_docx import render_monthly_report_tab
+from utils.tech_flags import TechFlagIndex
 
 def render_reports_tab():
     st.subheader("📋 Формирование регламентных отчётов")
@@ -1325,10 +1326,11 @@ def _build_accounts_registry_docx(today_str, total_accounts, z_org_accounts, a_l
 # это обычный случай; охват заполняется только когда виды сведений одного набора
 # разнесены по разным протоколам (напр. УИВП Минобороны).
 #
-# "Данные/Метаданные получены" = этапы DATA_WAIT/META_WAIT ("Размещение наборов" /
-# "Размещение метаданных Поставщиком", см. комментарий в technology_tab.py) выполнены -
-# т.е. поставщик передал материал. "...опубликованы" = финальные DATA_PUB/META_PUB.
-# Эти флаги берутся ПО НАБОРУ (через affected_item_ids), а не по проекту целиком.
+# "Данные получены" = выполнен DATA_TRANSFER ("Передача данных Оператору"),
+# "Метаданные получены" = META_WAIT ("Размещение метаданных Поставщиком"),
+# "...опубликованы" = финальные DATA_PUB/META_PUB. Эти флаги берутся ПО НАБОРУ
+# (через affected_item_ids), а не по проекту целиком; расчёт общий с карточкой
+# проекта - utils/tech_flags.py.
 #
 # Строка отчёта = вид сведений ПОСТАВЩИКА, а не проекта: один и тот же вид может
 # быть заведён в нескольких его проектах (соглашение + протокол). Такие строки
@@ -1422,36 +1424,8 @@ def _fetch_summary_rows():
     proto_parts = {(int(r['item_id']), int(r['part_id']))
                    for _, r in proto_cov[proto_cov['part_id'].notna()].iterrows()}
 
-    # Технологические флаги ПО НАБОРУ: разворачиваем affected_item_ids
-    # (массив объектов {item_id, part_id}).
-    # DISTINCT обязателен - один этап на N наборов даёт N строк.
-    tech_df = query_db("""
-        SELECT DISTINCT (aff ->> 'item_id')::int AS item_id,
-               (aff ->> 'part_id')::int AS part_id,
-               stg.stage_code
-        FROM project_stages ps
-        CROSS JOIN LATERAL jsonb_array_elements(ps.affected_item_ids) AS aff
-        JOIN stages stg ON ps.stage_id = stg.stage_id
-        JOIN ref_micro_statuses ms ON ps.micro_status = ms.micro_status_id
-        WHERE stg.stage_code IN ('DATA_WAIT', 'DATA_PUB', 'META_WAIT', 'META_PUB')
-          AND ms.micro_status_name = 'Выполнено'
-    """)
-    # Этап с part_id = NULL закрывает вид сведений целиком (все его части),
-    # этап с конкретной частью - только её
-    tech_whole = set()
-    tech_by_part = set()
-    if not tech_df.empty:
-        for _, t in tech_df.iterrows():
-            key_item = (int(t['item_id']), t['stage_code'])
-            if pd.isna(t['part_id']):
-                tech_whole.add(key_item)
-            else:
-                tech_by_part.add((int(t['item_id']), int(t['part_id']), t['stage_code']))
-
-    def tech_done(item_id, part_id, code):
-        if (item_id, code) in tech_whole:
-            return True
-        return part_id is not None and (item_id, part_id, code) in tech_by_part
+    # Технологические флаги ПО НАБОРУ - общий расчёт с карточкой проекта
+    tech_index = TechFlagIndex()
 
     # Примечание: открытые этапы с комментарием, "Дата — Этап — Комментарий"
     notes_df = query_db("""
@@ -1533,10 +1507,8 @@ def _fetch_summary_rows():
                 'stage_notes': {},
             }
         row['protocol_signed'] |= protocol_ok
-        row['data_received'] |= tech_done(item_id, part_id, 'DATA_WAIT')
-        row['data_published'] |= tech_done(item_id, part_id, 'DATA_PUB')
-        row['meta_received'] |= tech_done(item_id, part_id, 'META_WAIT')
-        row['meta_published'] |= tech_done(item_id, part_id, 'META_PUB')
+        for flag, value in tech_index.flags(item_id, part_id).items():
+            row[flag] |= value
 
         project_note = str(r['project_notes']).strip() if pd.notna(r['project_notes']) else ""
         if project_note and project_note not in row['project_notes']:

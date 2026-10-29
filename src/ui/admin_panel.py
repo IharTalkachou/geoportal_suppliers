@@ -5,14 +5,15 @@ from config.cache import query_db, clear_cache
 from config.auth import hash_password, ROLE_NAMES, require_role, log_action
 from config.settings_handler import load_settings, save_settings
 from datetime import datetime, timedelta
+from utils.ref_lists import DATA_METHOD_NOT_TRANSMITTED
 
 def render_admin_panel(session):
     require_role("admin")
     st.header("⚙️ Панель администратора")
 
-    # Четыре основных раздела управления
-    tab_users, tab_audit, tab_settings, tab_lifecycle = st.tabs([
-        "👥 Пользователи", "📜 Журнал действий", "⚙️ Настройки", "🚀 Жизненный цикл"
+    # Основные разделы управления
+    tab_users, tab_audit, tab_settings, tab_refs, tab_lifecycle = st.tabs([
+        "👥 Пользователи", "📜 Журнал действий", "⚙️ Настройки", "📚 Справочники", "🚀 Жизненный цикл"
     ])
 
     with tab_users:
@@ -23,6 +24,9 @@ def render_admin_panel(session):
 
     with tab_settings:
         _render_system_settings(session)
+
+    with tab_refs:
+        _render_reference_lists(session)
 
     with tab_lifecycle:
         _render_lifecycle_management(session)
@@ -244,7 +248,197 @@ def _render_system_settings(session):
             session.rollback()
 
 # ==========================================
-# 4. ЖИЗНЕННЫЙ ЦИКЛ (CRUD ЭТАПОВ)
+# 4. СПРАВОЧНИКИ
+# ==========================================
+# Значения справочников хранятся в записях ТЕКСТОМ, а не ссылкой на id:
+# форматы - списком через ", " (info_types / project_items /
+# project_item_part_details.format), способ - строкой (data_method).
+# Поэтому переименование переписывает значение во всех записях, а удаление
+# используемого значения запрещено - иначе формы молча теряли бы его при
+# следующем сохранении (форматы вне справочника отфильтровываются при префилле).
+
+# Таблицы, где значение формата хранится списком через запятую
+_FORMAT_COLUMNS = ("info_types", "project_items", "project_item_part_details")
+# Таблицы, где хранится способ передачи данных
+_DATA_METHOD_TABLES = ("project_items", "project_item_part_details")
+
+
+def _format_in_list_sql(table):
+    return (f"EXISTS (SELECT 1 FROM unnest(string_to_array({table}.format, ',')) AS x "
+            f"WHERE btrim(x) = :old)")
+
+
+def _count_format_usage(name):
+    return int(sum(query_db(f"SELECT count(*) AS n FROM {t} WHERE {_format_in_list_sql(t)}",
+                            {"old": name})["n"].iloc[0]
+                   for t in _FORMAT_COLUMNS))
+
+
+def _rename_format(session, old, new):
+    session.execute(text("UPDATE ref_file_formats SET format_name = :new WHERE format_name = :old"),
+                    {"old": old, "new": new})
+    for t in _FORMAT_COLUMNS:
+        # Порядок форматов в списке сохраняется (WITH ORDINALITY)
+        session.execute(text(f"""
+            UPDATE {t} SET format = (
+                SELECT string_agg(CASE WHEN btrim(x) = :old THEN :new ELSE btrim(x) END,
+                                  ', ' ORDER BY ord)
+                FROM unnest(string_to_array({t}.format, ',')) WITH ORDINALITY AS u(x, ord)
+            )
+            WHERE {_format_in_list_sql(t)}
+        """), {"old": old, "new": new})
+
+
+def _count_method_usage(name):
+    return int(sum(query_db(f"SELECT count(*) AS n FROM {t} WHERE data_method = :old",
+                            {"old": name})["n"].iloc[0]
+                   for t in _DATA_METHOD_TABLES))
+
+
+def _rename_method(session, old, new):
+    session.execute(text("UPDATE ref_data_methods SET method_name = :new WHERE method_name = :old"),
+                    {"old": old, "new": new})
+    for t in _DATA_METHOD_TABLES:
+        session.execute(text(f"UPDATE {t} SET data_method = :new WHERE data_method = :old"),
+                        {"old": old, "new": new})
+
+
+def _render_reference_lists(session):
+    st.subheader("📚 Справочники")
+    st.caption("Переименование меняет значение во всех записях, где оно уже выбрано. "
+               "Используемое значение удалить нельзя.")
+
+    col_fmt, col_meth = st.columns(2)
+    with col_fmt:
+        formats_df = query_db("SELECT format_id AS id, format_name AS name "
+                              "FROM ref_file_formats ORDER BY format_name")
+        _render_ref_editor(
+            session, prefix="adm_fmt", title="🗂 Допустимые форматы",
+            hint="Вид сведений (справочник), состав проекта, параметры по частям",
+            df=formats_df, table="ref_file_formats", id_col="format_id", name_col="format_name",
+            count_usage=_count_format_usage, rename=_rename_format)
+    with col_meth:
+        try:
+            methods_df = query_db("SELECT method_id AS id, method_name AS name, sort_order "
+                                  "FROM ref_data_methods ORDER BY sort_order, method_id")
+        except Exception as e:
+            st.error(f"Справочник способов недоступен (миграция не применена?): {e}")
+            return
+        _render_ref_editor(
+            session, prefix="adm_dm", title="🚚 Способ (данные)",
+            hint="Состав проекта, параметры по частям",
+            df=methods_df, table="ref_data_methods", id_col="method_id", name_col="method_name",
+            count_usage=_count_method_usage, rename=_rename_method,
+            ordered=True,
+            # Форма состава блокирует для него срок данных - имя зашито в код
+            protected={DATA_METHOD_NOT_TRANSMITTED: "на это значение завязана форма состава "
+                                                    "(срок данных не указывается)"})
+
+
+def _render_ref_editor(session, prefix, title, hint, df, table, id_col, name_col,
+                       count_usage, rename, ordered=False, protected=None):
+    protected = protected or {}
+    st.markdown(f"##### {title}")
+    st.caption(f"Где используется: {hint}")
+
+    if st.session_state.pop(f"{prefix}_reset", False):
+        for k in (f"{prefix}_sel", f"{prefix}_name", f"{prefix}_sel_prev"):
+            st.session_state.pop(k, None)
+
+    disp = df.copy()
+    disp["used"] = [count_usage(n) for n in disp["name"]]
+    st.dataframe(disp[["name", "used"]], hide_index=True, width="stretch",
+                 column_config={"name": "Значение", "used": "Записей"})
+
+    new_label = "(Новое значение)"
+    sel = st.selectbox("Значение:", [new_label] + disp["name"].tolist(), key=f"{prefix}_sel")
+    is_editing = sel != new_label
+    if st.session_state.get(f"{prefix}_sel_prev") != sel:
+        st.session_state[f"{prefix}_name"] = sel if is_editing else ""
+        st.session_state[f"{prefix}_sel_prev"] = sel
+
+    lock_reason = protected.get(sel) if is_editing else None
+    st.text_input("Название", key=f"{prefix}_name", max_chars=50, disabled=bool(lock_reason))
+    if lock_reason:
+        st.caption(f"🔒 Нельзя переименовать или удалить: {lock_reason}.")
+
+    user_id = st.session_state["auth"]["user_id"]
+    used = int(disp.loc[disp["name"] == sel, "used"].iloc[0]) if is_editing else 0
+
+    def _done():
+        session.commit(); clear_cache()
+        st.session_state[f"{prefix}_reset"] = True
+        st.rerun()
+
+    # Раскладка кнопок: у упорядоченного справочника есть ещё ⬆ / ⬇
+    if ordered:
+        c_save, c_up, c_down, c_del = st.columns([3, 1, 1, 2])
+    else:
+        c_save, c_del = st.columns([3, 2])
+
+    with c_save:
+        if st.button("💾 Сохранить", type="primary", key=f"{prefix}_save",
+                     disabled=bool(lock_reason), width="stretch"):
+            new_name = st.session_state[f"{prefix}_name"].strip()
+            if not new_name:
+                st.error("❌ Название не может быть пустым"); st.stop()
+            if is_editing and new_name == sel:
+                st.info("Изменений нет."); st.stop()
+            if new_name in disp["name"].tolist():
+                st.error(f"❌ «{new_name}» уже есть в справочнике"); st.stop()
+            if "," in new_name and table == "ref_file_formats":
+                # Форматы хранятся в записях списком через запятую
+                st.error("❌ Название формата не может содержать запятую"); st.stop()
+            try:
+                if is_editing:
+                    rename(session, sel, new_name)
+                    log_action(user_id, "UPDATE_REF", table, None, old={name_col: sel},
+                               new={name_col: new_name, "records_updated": used})
+                else:
+                    if ordered:
+                        session.execute(text(f"""
+                            INSERT INTO {table} ({name_col}, sort_order)
+                            SELECT :n, COALESCE(MAX(sort_order), 0) + 1 FROM {table}
+                        """), {"n": new_name})
+                    else:
+                        session.execute(text(f"INSERT INTO {table} ({name_col}) VALUES (:n)"),
+                                        {"n": new_name})
+                    log_action(user_id, "CREATE_REF", table, None, new={name_col: new_name})
+                _done()
+            except Exception as e:
+                session.rollback(); st.error(f"❌ Ошибка БД: {e}")
+
+    if ordered and is_editing:
+        pos = disp.index[disp["name"] == sel][0]
+        for col, step, icon in ((c_up, -1, "⬆"), (c_down, 1, "⬇")):
+            other = pos + step
+            with col:
+                if st.button(icon, key=f"{prefix}_mv{step}", width="stretch",
+                             disabled=not (0 <= other < len(disp))):
+                    # Порядок пересчитывается целиком: исходные sort_order могли совпадать
+                    order = disp["id"].tolist()
+                    order[pos], order[other] = order[other], order[pos]
+                    try:
+                        for n, rid in enumerate(order, 1):
+                            session.execute(text(f"UPDATE {table} SET sort_order = :n WHERE {id_col} = :id"),
+                                            {"n": n, "id": int(rid)})
+                        session.commit(); clear_cache(); st.rerun()
+                    except Exception as e:
+                        session.rollback(); st.error(f"❌ Ошибка БД: {e}")
+
+    with c_del:
+        if is_editing and st.button("🗑 Удалить", key=f"{prefix}_del", width="stretch",
+                                    disabled=bool(lock_reason) or used > 0,
+                                    help=f"Используется в записях: {used}" if used else None):
+            try:
+                session.execute(text(f"DELETE FROM {table} WHERE {name_col} = :n"), {"n": sel})
+                log_action(user_id, "DELETE_REF", table, None, old={name_col: sel})
+                _done()
+            except Exception as e:
+                session.rollback(); st.error(f"❌ Ошибка БД: {e}")
+
+# ==========================================
+# 5. ЖИЗНЕННЫЙ ЦИКЛ (CRUD ЭТАПОВ)
 # ==========================================
 def _render_lifecycle_management(session):
     st.subheader("🚀 Конструктор бизнес-процессов")
